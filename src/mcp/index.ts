@@ -60,6 +60,9 @@ const ALL_LEAN_TOOLS = [
   { name: "scan_secrets", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, fix: { type: "boolean" } } } },
   { name: "search_tools", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
   { name: "describe_tools", inputSchema: { type: "object", properties: { names: { type: "array", items: { type: "string" } } } } },
+  { name: "register_agent", description: "Register agent session.", inputSchema: { type: "object", properties: { name: { type: "string" }, session_id: { type: "string" } }, required: ["name"] } },
+  { name: "heartbeat", description: "Update last_seen_at.", inputSchema: { type: "object", properties: { agent_id: { type: "string" } }, required: ["agent_id"] } },
+  { name: "set_focus", description: "Set active project context.", inputSchema: { type: "object", properties: { agent_id: { type: "string" }, project_id: { type: "string" } }, required: ["agent_id"] } },
 ];
 
 function ok(data: unknown) {
@@ -68,6 +71,8 @@ function ok(data: unknown) {
 function err(msg: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }], isError: true };
 }
+
+const _cfgAgents = new Map<string, { id: string; name: string; last_seen_at: string }>();
 
 const server = new Server(
   { name: "configs", version: require("../../package.json").version },
@@ -250,6 +255,27 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         return ok(TOOL_DOCS);
       }
+      case "register_agent": {
+        const n = String(args["name"] ?? "");
+        const existing = [..._cfgAgents.values()].find(x => x.name === n);
+        if (existing) { existing.last_seen_at = new Date().toISOString(); return ok(existing); }
+        const id = Math.random().toString(36).slice(2, 10);
+        const ag = { id, name: n, last_seen_at: new Date().toISOString() };
+        _cfgAgents.set(id, ag);
+        return ok(ag);
+      }
+      case "heartbeat": {
+        const ag = _cfgAgents.get(String(args["agent_id"] ?? ""));
+        if (!ag) return err(`Agent not found: ${args["agent_id"]}`);
+        ag.last_seen_at = new Date().toISOString();
+        return ok({ agent_id: ag.id, name: ag.name, last_seen_at: ag.last_seen_at });
+      }
+      case "set_focus": {
+        const ag = _cfgAgents.get(String(args["agent_id"] ?? ""));
+        if (!ag) return err(`Agent not found: ${args["agent_id"]}`);
+        (ag as Record<string, unknown>)["project_id"] = args["project_id"];
+        return ok({ agent_id: ag.id, project_id: args["project_id"] ?? null });
+      }
       default:
         return err(`Unknown tool: ${name}`);
     }
@@ -269,45 +295,6 @@ if (process.argv.includes("--claude")) {
 }
 
 
-const _agentReg = new Map<string, { id: string; name: string; last_seen_at: string }>();
-
-server.tool(
-  "register_agent",
-  "Register this agent session. Returns agent_id for use in heartbeat/set_focus.",
-  { name: z.string(), session_id: z.string().optional() },
-  async (a: { name: string; session_id?: string }) => {
-    const existing = [..._agentReg.values()].find(x => x.name === a.name);
-    if (existing) { existing.last_seen_at = new Date().toISOString(); return { content: [{ type: "text" as const, text: JSON.stringify(existing) }] }; }
-    const id = Math.random().toString(36).slice(2, 10);
-    const ag = { id, name: a.name, last_seen_at: new Date().toISOString() };
-    _agentReg.set(id, ag);
-    return { content: [{ type: "text" as const, text: JSON.stringify(ag) }] };
-  }
-);
-
-server.tool(
-  "heartbeat",
-  "Update last_seen_at to signal agent is active.",
-  { agent_id: z.string() },
-  async (a: { agent_id: string }) => {
-    const ag = _agentReg.get(a.agent_id);
-    if (!ag) return { content: [{ type: "text" as const, text: `Agent not found: ${a.agent_id}` }], isError: true };
-    ag.last_seen_at = new Date().toISOString();
-    return { content: [{ type: "text" as const, text: `♥ ${ag.name} — active` }] };
-  }
-);
-
-server.tool(
-  "set_focus",
-  "Set active project context for this agent session.",
-  { agent_id: z.string(), project_id: z.string().optional() },
-  async (a: { agent_id: string; project_id?: string }) => {
-    const ag = _agentReg.get(a.agent_id);
-    if (!ag) return { content: [{ type: "text" as const, text: `Agent not found: ${a.agent_id}` }], isError: true };
-    (ag as any).project_id = a.project_id;
-    return { content: [{ type: "text" as const, text: a.project_id ? `Focus: ${a.project_id}` : "Focus cleared" }] };
-  }
-);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
