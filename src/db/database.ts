@@ -1,14 +1,41 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, copyFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 function getDbPath(): string {
+  if (process.env["HASNA_CONFIGS_DB_PATH"]) {
+    return process.env["HASNA_CONFIGS_DB_PATH"];
+  }
   if (process.env["CONFIGS_DB_PATH"]) {
-    return process.env["CONFIGS_DB_PATH"];
+    return process.env["CONFIGS_DB_PATH"]; // backward compat
   }
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-  return join(home, ".configs", "configs.db");
+  const newDir = join(home, ".hasna", "configs");
+  const oldDir = join(home, ".configs");
+
+  // Auto-migrate: if old dir exists and new doesn't, copy files over
+  if (existsSync(oldDir) && !existsSync(newDir)) {
+    mkdirSync(newDir, { recursive: true });
+    try {
+      for (const file of readdirSync(oldDir)) {
+        const oldPath = join(oldDir, file);
+        const newPath = join(newDir, file);
+        try {
+          if (statSync(oldPath).isFile()) {
+            copyFileSync(oldPath, newPath);
+          }
+        } catch {
+          // Skip files that can't be copied
+        }
+      }
+    } catch {
+      // If we can't read old directory, continue with new
+    }
+  }
+
+  mkdirSync(newDir, { recursive: true });
+  return join(newDir, "configs.db");
 }
 
 function ensureDir(filePath: string): void {

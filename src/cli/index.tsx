@@ -277,7 +277,7 @@ program
   .command("whoami")
   .description("Show setup summary")
   .action(async () => {
-    const dbPath = process.env["CONFIGS_DB_PATH"] || join(homedir(), ".configs", "configs.db");
+    const dbPath = process.env["CONFIGS_DB_PATH"] || join(homedir(), ".hasna", "configs", "configs.db");
     const stats = getConfigStats();
     console.log(chalk.bold("@hasna/configs") + chalk.dim(" v" + pkg.version));
     console.log(chalk.cyan("DB:") + " " + dbPath);
@@ -610,7 +610,7 @@ program
   .description("First-time setup: sync all known configs, create default profile")
   .option("--force", "delete existing DB and start fresh")
   .action(async (opts) => {
-    const dbPath = join(homedir(), ".configs", "configs.db");
+    const dbPath = join(homedir(), ".hasna", "configs", "configs.db");
     if (opts.force && existsSync(dbPath)) {
       const { rmSync } = await import("node:fs");
       rmSync(dbPath);
@@ -659,7 +659,7 @@ program
   .command("status")
   .description("Health check: total configs, drift from disk, unredacted secrets")
   .action(async () => {
-    const dbPath = join(homedir(), ".configs", "configs.db");
+    const dbPath = join(homedir(), ".hasna", "configs", "configs.db");
     const stats = getConfigStats();
     const { statSync: st } = await import("node:fs");
     const dbSize = existsSync(dbPath) ? st(dbPath).size : 0;
@@ -703,7 +703,7 @@ program
   .description("Export configs to a timestamped backup file")
   .action(async () => {
     const { mkdirSync: mk } = await import("node:fs");
-    const backupDir = join(homedir(), ".configs", "backups");
+    const backupDir = join(homedir(), ".hasna", "configs", "backups");
     mk(backupDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "-").slice(0, 19);
     const outPath = join(backupDir, `configs-${ts}.tar.gz`);

@@ -189,7 +189,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           drifted,
           drifted_configs: driftedSlugs.slice(0, 5),
           missing,
-          db_path: process.env["CONFIGS_DB_PATH"] || "~/.configs/configs.db",
+          db_path: process.env["CONFIGS_DB_PATH"] || "~/.hasna/configs/configs.db",
         });
       }
       case "sync_known": {

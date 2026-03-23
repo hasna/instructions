@@ -34,7 +34,7 @@ app.get("/api/status", (c) => {
     total: stats["total"] || 0,
     by_category: Object.fromEntries(Object.entries(stats).filter(([k]) => k !== "total")),
     templates,
-    db_path: process.env["CONFIGS_DB_PATH"] || "~/.configs/configs.db",
+    db_path: process.env["CONFIGS_DB_PATH"] || "~/.hasna/configs/configs.db",
   });
 });
 
