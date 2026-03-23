@@ -32,7 +32,7 @@
     "dev:serve": "bun run src/server/index.ts",
     "seed": "bun run scripts/seed.ts",
     "prepublishOnly": "bun run build",
-    "postinstall": "mkdir -p $HOME/.hasna/configs 2>/dev/null || true"
+    "postinstall": "mkdir -p $HOME/.hasna/configs $HOME/.hasna/configs/backups 2>/dev/null || true"
   },
   "keywords": [
     "configs",
