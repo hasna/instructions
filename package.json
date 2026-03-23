@@ -1,7 +1,7 @@
 {
   "name": "@hasna/configs",
   "version": "0.2.28",
-  "description": "AI coding agent configuration manager — store, version, apply, and share all your AI coding configs. CLI + MCP + REST API + Dashboard.",
+  "description": "AI coding agent configuration manager \u2014 store, version, apply, and share all your AI coding configs. CLI + MCP + REST API + Dashboard.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -31,7 +31,8 @@
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",
     "seed": "bun run scripts/seed.ts",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "postinstall": "mkdir -p $HOME/.hasna/configs 2>/dev/null || true"
   },
   "keywords": [
     "configs",
