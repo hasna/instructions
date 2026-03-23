@@ -63,6 +63,7 @@ const ALL_LEAN_TOOLS = [
   { name: "register_agent", description: "Register agent session.", inputSchema: { type: "object", properties: { name: { type: "string" }, session_id: { type: "string" } }, required: ["name"] } },
   { name: "heartbeat", description: "Update last_seen_at.", inputSchema: { type: "object", properties: { agent_id: { type: "string" } }, required: ["agent_id"] } },
   { name: "set_focus", description: "Set active project context.", inputSchema: { type: "object", properties: { agent_id: { type: "string" }, project_id: { type: "string" } }, required: ["agent_id"] } },
+  { name: "list_agents", description: "List all registered agents.", inputSchema: { type: "object", properties: {} } },
 ];
 
 function ok(data: unknown) {
@@ -275,6 +276,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (!ag) return err(`Agent not found: ${args["agent_id"]}`);
         (ag as Record<string, unknown>)["project_id"] = args["project_id"];
         return ok({ agent_id: ag.id, project_id: args["project_id"] ?? null });
+      }
+      case "list_agents": {
+        return ok([..._cfgAgents.values()]);
       }
       default:
         return err(`Unknown tool: ${name}`);
