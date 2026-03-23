@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, copyFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { SqliteAdapter, ensureFeedbackTable, migrateDotfile } from "@hasna/cloud";
+import { existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 function getDbPath(): string {
@@ -10,40 +11,11 @@ function getDbPath(): string {
   if (process.env["CONFIGS_DB_PATH"]) {
     return process.env["CONFIGS_DB_PATH"]; // backward compat
   }
+  migrateDotfile("configs");
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-  const newDir = join(home, ".hasna", "configs");
-  const oldDir = join(home, ".configs");
-
-  // Auto-migrate: if old dir exists and new doesn't, copy files over
-  if (existsSync(oldDir) && !existsSync(newDir)) {
-    mkdirSync(newDir, { recursive: true });
-    try {
-      for (const file of readdirSync(oldDir)) {
-        const oldPath = join(oldDir, file);
-        const newPath = join(newDir, file);
-        try {
-          if (statSync(oldPath).isFile()) {
-            copyFileSync(oldPath, newPath);
-          }
-        } catch {
-          // Skip files that can't be copied
-        }
-      }
-    } catch {
-      // If we can't read old directory, continue with new
-    }
-  }
-
-  mkdirSync(newDir, { recursive: true });
-  return join(newDir, "configs.db");
-}
-
-function ensureDir(filePath: string): void {
-  if (filePath === ":memory:" || filePath.startsWith("file::memory:")) return;
-  const dir = dirname(resolve(filePath));
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
+  const dir = join(home, ".hasna", "configs");
+  mkdirSync(dir, { recursive: true });
+  return join(dir, "configs.db");
 }
 
 export function uuid(): string {
@@ -123,21 +95,22 @@ const MIGRATIONS = [
 ];
 
 let _db: Database | null = null;
+let _adapter: SqliteAdapter | null = null;
 
 export function getDatabase(path?: string): Database {
   if (_db) return _db;
   const dbPath = path || getDbPath();
-  ensureDir(dbPath);
-  const db = new Database(dbPath);
-  db.run("PRAGMA journal_mode = WAL");
-  db.run("PRAGMA foreign_keys = ON");
+  _adapter = new SqliteAdapter(dbPath);
+  const db = _adapter.raw;
   applyMigrations(db);
+  ensureFeedbackTable(_adapter);
   _db = db;
   return db;
 }
 
 export function resetDatabase(): void {
   _db = null;
+  _adapter = null;
 }
 
 function applyMigrations(db: Database): void {

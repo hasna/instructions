@@ -64,6 +64,7 @@ const ALL_LEAN_TOOLS = [
   { name: "heartbeat", description: "Update last_seen_at.", inputSchema: { type: "object", properties: { agent_id: { type: "string" } }, required: ["agent_id"] } },
   { name: "set_focus", description: "Set active project context.", inputSchema: { type: "object", properties: { agent_id: { type: "string" }, project_id: { type: "string" } }, required: ["agent_id"] } },
   { name: "list_agents", description: "List all registered agents.", inputSchema: { type: "object", properties: {} } },
+  { name: "send_feedback", description: "Send feedback about this service", inputSchema: { type: "object", properties: { message: { type: "string" }, email: { type: "string" }, category: { type: "string", enum: ["bug", "feature", "general"] } }, required: ["message"] } },
 ];
 
 function ok(data: unknown) {
@@ -279,6 +280,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "list_agents": {
         return ok([..._cfgAgents.values()]);
+      }
+      case "send_feedback": {
+        const { getDatabase } = await import("../db/database.js");
+        const db = getDatabase();
+        const pkg = require("../../package.json");
+        db.run(
+          "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
+          [args["message"] as string, (args["email"] as string) || null, (args["category"] as string) || "general", pkg.version]
+        );
+        return ok({ message: "Feedback saved. Thank you!" });
       }
       default:
         return err(`Unknown tool: ${name}`);
