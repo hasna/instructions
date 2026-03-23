@@ -16,6 +16,9 @@ export { registerMachine, updateMachineApplied, listMachines, currentHostname, c
 // DB — database utilities
 export { getDatabase, resetDatabase, uuid, now, slugify } from "./db/database.js";
 
+// DB — PostgreSQL migrations
+export { PG_MIGRATIONS } from "./db/pg-migrations.js";
+
 // Lib — apply
 export { applyConfig, applyConfigs, expandPath } from "./lib/apply.js";
 export type { ApplyOptions } from "./lib/apply.js";
