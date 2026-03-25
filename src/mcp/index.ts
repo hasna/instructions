@@ -3,6 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { registerCloudTools } from "@hasna/cloud";
 import { createConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
 import { applyConfig } from "../lib/apply.js";
 import { syncFromDir, syncToDir } from "../lib/sync.js";
@@ -312,4 +313,5 @@ if (process.argv.includes("--claude")) {
 
 
 const transport = new StdioServerTransport();
+registerCloudTools(server, "configs");
 await server.connect(transport);
