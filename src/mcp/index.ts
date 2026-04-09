@@ -6,10 +6,11 @@ import { z } from "zod";
 import { registerCloudTools } from "@hasna/cloud";
 import { createConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
 import { applyConfig } from "../lib/apply.js";
-import { syncFromDir, syncToDir } from "../lib/sync.js";
-import { listProfiles, getProfileConfigs } from "../db/profiles.js";
+import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
+import { getProfile, listProfiles, getProfileConfigs, resolveProfileForMachine } from "../db/profiles.js";
 import { applyConfigs } from "../lib/apply.js";
 import { listSnapshots, getSnapshotByVersion } from "../db/snapshots.js";
+import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind } from "../types/index.js";
 
 // ── Tool descriptions (full, for describe_tools) ─────────────────────────────
@@ -21,7 +22,7 @@ const TOOL_DOCS: Record<string, string> = {
   apply_config: "Apply a config to its target_path on disk. Params: id_or_slug, dry_run?. Returns apply result.",
   sync_directory: "Sync a directory with the DB. Params: dir, direction ('from_disk'|'to_disk'). Returns sync result.",
   list_profiles: "List all profiles. Returns array of profile objects.",
-  apply_profile: "Apply all configs in a profile to disk. Params: id_or_slug, dry_run?. Returns array of apply results.",
+  apply_profile: "Apply all configs in a profile to disk. Params: id_or_slug? or auto=true, dry_run?, hostname?, os?, arch?. Returns matched profile, machine context, and apply results.",
   get_snapshot: "Get snapshot(s) for a config. Params: config_id_or_slug, version?. Returns latest snapshot or specific version.",
   get_status: "Single-call orientation. Returns: total configs, counts by category, templates, DB path.",
   render_template: "Render a template config with variable substitution. Params: id_or_slug, vars? (object of KEY:VALUE), use_env? (fill from env vars). Returns rendered content.",
@@ -52,7 +53,7 @@ const ALL_LEAN_TOOLS = [
   { name: "apply_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, dry_run: { type: "boolean" } }, required: ["id_or_slug"] } },
   { name: "sync_directory", inputSchema: { type: "object", properties: { dir: { type: "string" }, direction: { type: "string" } }, required: ["dir"] } },
   { name: "list_profiles", inputSchema: { type: "object", properties: {} } },
-  { name: "apply_profile", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, dry_run: { type: "boolean" } }, required: ["id_or_slug"] } },
+  { name: "apply_profile", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, auto: { type: "boolean" }, dry_run: { type: "boolean" }, hostname: { type: "string" }, os: { type: "string" }, arch: { type: "string" } } } },
   { name: "get_snapshot", inputSchema: { type: "object", properties: { config_id_or_slug: { type: "string" }, version: { type: "number" } }, required: ["config_id_or_slug"] } },
   { name: "get_status", inputSchema: { type: "object", properties: {} } },
   { name: "sync_known", inputSchema: { type: "object", properties: { agent: { type: "string" }, category: { type: "string" } } } },
@@ -154,9 +155,20 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok(listProfiles());
       }
       case "apply_profile": {
-        const configs = getProfileConfigs(args["id_or_slug"] as string);
-        const results = await applyConfigs(configs, { dryRun: args["dry_run"] as boolean });
-        return ok(results);
+        const machine = detectMachineContext({
+          hostname: args["hostname"] as string | undefined,
+          os: args["os"] as string | undefined,
+          arch: args["arch"] as string | undefined,
+        });
+        if (!args["auto"] && !args["id_or_slug"]) return err("id_or_slug is required unless auto=true");
+        const profile = args["auto"]
+          ? resolveProfileForMachine(machine)
+          : getProfile(args["id_or_slug"] as string);
+        if (!profile) return err("No matching machine-aware profile found");
+        const configs = getProfileConfigs(profile.id);
+        const vars = resolveProfileVariables(profile, machine);
+        const results = await applyConfigs(configs, { dryRun: args["dry_run"] as boolean, vars });
+        return ok({ profile, machine, results });
       }
       case "get_snapshot": {
         const config = getConfig(args["config_id_or_slug"] as string);
@@ -313,5 +325,9 @@ if (process.argv.includes("--claude")) {
 
 
 const transport = new StdioServerTransport();
-registerCloudTools(server, "configs");
+try {
+  registerCloudTools(server as any, "configs");
+} catch {
+  // Cloud tool registration still targets the high-level MCP server API.
+}
 await server.connect(transport);

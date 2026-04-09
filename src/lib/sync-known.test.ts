@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig, listConfigs } from "../db/configs";
 import { syncKnown, KNOWN_CONFIGS, syncProject, PROJECT_CONFIG_FILES } from "./sync";
+import { detectMachineContext } from "./machine";
 
 let tmpDir: string;
 
@@ -109,6 +110,24 @@ describe("syncProject", () => {
     const db = getDatabase();
     const result = await syncProject({ db, projectDir: join(tmpDir, "empty") });
     expect(result.added).toBe(0);
+  });
+
+  test("templateizes machine-specific paths while syncing", async () => {
+    const db = getDatabase();
+    const machine = detectMachineContext();
+    const projDir = join(tmpDir, "machine-aware-project");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(
+      join(projDir, "AGENTS.md"),
+      `workspace=${machine.workspace_root}\ncommand=${machine.bun_bin_dir}/configs-mcp\nbun=${machine.bun_path}`
+    );
+    const result = await syncProject({ db, projectDir: projDir });
+    expect(result.added).toBe(1);
+    const configs = listConfigs(undefined, db);
+    expect(configs[0]!.content).toContain("{{WORKSPACE_ROOT}}");
+    expect(configs[0]!.content).toContain("{{BUN_BIN_DIR}}/configs-mcp");
+    expect(configs[0]!.content).toContain("{{BUN_PATH}}");
+    expect(configs[0]!.is_template).toBe(true);
   });
 });
 

@@ -2,12 +2,13 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createConfig, deleteConfig, getConfig, getConfigById, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
-import { createProfile, deleteProfile, getProfile, getProfileConfigs, listProfiles, updateProfile } from "../db/profiles.js";
+import { createProfile, deleteProfile, getProfile, getProfileConfigs, listProfiles, resolveProfileForMachine, updateProfile } from "../db/profiles.js";
 import { listSnapshots, createSnapshot } from "../db/snapshots.js";
 import { listMachines, registerMachine } from "../db/machines.js";
 import { applyConfig, applyConfigs } from "../lib/apply.js";
 import { syncKnown } from "../lib/sync.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
+import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind } from "../types/index.js";
 
 const PORT = Number(process.env["CONFIGS_PORT"] ?? 3457);
@@ -227,7 +228,12 @@ app.get("/api/profiles", (c) => {
 app.post("/api/profiles", async (c) => {
   try {
     const body = await c.req.json();
-    const profile = createProfile({ name: body.name, description: body.description });
+    const profile = createProfile({
+      name: body.name,
+      description: body.description,
+      selectors: body.selectors,
+      variables: body.variables,
+    });
     return c.json(profile, 201);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 422);
@@ -266,9 +272,43 @@ app.delete("/api/profiles/:id", (c) => {
 app.post("/api/profiles/:id/apply", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
-    const configs = getProfileConfigs(c.req.param("id"));
-    const results = await applyConfigs(configs, { dryRun: body.dry_run });
-    return c.json(results);
+    const machine = detectMachineContext({ hostname: body.hostname, os: body.os, arch: body.arch });
+    const profile = getProfile(c.req.param("id"));
+    const configs = getProfileConfigs(profile.id);
+    const results = await applyConfigs(configs, {
+      dryRun: body.dry_run,
+      vars: resolveProfileVariables(profile, machine),
+    });
+    return c.json({ profile, machine, results });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 422);
+  }
+});
+
+app.post("/api/profiles/resolve", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const machine = detectMachineContext({ hostname: body.hostname, os: body.os, arch: body.arch });
+    const profile = resolveProfileForMachine(machine);
+    if (!profile) return c.json({ error: "No matching machine-aware profile found" }, 404);
+    return c.json({ profile, machine, variables: resolveProfileVariables(profile, machine) });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 422);
+  }
+});
+
+app.post("/api/profiles/apply-auto", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const machine = detectMachineContext({ hostname: body.hostname, os: body.os, arch: body.arch });
+    const profile = resolveProfileForMachine(machine);
+    if (!profile) return c.json({ error: "No matching machine-aware profile found" }, 404);
+    const configs = getProfileConfigs(profile.id);
+    const results = await applyConfigs(configs, {
+      dryRun: body.dry_run,
+      vars: resolveProfileVariables(profile, machine),
+    });
+    return c.json({ profile, machine, results });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 422);
   }
@@ -284,7 +324,7 @@ app.get("/api/machines", (c) => {
 app.post("/api/machines", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
-    const machine = registerMachine(body.hostname, body.os);
+    const machine = registerMachine(body.hostname, body.os, body.arch);
     return c.json(machine, 201);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 422);

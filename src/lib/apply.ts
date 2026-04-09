@@ -6,6 +6,8 @@ import { ConfigApplyError } from "../types/index.js";
 import { getDatabase, now } from "../db/database.js";
 import { updateConfig } from "../db/configs.js";
 import { createSnapshot } from "../db/snapshots.js";
+import type { ProfileVariables } from "../types/index.js";
+import { renderMachineAwareContent } from "./machine.js";
 
 export function expandPath(p: string): string {
   if (p.startsWith("~/")) {
@@ -18,6 +20,7 @@ export interface ApplyOptions {
   dryRun?: boolean;
   force?: boolean;
   db?: ReturnType<typeof getDatabase>;
+  vars?: ProfileVariables;
 }
 
 export async function applyConfig(
@@ -30,11 +33,17 @@ export async function applyConfig(
     );
   }
 
-  const path = expandPath(config.target_path);
+  const renderedTargetPath = opts.vars
+    ? renderMachineAwareContent(config.target_path, opts.vars)
+    : config.target_path;
+  const renderedContent = opts.vars
+    ? renderMachineAwareContent(config.content, opts.vars)
+    : config.content;
+  const path = expandPath(renderedTargetPath);
   const previousContent = existsSync(path)
     ? readFileSync(path, "utf-8")
     : null;
-  const changed = previousContent !== config.content;
+  const changed = previousContent !== renderedContent;
 
   if (!opts.dryRun) {
     const dir = dirname(path);
@@ -48,7 +57,7 @@ export async function applyConfig(
       createSnapshot(config.id, previousContent, config.version, db);
     }
 
-    writeFileSync(path, config.content, "utf-8");
+    writeFileSync(path, renderedContent, "utf-8");
 
     // Update synced_at in DB
     const db = opts.db || getDatabase();
@@ -59,7 +68,7 @@ export async function applyConfig(
     config_id: config.id,
     path,
     previous_content: previousContent,
-    new_content: config.content,
+    new_content: renderedContent,
     dry_run: opts.dryRun ?? false,
     changed,
   };

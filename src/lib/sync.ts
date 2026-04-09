@@ -6,6 +6,7 @@ import { getDatabase } from "../db/database.js";
 import { createConfig, listConfigs, updateConfig } from "../db/configs.js";
 import { applyConfig, expandPath } from "./apply.js";
 import { redactContent } from "./redact.js";
+import { detectMachineContext, templateizeMachineContent } from "./machine.js";
 
 // ── Known config map ──────────────────────────────────────────────────────────
 // These are the ONLY files `configs sync` will ingest by default.
@@ -83,6 +84,7 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
   const projectName = absDir.split("/").pop() || "project";
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
   const allConfigs = listConfigs(undefined, d);
+  const machine = detectMachineContext();
 
   // Sync project config files
   for (const pf of PROJECT_CONFIG_FILES) {
@@ -91,7 +93,10 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
     try {
       const rawContent = readFileSync(abs, "utf-8");
       if (rawContent.length > 500_000) { result.skipped.push(pf.file); continue; }
-      const { content, isTemplate } = redactContent(rawContent, pf.format as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
+      const redacted = redactContent(rawContent, pf.format as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
+      const machineAware = templateizeMachineContent(redacted.content, machine);
+      const content = machineAware.content;
+      const isTemplate = redacted.isTemplate || machineAware.changed;
       const name = `${projectName}/${pf.file}`;
       const targetPath = abs.replace(homedir(), "~");
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -116,7 +121,10 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
     for (const f of mdFiles) {
       const abs = join(rulesDir, f);
       const raw = readFileSync(abs, "utf-8");
-      const { content, isTemplate } = redactContent(raw, "markdown");
+      const redacted = redactContent(raw, "markdown");
+      const machineAware = templateizeMachineContent(redacted.content, machine);
+      const content = machineAware.content;
+      const isTemplate = redacted.isTemplate || machineAware.changed;
       const name = `${projectName}/rules/${f}`;
       const targetPath = abs.replace(homedir(), "~");
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -145,6 +153,7 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
   const d = opts.db || getDatabase();
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
   const home = homedir();
+  const machine = detectMachineContext();
 
   let targets = KNOWN_CONFIGS;
   if (opts.agent) targets = targets.filter((k) => k.agent === opts.agent);
@@ -162,7 +171,10 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
         const abs = join(absDir, f);
         const targetPath = abs.replace(home, "~");
         const raw = readFileSync(abs, "utf-8");
-        const { content, isTemplate } = redactContent(raw, "markdown");
+        const redacted = redactContent(raw, "markdown");
+        const machineAware = templateizeMachineContent(redacted.content, machine);
+        const content = machineAware.content;
+        const isTemplate = redacted.isTemplate || machineAware.changed;
         const name = `claude-rules-${f}`;
         const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
         const existing = allConfigs.find((c) => c.target_path === targetPath || c.slug === slug);
@@ -187,7 +199,10 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
       if (rawContent.length > 500_000) { result.skipped.push(known.path + " (too large)"); continue; }
       const fmt = known.format ?? detectFormat(abs);
       // Always redact before storing
-      const { content, isTemplate } = redactContent(rawContent, fmt as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
+      const redacted = redactContent(rawContent, fmt as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
+      const machineAware = templateizeMachineContent(redacted.content, machine);
+      const content = machineAware.content;
+      const isTemplate = redacted.isTemplate || machineAware.changed;
       const targetPath = abs.replace(home, "~");
       const existing = allConfigs.find((c) => c.target_path === targetPath || c.slug === known.name);
 

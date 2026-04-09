@@ -3,15 +3,23 @@ import type {
   Config,
   CreateProfileInput,
   Profile,
+  ProfileSelector,
+  ProfileVariables,
   ProfileRow,
   UpdateProfileInput,
+  MachineContext,
 } from "../types/index.js";
 import { ProfileNotFoundError } from "../types/index.js";
 import { getDatabase, now, slugify, uuid } from "./database.js";
 import { listConfigs } from "./configs.js";
+import { detectMachineContext, normalizeOsFamily } from "../lib/machine.js";
 
 function rowToProfile(row: ProfileRow): Profile {
-  return { ...row };
+  return {
+    ...row,
+    selectors: JSON.parse(row.selectors || "{}") as ProfileSelector,
+    variables: JSON.parse(row.variables || "{}") as ProfileVariables,
+  };
 }
 
 function uniqueProfileSlug(name: string, db: Database, excludeId?: string): string {
@@ -33,8 +41,17 @@ export function createProfile(input: CreateProfileInput, db?: Database): Profile
   const ts = now();
   const slug = uniqueProfileSlug(input.name, d);
   d.run(
-    "INSERT INTO profiles (id, name, slug, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, input.name, slug, input.description ?? null, ts, ts]
+    "INSERT INTO profiles (id, name, slug, description, selectors, variables, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+      id,
+      input.name,
+      slug,
+      input.description ?? null,
+      JSON.stringify(input.selectors ?? {}),
+      JSON.stringify(input.variables ?? {}),
+      ts,
+      ts,
+    ]
   );
   return getProfile(id, d);
 }
@@ -76,6 +93,14 @@ export function updateProfile(
   if (input.description !== undefined) {
     updates.push("description = ?");
     params.push(input.description);
+  }
+  if (input.selectors !== undefined) {
+    updates.push("selectors = ?");
+    params.push(JSON.stringify(input.selectors));
+  }
+  if (input.variables !== undefined) {
+    updates.push("variables = ?");
+    params.push(JSON.stringify(input.variables));
   }
   params.push(existing.id);
   d.run(`UPDATE profiles SET ${updates.join(", ")} WHERE id = ?`, params);
@@ -131,4 +156,48 @@ export function getProfileConfigs(profileIdOrSlug: string, db?: Database): Confi
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.config_id);
   return listConfigs(undefined, d).filter((c) => ids.includes(c.id));
+}
+
+export function profileHasSelectors(profile: Pick<Profile, "selectors">): boolean {
+  const selectors = profile.selectors ?? {};
+  return (selectors.os?.length ?? 0) > 0
+    || (selectors.arch?.length ?? 0) > 0
+    || (selectors.hostnames?.length ?? 0) > 0;
+}
+
+export function profileMatchesMachine(
+  profile: Pick<Profile, "selectors">,
+  machine: Pick<MachineContext, "hostname" | "os" | "arch" | "os_family">
+): boolean {
+  const selectors = profile.selectors ?? {};
+  const osMatches = !selectors.os?.length
+    || selectors.os.some((candidate) => {
+      const value = candidate.trim().toLowerCase();
+      return value === machine.os_family || value === (machine.os ?? "").trim().toLowerCase() || normalizeOsFamily(candidate) === machine.os_family;
+    });
+  const archMatches = !selectors.arch?.length
+    || selectors.arch.some((candidate) => candidate.trim().toLowerCase() === (machine.arch ?? "").trim().toLowerCase());
+  const hostnameMatches = !selectors.hostnames?.length
+    || selectors.hostnames.some((candidate) => candidate.trim().toLowerCase() === machine.hostname.trim().toLowerCase());
+  return osMatches && archMatches && hostnameMatches;
+}
+
+export function resolveProfileForMachine(
+  machine: MachineContext = detectMachineContext(),
+  db?: Database
+): Profile | null {
+  const profiles = listProfiles(db).filter(profileHasSelectors);
+  const matches = profiles
+    .filter((profile) => profileMatchesMachine(profile, machine))
+    .map((profile) => {
+      const selectors = profile.selectors;
+      const score =
+        (selectors.hostnames?.length ? 100 : 0) +
+        (selectors.os?.length ? 10 : 0) +
+        (selectors.arch?.length ? 10 : 0);
+      return { profile, score };
+    })
+    .sort((a, b) => b.score - a.score || a.profile.name.localeCompare(b.profile.name));
+
+  return matches[0]?.profile ?? null;
 }

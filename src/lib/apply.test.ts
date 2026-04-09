@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig } from "../db/configs";
 import { applyConfig } from "./apply";
+import { detectMachineContext, resolveProfileVariables } from "./machine";
 
 let tmpDir: string;
 
@@ -69,5 +70,31 @@ describe("applyConfig", () => {
     const db = getDatabase();
     const c = createConfig({ name: "Ref", category: "workspace", content: "doc", kind: "reference" }, db);
     expect(applyConfig(c, { db })).rejects.toThrow("reference");
+  });
+
+  test("renders machine-aware variables in content and target path", async () => {
+    const db = getDatabase();
+    const machine = detectMachineContext({
+      hostname: "apple01",
+      os: "Darwin",
+      arch: "arm64",
+      home_dir: tmpDir,
+      bun_path: "/opt/homebrew/bin/bun",
+    });
+    const vars = resolveProfileVariables({
+      variables: {
+        WORKSPACE_ROOT: "{{HOME_DIR}}/Workspace",
+      },
+    }, machine);
+    const c = createConfig({
+      name: "Machine Aware",
+      category: "tools",
+      content: "workspace={{WORKSPACE_ROOT}}",
+      target_path: join(tmpDir, "{{HOSTNAME}}.txt"),
+      is_template: true,
+    }, db);
+    const result = await applyConfig(c, { db, vars });
+    expect(result.path).toBe(join(tmpDir, "apple01.txt"));
+    expect(readFileSync(result.path, "utf-8")).toBe(`workspace=${tmpDir}/Workspace`);
   });
 });

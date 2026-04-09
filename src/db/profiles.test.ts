@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { getDatabase, resetDatabase } from "./database";
 import { createConfig } from "./configs";
-import { createProfile, getProfile, listProfiles, updateProfile, deleteProfile, addConfigToProfile, removeConfigFromProfile, getProfileConfigs } from "./profiles";
+import { createProfile, getProfile, listProfiles, updateProfile, deleteProfile, addConfigToProfile, removeConfigFromProfile, getProfileConfigs, resolveProfileForMachine } from "./profiles";
 import type { Database } from "bun:sqlite";
+import { detectMachineContext } from "../lib/machine";
 
 let db: Database;
 
@@ -14,9 +15,15 @@ beforeEach(() => {
 
 describe("profiles", () => {
   test("creates and retrieves a profile", () => {
-    const p = createProfile({ name: "My Setup" }, db);
+    const p = createProfile({
+      name: "My Setup",
+      selectors: { os: ["linux"], arch: ["arm64"] },
+      variables: { WORKSPACE_ROOT: "{{HOME_DIR}}/workspace" },
+    }, db);
     expect(p.name).toBe("My Setup");
     expect(p.slug).toBe("my-setup");
+    expect(p.selectors.os).toEqual(["linux"]);
+    expect(p.variables["WORKSPACE_ROOT"]).toBe("{{HOME_DIR}}/workspace");
   });
 
   test("getProfile by slug", () => {
@@ -36,9 +43,15 @@ describe("profiles", () => {
 
   test("updateProfile changes name and slug", () => {
     const p = createProfile({ name: "Old" }, db);
-    const updated = updateProfile(p.id, { name: "New" }, db);
+    const updated = updateProfile(p.id, {
+      name: "New",
+      selectors: { os: ["macos"], arch: ["arm64"], hostnames: ["apple01"] },
+      variables: { BUN_PATH: "/opt/homebrew/bin/bun" },
+    }, db);
     expect(updated.name).toBe("New");
     expect(updated.slug).toBe("new");
+    expect(updated.selectors.hostnames).toEqual(["apple01"]);
+    expect(updated.variables["BUN_PATH"]).toBe("/opt/homebrew/bin/bun");
   });
 
   test("deleteProfile removes it", () => {
@@ -62,5 +75,27 @@ describe("profiles", () => {
     addConfigToProfile(p.id, c.id, db);
     removeConfigFromProfile(p.id, c.id, db);
     expect(getProfileConfigs(p.id, db).length).toBe(0);
+  });
+
+  test("resolveProfileForMachine picks the most specific selector match", () => {
+    createProfile({
+      name: "linux-arm64",
+      selectors: { os: ["linux"], arch: ["arm64"] },
+      variables: { WORKSPACE_ROOT: "{{HOME_DIR}}/workspace" },
+    }, db);
+    createProfile({
+      name: "macos-arm64",
+      selectors: { os: ["macos"], arch: ["arm64"], hostnames: ["apple01"] },
+      variables: { WORKSPACE_ROOT: "{{HOME_DIR}}/Workspace" },
+    }, db);
+
+    const profile = resolveProfileForMachine(detectMachineContext({
+      hostname: "apple01",
+      os: "Darwin",
+      arch: "arm64",
+      home_dir: "/Users/hasna",
+    }), db);
+
+    expect(profile?.slug).toBe("macos-arm64");
   });
 });

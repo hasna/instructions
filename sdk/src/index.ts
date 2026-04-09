@@ -36,6 +36,8 @@ export interface Profile {
   name: string;
   slug: string;
   description: string | null;
+  selectors: { os?: string[]; arch?: string[]; hostnames?: string[] };
+  variables: Record<string, string>;
   created_at: string;
   updated_at: string;
 }
@@ -44,6 +46,7 @@ export interface Machine {
   id: string;
   hostname: string;
   os: string | null;
+  arch: string | null;
   last_applied_at: string | null;
   created_at: string;
 }
@@ -164,11 +167,16 @@ export class ConfigsClient {
     return this.req<Profile & { configs: Config[] }>("GET", `/api/profiles/${idOrSlug}`);
   }
 
-  async createProfile(name: string, description?: string): Promise<Profile> {
-    return this.req<Profile>("POST", "/api/profiles", { name, description });
+  async createProfile(name: string, description?: string, opts?: { selectors?: Profile["selectors"]; variables?: Profile["variables"] }): Promise<Profile> {
+    return this.req<Profile>("POST", "/api/profiles", {
+      name,
+      description,
+      selectors: opts?.selectors,
+      variables: opts?.variables,
+    });
   }
 
-  async updateProfile(idOrSlug: string, input: { name?: string; description?: string }): Promise<Profile> {
+  async updateProfile(idOrSlug: string, input: { name?: string; description?: string; selectors?: Profile["selectors"]; variables?: Profile["variables"] }): Promise<Profile> {
     return this.req<Profile>("PUT", `/api/profiles/${idOrSlug}`, input);
   }
 
@@ -177,15 +185,29 @@ export class ConfigsClient {
   }
 
   async applyProfile(idOrSlug: string, dryRun = false): Promise<ApplyResult[]> {
-    return this.req<ApplyResult[]>("POST", `/api/profiles/${idOrSlug}/apply`, { dry_run: dryRun });
+    const response = await this.req<{ results: ApplyResult[] }>("POST", `/api/profiles/${idOrSlug}/apply`, { dry_run: dryRun });
+    return response.results;
+  }
+
+  async resolveProfile(opts?: { hostname?: string; os?: string; arch?: string }): Promise<{ profile: Profile; machine: Machine & { os_family: string; home_dir: string; workspace_root: string; bun_bin_dir: string; bun_path: string; path_prefix: string }; variables: Record<string, string> }> {
+    return this.req("POST", "/api/profiles/resolve", opts);
+  }
+
+  async applyAutoProfile(opts?: { dryRun?: boolean; hostname?: string; os?: string; arch?: string }): Promise<{ profile: Profile; machine: Machine & { os_family: string; home_dir: string; workspace_root: string; bun_bin_dir: string; bun_path: string; path_prefix: string }; results: ApplyResult[] }> {
+    return this.req("POST", "/api/profiles/apply-auto", {
+      dry_run: opts?.dryRun,
+      hostname: opts?.hostname,
+      os: opts?.os,
+      arch: opts?.arch,
+    });
   }
 
   async listMachines(): Promise<Machine[]> {
     return this.req<Machine[]>("GET", "/api/machines");
   }
 
-  async registerMachine(hostname?: string, os?: string): Promise<Machine> {
-    return this.req<Machine>("POST", "/api/machines", { hostname, os });
+  async registerMachine(hostname?: string, os?: string, arch?: string): Promise<Machine> {
+    return this.req<Machine>("POST", "/api/machines", { hostname, os, arch });
   }
 
   async getStats(): Promise<Record<string, number>> {

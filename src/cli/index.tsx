@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createConfig, deleteConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
-import { createProfile, deleteProfile, getProfile, getProfileConfigs, listProfiles, updateProfile, addConfigToProfile, removeConfigFromProfile } from "../db/profiles.js";
+import { createProfile, deleteProfile, getProfile, getProfileConfigs, listProfiles, updateProfile, addConfigToProfile, removeConfigFromProfile, resolveProfileForMachine } from "../db/profiles.js";
 import { listSnapshots, getSnapshot } from "../db/snapshots.js";
 import { getDatabase, resetDatabase } from "../db/database.js";
 import { applyConfig, applyConfigs, expandPath } from "../lib/apply.js";
@@ -15,7 +15,9 @@ import { redactContent, scanSecrets } from "../lib/redact.js";
 import { exportConfigs } from "../lib/export.js";
 import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
-import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind } from "../types/index.js";
+import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
+import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
+import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
 
 import { createRequire } from "node:module";
 const pkg = createRequire(import.meta.url)("../../package.json") as { version: string };
@@ -31,6 +33,54 @@ function fmtConfig(c: ReturnType<typeof getConfig>, format: string) {
     c.description ? `  ${chalk.dim(c.description)}` : "",
     c.tags.length > 0 ? `  ${chalk.dim("tags: " + c.tags.join(", "))}` : "",
   ].filter(Boolean).join("\n");
+}
+
+function splitCsv(value?: string): string[] | undefined {
+  if (!value) return undefined;
+  const items = value.split(",").map((item) => item.trim()).filter(Boolean);
+  return items.length > 0 ? items : undefined;
+}
+
+function parseVarArgs(values?: string[]): ProfileVariables | undefined {
+  if (!values || values.length === 0) return undefined;
+  const vars: ProfileVariables = {};
+  for (const entry of values) {
+    const idx = entry.indexOf("=");
+    if (idx <= 0) throw new Error(`Invalid --var "${entry}" (expected KEY=VALUE)`);
+    vars[entry.slice(0, idx)] = entry.slice(idx + 1);
+  }
+  return Object.keys(vars).length > 0 ? vars : undefined;
+}
+
+function parseProfileSelectors(opts: { os?: string; arch?: string; hostname?: string }): ProfileSelector | undefined {
+  const selectors: ProfileSelector = {};
+  const os = splitCsv(opts.os);
+  const arch = splitCsv(opts.arch);
+  const hostnames = splitCsv(opts.hostname);
+  if (os) selectors.os = os;
+  if (arch) selectors.arch = arch;
+  if (hostnames) selectors.hostnames = hostnames;
+  return Object.keys(selectors).length > 0 ? selectors : undefined;
+}
+
+function formatProfileSelectorSummary(profile: Pick<Profile, "selectors">): string {
+  const parts: string[] = [];
+  if (profile.selectors.os?.length) parts.push(`os=${profile.selectors.os.join(",")}`);
+  if (profile.selectors.arch?.length) parts.push(`arch=${profile.selectors.arch.join(",")}`);
+  if (profile.selectors.hostnames?.length) parts.push(`host=${profile.selectors.hostnames.join(",")}`);
+  return parts.join(" ");
+}
+
+function formatProfileVariables(profile: Pick<Profile, "variables">): string {
+  return Object.entries(profile.variables)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+}
+
+function getMachineProfileContext(opts: { hostname?: string; os?: string; arch?: string }) {
+  const machine = detectMachineContext({ hostname: opts.hostname, os: opts.os, arch: opts.arch });
+  const profile = resolveProfileForMachine(machine);
+  return { machine, profile, vars: resolveProfileVariables(profile, machine) };
 }
 
 // ── list ─────────────────────────────────────────────────────────────────────
@@ -309,17 +359,34 @@ profileCmd.command("list").description("List all profiles")
   if (profiles.length === 0) { console.log(chalk.dim("No profiles.")); return; }
   if (fmt === "json") { console.log(JSON.stringify(profiles, null, 2)); return; }
   for (const p of profiles) {
-    if (fmt === "compact") { console.log(`${p.slug} ${getProfileConfigs(p.id).length} configs`); continue; }
+    if (fmt === "compact") {
+      const selectorSummary = formatProfileSelectorSummary(p);
+      console.log(`${p.slug} ${getProfileConfigs(p.id).length} configs${selectorSummary ? ` ${chalk.dim(selectorSummary)}` : ""}`);
+      continue;
+    }
     const configs = getProfileConfigs(p.id);
     console.log(`${chalk.bold(p.name)} ${chalk.dim(`(${p.slug})`)} — ${configs.length} config(s)`);
     if (p.description) console.log(`  ${chalk.dim(p.description)}`);
+    const selectorSummary = formatProfileSelectorSummary(p);
+    if (selectorSummary) console.log(`  ${chalk.dim(`match: ${selectorSummary}`)}`);
+    const varSummary = formatProfileVariables(p);
+    if (varSummary) console.log(`  ${chalk.dim(`vars: ${varSummary}`)}`);
   }
 });
 
 profileCmd.command("create <name>").description("Create a new profile")
   .option("-d, --description <desc>", "profile description")
+  .option("--os <os>", "comma-separated OS matchers (linux, macos, darwin, etc.)")
+  .option("--arch <arch>", "comma-separated CPU arch matchers (arm64, x64, etc.)")
+  .option("--hostname <hosts>", "comma-separated hostname matchers")
+  .option("--var <vars...>", "set profile variable(s) as KEY=VALUE")
   .action(async (name, opts) => {
-    const p = createProfile({ name, description: opts.description });
+    const p = createProfile({
+      name,
+      description: opts.description,
+      selectors: parseProfileSelectors(opts),
+      variables: parseVarArgs(opts.var),
+    });
     console.log(chalk.green("✓") + ` Created profile: ${chalk.bold(p.name)} ${chalk.dim(`(${p.slug})`)}`);
   });
 
@@ -329,6 +396,10 @@ profileCmd.command("show <id>").description("Show profile and its configs").acti
     const configs = getProfileConfigs(id);
     console.log(chalk.bold(p.name) + chalk.dim(` (${p.slug})`));
     if (p.description) console.log(chalk.dim(p.description));
+    const selectorSummary = formatProfileSelectorSummary(p);
+    if (selectorSummary) console.log(chalk.dim(`match: ${selectorSummary}`));
+    const varSummary = formatProfileVariables(p);
+    if (varSummary) console.log(chalk.dim(`vars: ${varSummary}`));
     console.log(chalk.cyan(`${configs.length} config(s):`));
     for (const c of configs) console.log(`  ${c.slug} ${chalk.dim(`[${c.category}]`)}`);
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
@@ -350,20 +421,51 @@ profileCmd.command("remove <profile> <config>").description("Remove a config fro
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });
 
-profileCmd.command("apply <id>").description("Apply all configs in a profile to disk")
+profileCmd.command("apply [id]").description("Apply all configs in a profile to disk")
   .option("--dry-run", "preview without writing")
+  .option("--auto", "resolve the matching profile for the current machine")
+  .option("--hostname <hostname>", "override detected hostname for auto resolution")
+  .option("--os <os>", "override detected OS for auto resolution")
+  .option("--arch <arch>", "override detected arch for auto resolution")
   .action(async (id, opts) => {
     try {
-      const configs = getProfileConfigs(id);
-      const results = await applyConfigs(configs, { dryRun: opts.dryRun });
+      const { machine, profile } = getMachineProfileContext(opts);
+      const selected = opts.auto ? profile : (id ? getProfile(id) : null);
+      if (!selected) {
+        console.error(chalk.red(opts.auto ? "No matching machine-aware profile found." : "Provide a profile id or use --auto."));
+        process.exit(1);
+      }
+      const configs = getProfileConfigs(selected.id);
+      const vars = resolveProfileVariables(selected, machine);
+      const results = await applyConfigs(configs, { dryRun: opts.dryRun, vars });
       let changed = 0;
       for (const r of results) {
         const status = opts.dryRun ? chalk.yellow("[dry-run]") : (r.changed ? chalk.green("✓") : chalk.dim("="));
         console.log(`${status} ${r.path}`);
         if (r.changed) changed++;
       }
-      console.log(chalk.dim(`\n${changed}/${results.length} changed`));
+      console.log(chalk.dim(`\n${changed}/${results.length} changed (${selected.slug} on ${machine.hostname} ${machine.os_family}/${machine.arch})`));
     } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+  });
+
+profileCmd.command("resolve").description("Resolve the matching machine-aware profile")
+  .option("--hostname <hostname>", "override detected hostname")
+  .option("--os <os>", "override detected OS")
+  .option("--arch <arch>", "override detected arch")
+  .action(async (opts) => {
+    const { machine, profile, vars } = getMachineProfileContext(opts);
+    if (!profile) {
+      console.log(chalk.yellow(`No matching profile for ${machine.hostname} ${machine.os_family}/${machine.arch}`));
+      process.exit(1);
+    }
+    console.log(chalk.bold(profile.name) + chalk.dim(` (${profile.slug})`));
+    console.log(chalk.dim(`machine: ${machine.hostname} ${machine.os_family}/${machine.arch}`));
+    const selectorSummary = formatProfileSelectorSummary(profile);
+    if (selectorSummary) console.log(chalk.dim(`match: ${selectorSummary}`));
+    console.log(chalk.cyan("resolved vars:"));
+    for (const [key, value] of Object.entries(vars)) {
+      console.log(`  ${key}=${value}`);
+    }
   });
 
 profileCmd.command("delete <id>").description("Delete a profile").action(async (id) => {
@@ -550,10 +652,12 @@ mcpCmd.command("install")
     }
     for (const target of targets) {
       try {
+        const { vars } = getMachineProfileContext({});
+        const mcpBinary = `${vars["BUN_BIN_DIR"]}/configs-mcp`;
         if (target === "claude") {
           const cmd = opts.profile && opts.profile !== "full"
-            ? ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", "env", `CONFIGS_PROFILE=${opts.profile}`, "configs-mcp"]
-            : ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", "configs-mcp"];
+            ? ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", "env", `CONFIGS_PROFILE=${opts.profile}`, mcpBinary]
+            : ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", mcpBinary];
           const proc = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit" });
           await proc.exited;
           console.log(chalk.green("✓") + " Installed into Claude Code");
@@ -561,7 +665,7 @@ mcpCmd.command("install")
           const { appendFileSync, existsSync: ex } = await import("node:fs");
           const { join: j } = await import("node:path");
           const configPath = j(homedir(), ".codex", "config.toml");
-          const block = `\n[mcp_servers.configs]\ncommand = "configs-mcp"\nargs = []\n`;
+          const block = `\n[mcp_servers.configs]\ncommand = "${mcpBinary}"\nargs = []\n`;
           if (ex(configPath)) {
             const content = readFileSync(configPath, "utf-8");
             if (content.includes("[mcp_servers.configs]")) {
@@ -580,7 +684,7 @@ mcpCmd.command("install")
             try { settings = JSON.parse(rf(configPath, "utf-8")); } catch { /* empty */ }
           }
           const mcpServers = (settings["mcpServers"] ?? {}) as Record<string, unknown>;
-          mcpServers["configs"] = { command: "configs-mcp", args: [] };
+          mcpServers["configs"] = { command: mcpBinary, args: [] };
           settings["mcpServers"] = mcpServers;
           wf(configPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
           console.log(chalk.green("✓") + " Installed into Gemini");
@@ -644,6 +748,9 @@ program
       for (const c of allConfigs) addConfigToProfile(p.id, c.id);
       console.log(chalk.green("✓") + ` Created profile "my-setup" with ${allConfigs.length} configs`);
     }
+
+    const machineProfiles = ensurePlatformProfiles();
+    console.log(chalk.green("✓") + ` Ensured ${machineProfiles.length} machine-aware profile(s)`);
 
     // Show summary
     const stats = getConfigStats();

@@ -129,6 +129,8 @@ export interface Profile {
   name: string;
   slug: string;
   description: string | null;
+  selectors: ProfileSelector;
+  variables: ProfileVariables;
   created_at: string;
   updated_at: string;
 }
@@ -138,18 +140,32 @@ export interface ProfileRow {
   name: string;
   slug: string;
   description: string | null;
+  selectors: string;
+  variables: string;
   created_at: string;
   updated_at: string;
 }
 
+export interface ProfileSelector {
+  os?: string[];
+  arch?: string[];
+  hostnames?: string[];
+}
+
+export type ProfileVariables = Record<string, string>;
+
 export interface CreateProfileInput {
   name: string;
   description?: string;
+  selectors?: ProfileSelector;
+  variables?: ProfileVariables;
 }
 
 export interface UpdateProfileInput {
   name?: string;
   description?: string;
+  selectors?: ProfileSelector;
+  variables?: ProfileVariables;
 }
 
 // Profile ↔ Config join
@@ -164,8 +180,18 @@ export interface Machine {
   id: string;
   hostname: string;
   os: string | null;
+  arch: string | null;
   last_applied_at: string | null;
   created_at: string;
+}
+
+export interface MachineContext extends Machine {
+  os_family: string;
+  home_dir: string;
+  workspace_root: string;
+  bun_bin_dir: string;
+  bun_path: string;
+  path_prefix: string;
 }
 
 // Apply result

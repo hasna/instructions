@@ -92,6 +92,11 @@ const MIGRATIONS = [
 
   INSERT OR IGNORE INTO schema_version (version) VALUES (1);
   `,
+  `
+  ALTER TABLE profiles ADD COLUMN selectors TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE profiles ADD COLUMN variables TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE machines ADD COLUMN arch TEXT;
+  `,
 ];
 
 let _db: Database | null = null;

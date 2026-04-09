@@ -57,4 +57,13 @@ describe("database", () => {
     expect(tables).toContain("machines");
     expect(tables).toContain("schema_version");
   });
+
+  test("migrations add machine/profile platform columns", () => {
+    const db = getDatabase();
+    const profileColumns = db.query<{ name: string }, []>("PRAGMA table_info(profiles)").all().map((row) => row.name);
+    const machineColumns = db.query<{ name: string }, []>("PRAGMA table_info(machines)").all().map((row) => row.name);
+    expect(profileColumns).toContain("selectors");
+    expect(profileColumns).toContain("variables");
+    expect(machineColumns).toContain("arch");
+  });
 });

@@ -7,6 +7,7 @@ import { getDatabase } from "../src/db/database";
 import { getConfigStats } from "../src/db/configs";
 import { syncKnown } from "../src/lib/sync";
 import { createConfig, getConfig } from "../src/db/configs";
+import { ensurePlatformProfiles } from "../src/lib/platform-profiles";
 
 const db = getDatabase();
 
@@ -79,6 +80,9 @@ for (const ref of refs) {
     console.log(`  + ${c.slug} (reference)`);
   }
 }
+
+const machineProfiles = ensurePlatformProfiles(db);
+console.log(`\nMachine-aware profiles: ${machineProfiles.map((profile) => profile.slug).join(", ")}`);
 
 const stats = getConfigStats(db);
 console.log("\n✓ Done. DB stats:");
