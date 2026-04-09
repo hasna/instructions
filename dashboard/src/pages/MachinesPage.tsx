@@ -37,7 +37,9 @@ export default function MachinesPage() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
                 <div style={{ fontWeight: "bold", fontSize: 15 }}>{m.hostname}</div>
-                <div style={{ color: "#8b949e", fontSize: 12, marginTop: 4 }}>{m.os}</div>
+                <div style={{ color: "#8b949e", fontSize: 12, marginTop: 4 }}>
+                  {[m.os, m.arch].filter(Boolean).join(" • ")}
+                </div>
               </div>
               <div style={{ textAlign: "right" }}>
                 <div style={{ color: "#8b949e", fontSize: 12 }}>Last applied</div>

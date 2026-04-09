@@ -26,7 +26,10 @@ export const api = {
     list: () => req<Profile[]>("GET", "/api/profiles"),
     get: (id: string) => req<Profile & { configs: Config[] }>("GET", `/api/profiles/${id}`),
     create: (name: string, description?: string) => req<Profile>("POST", "/api/profiles", { name, description }),
-    apply: (id: string, dryRun = false) => req<ApplyResult[]>("POST", `/api/profiles/${id}/apply`, { dry_run: dryRun }),
+    apply: async (id: string, dryRun = false) => {
+      const response = await req<{ results: ApplyResult[] }>("POST", `/api/profiles/${id}/apply`, { dry_run: dryRun });
+      return response.results;
+    },
     addConfig: (profileId: string, configId: string) => req("POST", `/api/profiles/${profileId}/configs`, { config_id: configId }),
   },
   machines: { list: () => req<Machine[]>("GET", "/api/machines") },
@@ -35,8 +38,8 @@ export const api = {
 };
 
 export interface Config { id: string; name: string; slug: string; kind: string; category: string; agent: string; target_path: string | null; format: string; content: string; description: string | null; tags: string[]; is_template: boolean; version: number; created_at: string; updated_at: string; synced_at: string | null; }
-export interface Profile { id: string; name: string; slug: string; description: string | null; created_at: string; updated_at: string; }
-export interface Machine { id: string; hostname: string; os: string | null; last_applied_at: string | null; created_at: string; }
+export interface Profile { id: string; name: string; slug: string; description: string | null; selectors: { os?: string[]; arch?: string[]; hostnames?: string[] }; variables: Record<string, string>; created_at: string; updated_at: string; }
+export interface Machine { id: string; hostname: string; os: string | null; arch: string | null; last_applied_at: string | null; created_at: string; }
 export interface Snapshot { id: string; config_id: string; content: string; version: number; created_at: string; }
 export interface ApplyResult { config_id: string; path: string; previous_content: string | null; new_content: string; dry_run: boolean; changed: boolean; }
 export interface SyncResult { added: number; updated: number; unchanged: number; skipped: string[]; }

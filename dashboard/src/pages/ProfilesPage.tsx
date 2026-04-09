@@ -62,6 +62,19 @@ export default function ProfilesPage() {
                 <button style={S.btn(true)} onClick={() => apply(selected.id)}>Apply All</button>
               </div>
             </div>
+            {(selected.selectors.os?.length || selected.selectors.arch?.length || selected.selectors.hostnames?.length) && (
+              <div style={{ color: "#8b949e", fontSize: 12, marginBottom: 12 }}>
+                Match:
+                {selected.selectors.os?.length ? ` os=${selected.selectors.os.join(",")}` : ""}
+                {selected.selectors.arch?.length ? ` arch=${selected.selectors.arch.join(",")}` : ""}
+                {selected.selectors.hostnames?.length ? ` host=${selected.selectors.hostnames.join(",")}` : ""}
+              </div>
+            )}
+            {Object.keys(selected.variables).length > 0 && (
+              <div style={{ color: "#8b949e", fontSize: 12, marginBottom: 16 }}>
+                Vars: {Object.entries(selected.variables).map(([key, value]) => `${key}=${value}`).join(", ")}
+              </div>
+            )}
             {selected.configs.length === 0 ? (
               <div style={{ color: "#8b949e" }}>No configs in this profile.</div>
             ) : (
