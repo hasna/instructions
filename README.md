@@ -15,6 +15,8 @@ npm install -g @hasna/configs
 
 ```bash
 configs --help
+configs profile resolve
+configs profile apply --auto
 ```
 
 ## MCP Server
@@ -42,6 +44,15 @@ cloud sync pull --service configs
 ## Data Directory
 
 Data is stored in `~/.hasna/configs/`.
+
+## Machine-aware Profiles
+
+`configs init` now seeds two platform profiles:
+
+- `linux-arm64` for `spark01` / `spark02`
+- `macos-arm64` for `apple01` / `apple03`
+
+These profiles resolve machine variables like `{{WORKSPACE_ROOT}}`, `{{BUN_BIN_DIR}}`, `{{BUN_PATH}}`, and `{{PATH_PREFIX}}`, so synced configs can be portable across Linux and macOS arm64 machines.
 
 ## License
 

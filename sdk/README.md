@@ -36,12 +36,14 @@ await client.applyConfig("claude-claude-md");
 // Profiles
 const profile = await client.createProfile("my-setup");
 await client.applyProfile("my-setup");
+const resolved = await client.resolveProfile();
+await client.applyAutoProfile({ dryRun: true });
 
 // Snapshots
 const snaps = await client.getSnapshots("claude-claude-md");
 ```
 
-## All Methods (21)
+## All Methods (23)
 
 | Method | Description |
 |--------|-------------|
@@ -57,12 +59,14 @@ const snaps = await client.getSnapshots("claude-claude-md");
 | `getStats()` | Counts by category |
 | `listProfiles()` | List all profiles |
 | `getProfile(id)` | Get profile with its configs |
-| `createProfile(name, desc?)` | Create a profile |
+| `createProfile(name, desc?, opts?)` | Create a profile with optional selectors/variables |
 | `updateProfile(id, input)` | Update profile name/description |
 | `deleteProfile(id)` | Delete a profile |
 | `applyProfile(id, dryRun?)` | Apply all configs in a profile to disk |
+| `resolveProfile(opts?)` | Resolve the matching machine-aware profile |
+| `applyAutoProfile(opts?)` | Apply the matching machine-aware profile |
 | `listMachines()` | List machines where configs were applied |
-| `registerMachine(hostname?, os?)` | Register a machine |
+| `registerMachine(hostname?, os?, arch?)` | Register a machine |
 | `createSnapshot(configId)` | Create a version snapshot |
 | `getSnapshots(configId)` | List snapshots for a config |
 | `health()` | Health check |
