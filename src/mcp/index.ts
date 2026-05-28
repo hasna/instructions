@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { buildServer } from "./server.js";
-import { isHttpMode, resolveHttpPort, startMcpHttpServer } from "./http.js";
+import { isStdioMode, resolveHttpPort, startMcpHttpServer } from "./http.js";
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -15,16 +15,17 @@ async function main() {
     process.exit(0);
   }
 
-  if (isHttpMode(argv)) {
-    const port = resolveHttpPort(argv);
-    const { port: boundPort } = await startMcpHttpServer(port);
-    console.error(`configs-mcp HTTP listening on http://127.0.0.1:${boundPort}/mcp`);
+  if (isStdioMode(argv)) {
+    const server = buildServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
     return;
   }
 
-  const server = buildServer();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  // Default: shared Streamable HTTP server (one process per MCP, many agents).
+  const port = resolveHttpPort(argv);
+  const { port: boundPort } = await startMcpHttpServer(port);
+  console.error(`configs-mcp HTTP listening on http://127.0.0.1:${boundPort}/mcp`);
 }
 
 if (import.meta.main) {
