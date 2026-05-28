@@ -10,6 +10,7 @@ import { syncKnown } from "../lib/sync.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind } from "../types/index.js";
+import { mountMcpHttpRoutes } from "../mcp/http.js";
 
 const PORT = Number(process.env["CONFIGS_PORT"] ?? 3457);
 
@@ -331,10 +332,8 @@ app.post("/api/machines", async (c) => {
   }
 });
 
-// ── Health ─────────────────────────────────────────────────────────────────────
-import { createRequire } from "node:module";
-const serverPkg = createRequire(import.meta.url)("../../package.json") as { version: string };
-app.get("/health", (c) => c.json({ ok: true, version: serverPkg.version }));
+// ── MCP Streamable HTTP + health ─────────────────────────────────────────────
+mountMcpHttpRoutes(app);
 
 // ── Dashboard (serve static files from dashboard/dist/) ──────────────────────
 import { existsSync, readFileSync } from "node:fs";

@@ -25,6 +25,15 @@ configs profile apply --auto
 configs-mcp
 ```
 
+## HTTP mode
+
+```bash
+configs-mcp --http               # http://127.0.0.1:8807/mcp
+MCP_HTTP=1 configs-mcp
+```
+
+Health: `GET http://127.0.0.1:8807/health`. MCP is also mounted on `configs-serve` at `/mcp`.
+
 ## REST API
 
 ```bash
