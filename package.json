@@ -1,6 +1,6 @@
 {
   "name": "@hasna/configs",
-  "version": "0.2.33",
+  "version": "0.2.35",
   "description": "AI coding agent configuration manager — store, version, apply, and share all your AI coding configs. CLI + MCP + REST API + Dashboard.",
   "type": "module",
   "main": "dist/index.js",
@@ -65,7 +65,8 @@
   "author": "Andrei Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
-    "@hasna/cloud": "^0.1.24",
+    "@hasna/cloud": "0.1.24",
+    "@hasna/events": "^0.1.6",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",

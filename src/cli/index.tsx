@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { registerEventsCommands } from "@hasna/events/commander";
 import { program } from "commander";
 import chalk from "chalk";
 import { existsSync, readFileSync } from "node:fs";
@@ -1242,4 +1243,5 @@ program
   });
 
 program.version(pkg.version).name("configs");
+registerEventsCommands(program, { source: "configs" });
 program.parse(process.argv);
