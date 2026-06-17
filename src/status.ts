@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import type { Database } from "bun:sqlite";
 import { getDatabase } from "./db/database.js";
 import { getConfigStats, listConfigs } from "./db/configs.js";
@@ -8,8 +7,8 @@ import { listMachines } from "./db/machines.js";
 import { expandPath } from "./lib/apply.js";
 import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
 
-const require = createRequire(import.meta.url);
-const pkg = require("../package.json") as { name: string; version: string };
+const PACKAGE_NAME = "@hasna/configs";
+const PACKAGE_VERSION = "0.2.38";
 
 type ActiveDbEnv = "HASNA_CONFIGS_DB_PATH" | "CONFIGS_DB_PATH" | null;
 type DatabaseKind = "memory" | "file";
@@ -149,8 +148,8 @@ export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusCon
     service: "configs",
     schemaVersion: "1.0",
     package: {
-      name: pkg.name,
-      version: pkg.version,
+      name: PACKAGE_NAME,
+      version: PACKAGE_VERSION,
     },
     env: {
       database: {
