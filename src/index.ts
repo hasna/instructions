@@ -16,6 +16,10 @@ export { registerMachine, updateMachineApplied, listMachines, currentHostname, c
 // DB — database utilities
 export { getDatabase, resetDatabase, uuid, now, slugify } from "./db/database.js";
 
+// Status contract
+export { getConfigsStatus } from "./status.js";
+export type { ConfigsStatusContract } from "./status.js";
+
 // DB — PostgreSQL migrations
 export { PG_MIGRATIONS } from "./db/pg-migrations.js";
 

@@ -1,0 +1,197 @@
+import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import type { Database } from "bun:sqlite";
+import { getDatabase } from "./db/database.js";
+import { getConfigStats, listConfigs } from "./db/configs.js";
+import { listProfiles } from "./db/profiles.js";
+import { listMachines } from "./db/machines.js";
+import { expandPath } from "./lib/apply.js";
+import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { name: string; version: string };
+
+type ActiveDbEnv = "HASNA_CONFIGS_DB_PATH" | "CONFIGS_DB_PATH" | null;
+type DatabaseKind = "memory" | "file";
+type ContractStatus = "ok" | "warn";
+
+export interface ConfigsStatusContract {
+  service: "configs";
+  schemaVersion: "1.0";
+  package: {
+    name: string;
+    version: string;
+  };
+  env: {
+    database: {
+      primary: "HASNA_CONFIGS_DB_PATH";
+      fallback: "CONFIGS_DB_PATH";
+      active: ActiveDbEnv;
+      kind: DatabaseKind;
+    };
+  };
+  counts: {
+    configs: {
+      total: number;
+      file: number;
+      reference: number;
+      templates: number;
+    };
+    byCategory: Record<string, number>;
+    byAgent: Record<string, number>;
+    byFormat: Record<string, number>;
+    profiles: number;
+    profileLinks: number;
+    machines: number;
+    snapshots: number;
+    knownTargets: number;
+  };
+  health: {
+    status: ContractStatus;
+    databaseReachable: boolean;
+    driftedTargets: number;
+    missingTargets: number;
+    unredactedSecretFindings: number;
+    hasDrift: boolean;
+    hasMissingTargets: boolean;
+    hasUnredactedSecrets: boolean;
+  };
+  safety: {
+    includesConfigValues: false;
+    includesPrivatePaths: false;
+    includesHostnames: false;
+    includesSecretValues: false;
+    statusOutputIsMetadataOnly: true;
+  };
+}
+
+function activeDatabaseEnv(): ActiveDbEnv {
+  if (process.env["HASNA_CONFIGS_DB_PATH"]) return "HASNA_CONFIGS_DB_PATH";
+  if (process.env["CONFIGS_DB_PATH"]) return "CONFIGS_DB_PATH";
+  return null;
+}
+
+function configuredDatabaseKind(): DatabaseKind {
+  const value = process.env["HASNA_CONFIGS_DB_PATH"] ?? process.env["CONFIGS_DB_PATH"] ?? "";
+  return value === ":memory:" || value.startsWith("file::memory:") ? "memory" : "file";
+}
+
+function countBy<T>(items: T[], getValue: (item: T) => string | null | undefined): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of items) {
+    const value = getValue(item);
+    if (!value) continue;
+    counts[value] = (counts[value] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function tableCount(db: Database, table: string): number {
+  try {
+    const row = db.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM ${table}`).get();
+    return Number(row?.count ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusContract {
+  let databaseReachable = true;
+  let configs: ReturnType<typeof listConfigs> = [];
+  let categoryStats: Record<string, number> = { total: 0 };
+
+  try {
+    configs = listConfigs(undefined, db);
+    categoryStats = getConfigStats(db);
+  } catch {
+    databaseReachable = false;
+  }
+
+  const fileConfigs = configs.filter((config) => config.kind === "file");
+  let driftedTargets = 0;
+  let missingTargets = 0;
+  let unredactedSecretFindings = 0;
+  let knownTargets = 0;
+
+  for (const config of fileConfigs) {
+    unredactedSecretFindings += scanSecrets(config.content, config.format as RedactFormat).length;
+    if (!config.target_path) continue;
+
+    knownTargets += 1;
+    const targetPath = expandPath(config.target_path);
+    if (!existsSync(targetPath)) {
+      missingTargets += 1;
+      continue;
+    }
+
+    const disk = readFileSync(targetPath, "utf-8");
+    const { content: redactedDisk } = redactContent(disk, config.format as RedactFormat);
+    if (redactedDisk !== config.content) {
+      driftedTargets += 1;
+    }
+  }
+
+  const profiles = databaseReachable ? listProfiles(db).length : 0;
+  const machines = databaseReachable ? listMachines(db).length : 0;
+  const profileLinks = databaseReachable ? tableCount(db, "profile_configs") : 0;
+  const snapshots = databaseReachable ? tableCount(db, "config_snapshots") : 0;
+  const byCategory = Object.fromEntries(Object.entries(categoryStats).filter(([key]) => key !== "total"));
+
+  const status: ContractStatus =
+    databaseReachable &&
+    driftedTargets === 0 &&
+    missingTargets === 0 &&
+    unredactedSecretFindings === 0
+      ? "ok"
+      : "warn";
+
+  return {
+    service: "configs",
+    schemaVersion: "1.0",
+    package: {
+      name: pkg.name,
+      version: pkg.version,
+    },
+    env: {
+      database: {
+        primary: "HASNA_CONFIGS_DB_PATH",
+        fallback: "CONFIGS_DB_PATH",
+        active: activeDatabaseEnv(),
+        kind: configuredDatabaseKind(),
+      },
+    },
+    counts: {
+      configs: {
+        total: configs.length,
+        file: fileConfigs.length,
+        reference: configs.filter((config) => config.kind === "reference").length,
+        templates: configs.filter((config) => config.is_template).length,
+      },
+      byCategory,
+      byAgent: countBy(configs, (config) => config.agent),
+      byFormat: countBy(configs, (config) => config.format),
+      profiles,
+      profileLinks,
+      machines,
+      snapshots,
+      knownTargets,
+    },
+    health: {
+      status,
+      databaseReachable,
+      driftedTargets,
+      missingTargets,
+      unredactedSecretFindings,
+      hasDrift: driftedTargets > 0,
+      hasMissingTargets: missingTargets > 0,
+      hasUnredactedSecrets: unredactedSecretFindings > 0,
+    },
+    safety: {
+      includesConfigValues: false,
+      includesPrivatePaths: false,
+      includesHostnames: false,
+      includesSecretValues: false,
+      statusOutputIsMetadataOnly: true,
+    },
+  };
+}

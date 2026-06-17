@@ -18,6 +18,7 @@ import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
+import { getConfigsStatus } from "../status.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
 
 import { createRequire } from "node:module";
@@ -766,40 +767,22 @@ program
 program
   .command("status")
   .description("Health check: total configs, drift from disk, unredacted secrets")
-  .action(async () => {
-    const dbPath = join(homedir(), ".hasna", "configs", "configs.db");
-    const stats = getConfigStats();
-    const { statSync: st } = await import("node:fs");
-    const dbSize = existsSync(dbPath) ? st(dbPath).size : 0;
+  .option("--json", "output metadata-only JSON")
+  .action(async (opts: { json?: boolean }) => {
+    const status = getConfigsStatus();
 
-    console.log(chalk.bold("@hasna/configs") + chalk.dim(` v${pkg.version}`));
-    console.log(chalk.cyan("DB:") + ` ${dbPath} (${(dbSize / 1024).toFixed(1)}KB)`);
-    console.log(chalk.cyan("Total:") + ` ${stats["total"] || 0} configs\n`);
-
-    // Check drift
-    const allKnown = listConfigs({ kind: "file" });
-    let drifted = 0;
-    let missing = 0;
-    let secrets = 0;
-    let templates = 0;
-
-    for (const c of allKnown) {
-      if (!c.target_path) continue;
-      const path = expandPath(c.target_path);
-      if (!existsSync(path)) { missing++; continue; }
-      const disk = readFileSync(path, "utf-8");
-      // Compare disk vs stored (but stored is redacted, so compare redacted version of disk)
-      const { content: redactedDisk } = redactContent(disk, c.format as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
-      if (redactedDisk !== c.content) drifted++;
-      if (c.is_template) templates++;
-      const found = scanSecrets(c.content, c.format as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
-      secrets += found.length;
+    if (opts.json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
     }
 
-    console.log(chalk.cyan("Drifted:") + ` ${drifted === 0 ? chalk.green("0") : chalk.yellow(String(drifted))} (stored ≠ disk)`);
-    console.log(chalk.cyan("Missing:") + ` ${missing === 0 ? chalk.green("0") : chalk.yellow(String(missing))} (file not on disk)`);
-    console.log(chalk.cyan("Secrets:") + ` ${secrets === 0 ? chalk.green("0 ✓") : chalk.red(String(secrets) + " ⚠")} unredacted`);
-    console.log(chalk.cyan("Templates:") + ` ${templates} (with {{VAR}} placeholders)`);
+    console.log(chalk.bold("@hasna/configs") + chalk.dim(` v${pkg.version}`));
+    console.log(chalk.cyan("Database:") + ` ${status.env.database.kind} (${status.env.database.active ?? "default"})`);
+    console.log(chalk.cyan("Total:") + ` ${status.counts.configs.total} configs\n`);
+    console.log(chalk.cyan("Drifted:") + ` ${status.health.driftedTargets === 0 ? chalk.green("0") : chalk.yellow(String(status.health.driftedTargets))} (stored differs from disk)`);
+    console.log(chalk.cyan("Missing:") + ` ${status.health.missingTargets === 0 ? chalk.green("0") : chalk.yellow(String(status.health.missingTargets))} (file not on disk)`);
+    console.log(chalk.cyan("Secrets:") + ` ${status.health.unredactedSecretFindings === 0 ? chalk.green("0 ✓") : chalk.red(String(status.health.unredactedSecretFindings) + " ⚠")} unredacted`);
+    console.log(chalk.cyan("Templates:") + ` ${status.counts.configs.templates} (with {{VAR}} placeholders)`);
   });
 
 // ── diff --all ────────────────────────────────────────────────────────────────
