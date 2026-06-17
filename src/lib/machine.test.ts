@@ -4,21 +4,21 @@ import { detectMachineContext, renderMachineAwareContent, resolveProfileVariable
 describe("machine helpers", () => {
   test("detectMachineContext derives linux defaults", () => {
     const machine = detectMachineContext({
-      hostname: "spark01",
+      hostname: "linux-node-a",
       os: "Linux",
       arch: "arm64",
-      home_dir: "/home/hasna",
+      home_dir: "/home/example",
     });
     expect(machine.os_family).toBe("linux");
-    expect(machine.workspace_root).toBe("/home/hasna/workspace");
-    expect(machine.bun_bin_dir).toBe("/home/hasna/.bun/bin");
-    expect(machine.bun_path).toBe("/home/hasna/.bun/bin/bun");
-    expect(machine.path_prefix).toBe("/home/hasna/.bun/bin");
+    expect(machine.workspace_root).toBe("/home/example/workspace");
+    expect(machine.bun_bin_dir).toBe("/home/example/.bun/bin");
+    expect(machine.bun_path).toBe("/home/example/.bun/bin/bun");
+    expect(machine.path_prefix).toBe("/home/example/.bun/bin");
   });
 
   test("resolveProfileVariables renders nested variables", () => {
     const machine = detectMachineContext({
-      hostname: "apple01",
+      hostname: "macos-node-a",
       os: "Darwin",
       arch: "arm64",
       home_dir: "/Users/hasna",
@@ -40,10 +40,10 @@ describe("machine helpers", () => {
 
   test("templateizeMachineContent replaces absolute machine paths with placeholders", () => {
     const machine = detectMachineContext({
-      hostname: "spark01",
+      hostname: "linux-node-a",
       os: "Linux",
       arch: "arm64",
-      home_dir: "/home/hasna",
+      home_dir: "/home/example",
     });
     const input = `command = "${machine.bun_bin_dir}/configs-mcp"\nworkspace = "${machine.workspace_root}/repo"`;
     const result = templateizeMachineContent(input, machine);

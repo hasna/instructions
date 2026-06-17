@@ -58,8 +58,8 @@ Data is stored in `~/.hasna/configs/`.
 
 `configs init` now seeds two platform profiles:
 
-- `linux-arm64` for `spark01` / `spark02`
-- `macos-arm64` for `apple01` / `apple03`
+- `linux-arm64` for `linux-node-a` / `linux-node-b`
+- `macos-arm64` for `macos-node-a` / `macos-node-b`
 
 These profiles resolve machine variables like `{{WORKSPACE_ROOT}}`, `{{BUN_BIN_DIR}}`, `{{BUN_PATH}}`, and `{{PATH_PREFIX}}`, so synced configs can be portable across Linux and macOS arm64 machines.
 

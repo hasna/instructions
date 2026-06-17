@@ -45,12 +45,12 @@ describe("profiles", () => {
     const p = createProfile({ name: "Old" }, db);
     const updated = updateProfile(p.id, {
       name: "New",
-      selectors: { os: ["macos"], arch: ["arm64"], hostnames: ["apple01"] },
+      selectors: { os: ["macos"], arch: ["arm64"], hostnames: ["macos-node-a"] },
       variables: { BUN_PATH: "/opt/homebrew/bin/bun" },
     }, db);
     expect(updated.name).toBe("New");
     expect(updated.slug).toBe("new");
-    expect(updated.selectors.hostnames).toEqual(["apple01"]);
+    expect(updated.selectors.hostnames).toEqual(["macos-node-a"]);
     expect(updated.variables["BUN_PATH"]).toBe("/opt/homebrew/bin/bun");
   });
 
@@ -85,12 +85,12 @@ describe("profiles", () => {
     }, db);
     createProfile({
       name: "macos-arm64",
-      selectors: { os: ["macos"], arch: ["arm64"], hostnames: ["apple01"] },
+      selectors: { os: ["macos"], arch: ["arm64"], hostnames: ["macos-node-a"] },
       variables: { WORKSPACE_ROOT: "{{HOME_DIR}}/Workspace" },
     }, db);
 
     const profile = resolveProfileForMachine(detectMachineContext({
-      hostname: "apple01",
+      hostname: "macos-node-a",
       os: "Darwin",
       arch: "arm64",
       home_dir: "/Users/hasna",

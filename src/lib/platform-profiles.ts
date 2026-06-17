@@ -6,8 +6,8 @@ import { listConfigs } from "../db/configs.js";
 export const PLATFORM_PROFILE_PRESETS: CreateProfileInput[] = [
   {
     name: "linux-arm64",
-    description: "Default Linux arm64 profile for spark01/spark02-style machines",
-    selectors: { os: ["linux"], arch: ["arm64"], hostnames: ["spark01", "spark02"] },
+    description: "Default Linux arm64 profile for linux-node-a/linux-node-b-style machines",
+    selectors: { os: ["linux"], arch: ["arm64"], hostnames: ["linux-node-a", "linux-node-b"] },
     variables: {
       WORKSPACE_ROOT: "{{HOME_DIR}}/workspace",
       BUN_BIN_DIR: "{{HOME_DIR}}/.bun/bin",
@@ -17,8 +17,8 @@ export const PLATFORM_PROFILE_PRESETS: CreateProfileInput[] = [
   },
   {
     name: "macos-arm64",
-    description: "Default macOS arm64 profile for apple01/apple03-style machines",
-    selectors: { os: ["macos"], arch: ["arm64"], hostnames: ["apple01", "apple03"] },
+    description: "Default macOS arm64 profile for macos-node-a/macos-node-b-style machines",
+    selectors: { os: ["macos"], arch: ["arm64"], hostnames: ["macos-node-a", "macos-node-b"] },
     variables: {
       WORKSPACE_ROOT: "{{HOME_DIR}}/Workspace",
       BUN_BIN_DIR: "{{HOME_DIR}}/.bun/bin",

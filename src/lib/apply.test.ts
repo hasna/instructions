@@ -75,7 +75,7 @@ describe("applyConfig", () => {
   test("renders machine-aware variables in content and target path", async () => {
     const db = getDatabase();
     const machine = detectMachineContext({
-      hostname: "apple01",
+      hostname: "macos-node-a",
       os: "Darwin",
       arch: "arm64",
       home_dir: tmpDir,
@@ -94,7 +94,7 @@ describe("applyConfig", () => {
       is_template: true,
     }, db);
     const result = await applyConfig(c, { db, vars });
-    expect(result.path).toBe(join(tmpDir, "apple01.txt"));
+    expect(result.path).toBe(join(tmpDir, "macos-node-a.txt"));
     expect(readFileSync(result.path, "utf-8")).toBe(`workspace=${tmpDir}/Workspace`);
   });
 });
