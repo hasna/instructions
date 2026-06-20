@@ -7,8 +7,9 @@ export interface Config {
   slug: string;
   kind: "file" | "reference";
   category: "agent" | "rules" | "mcp" | "shell" | "secrets_schema" | "workspace" | "git" | "tools";
-  agent: "claude" | "codex" | "gemini" | "zsh" | "git" | "npm" | "global";
+  agent: "claude" | "codex" | "gemini" | "opencode" | "cursor" | "codewith" | "aicopilot" | "zsh" | "git" | "npm" | "global";
   target_path: string | null;
+  outputs: ConfigOutput[];
   format: "text" | "json" | "toml" | "yaml" | "markdown" | "ini";
   content: string;
   description: string | null;
@@ -20,6 +21,14 @@ export interface Config {
   synced_at: string | null;
 }
 
+export type ConfigTransform = "passthrough" | "claude-passthrough" | "codex-flat" | "opencode-flat" | "cursor-mdc" | "skill-neutral";
+
+export interface ConfigOutput {
+  agent: Config["agent"];
+  target_path: string;
+  transform: ConfigTransform;
+}
+
 export interface ConfigSummary {
   id: string;
   slug: string;
@@ -28,6 +37,7 @@ export interface ConfigSummary {
   agent: Config["agent"];
   kind: Config["kind"];
   target_path: string | null;
+  outputs: ConfigOutput[];
   version: number;
 }
 
@@ -81,6 +91,7 @@ export interface CreateConfigInput {
   category: Config["category"];
   agent?: Config["agent"];
   target_path?: string;
+  outputs?: ConfigOutput[];
   kind?: Config["kind"];
   format?: Config["format"];
   tags?: string[];
@@ -96,6 +107,7 @@ export interface UpdateConfigInput {
   category?: Config["category"];
   agent?: Config["agent"];
   target_path?: string;
+  outputs?: ConfigOutput[];
 }
 
 export interface ConfigsClientOptions {

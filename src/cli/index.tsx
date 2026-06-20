@@ -183,7 +183,7 @@ program
 // ── apply ─────────────────────────────────────────────────────────────────────
 program
   .command("apply <id>")
-  .description("Apply a config to its target_path on disk")
+  .description("Apply a config to its target_path and output targets on disk")
   .option("--dry-run", "preview without writing")
   .option("--force", "overwrite even if unchanged")
   .action(async (id, opts) => {
@@ -193,6 +193,11 @@ program
       const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.changed ? chalk.green("✓") : chalk.dim("="));
       const change = result.changed ? "changed" : "unchanged";
       console.log(`${status} ${result.path} ${chalk.dim(`(${change})`)}`);
+      for (const output of result.outputs ?? []) {
+        const outputStatus = opts.dryRun ? chalk.yellow("[dry-run]") : (output.changed ? chalk.green("✓") : chalk.dim("="));
+        const outputChange = output.changed ? "changed" : "unchanged";
+        console.log(`  ${outputStatus} ${output.path} ${chalk.dim(`[${output.agent}/${output.transform}] (${outputChange})`)}`);
+      }
     } catch (e) {
       console.error(chalk.red(e instanceof Error ? e.message : String(e)));
       process.exit(1);
@@ -233,8 +238,8 @@ program
 // ── sync ─────────────────────────────────────────────────────────────────────
 program
   .command("sync")
-  .description("Sync known AI coding configs from disk into DB (claude, codex, gemini, zsh, git, npm)")
-  .option("-a, --agent <agent>", "only sync configs for this agent (claude|codex|gemini|zsh|git|npm)")
+  .description("Sync known AI coding configs from disk into DB (claude, codex, opencode, cursor, codewith, aicopilot, gemini, zsh, git, npm)")
+  .option("-a, --agent <agent>", "only sync configs for this agent (claude|codex|opencode|cursor|codewith|aicopilot|gemini|zsh|git|npm)")
   .option("-c, --category <cat>", "only sync configs in this category")
   .option("-p, --project [dir]", "sync project-scoped configs (CLAUDE.md, .mcp.json, etc.) from a project dir")
   .option("--all", "with --project: scan all subdirs for projects to sync")
@@ -250,7 +255,8 @@ program
       });
       console.log(chalk.bold(`Known configs (${targets.length}):`));
       for (const k of targets) {
-        console.log(`  ${chalk.cyan(k.rulesDir ? k.rulesDir + "/*.md" : k.path)} ${chalk.dim(`[${k.category}/${k.agent}]`)}`);
+        const extensions = k.rulesDir ? `{${(k.rulesExtensions ?? [".md", ".mdc"]).join(",")}}` : "";
+        console.log(`  ${chalk.cyan(k.rulesDir ? k.rulesDir + `/*${extensions}` : k.path)} ${chalk.dim(`[${k.category}/${k.agent}]`)}`);
       }
       return;
     }

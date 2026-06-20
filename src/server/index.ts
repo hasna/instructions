@@ -125,6 +125,7 @@ app.post("/api/configs", async (c) => {
       agent: body.agent,
       kind: body.kind,
       target_path: body.target_path,
+      outputs: body.outputs,
       format: body.format,
       tags: body.tags,
       description: body.description,

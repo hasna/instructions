@@ -66,4 +66,10 @@ describe("database", () => {
     expect(profileColumns).toContain("variables");
     expect(machineColumns).toContain("arch");
   });
+
+  test("migrations add config outputs column", () => {
+    const db = getDatabase();
+    const configColumns = db.query<{ name: string }, []>("PRAGMA table_info(configs)").all().map((row) => row.name);
+    expect(configColumns).toContain("outputs");
+  });
 });

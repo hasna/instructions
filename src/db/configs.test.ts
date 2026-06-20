@@ -43,6 +43,26 @@ describe("createConfig", () => {
     const c = createConfig({ name: "Tmpl", category: "tools", content: "{{VAR}}", is_template: true }, db);
     expect(c.is_template).toBe(true);
   });
+
+  test("stores output fan-out targets", () => {
+    const c = createConfig({
+      name: "Canonical Claude",
+      category: "rules",
+      agent: "claude",
+      content: "# Rules",
+      target_path: "~/.claude/CLAUDE.md",
+      outputs: [
+        { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
+        { agent: "codewith", target_path: "~/.codewith/CODEWITH.md", transform: "codex-flat" },
+      ],
+    }, db);
+
+    expect(c.outputs).toEqual([
+      { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
+      { agent: "codewith", target_path: "~/.codewith/CODEWITH.md", transform: "codex-flat" },
+    ]);
+    expect(getConfig(c.id, db).outputs).toEqual(c.outputs);
+  });
 });
 
 describe("getConfig", () => {
@@ -113,6 +133,19 @@ describe("updateConfig", () => {
     const c = base();
     const updated = updateConfig(c.id, { tags: ["x", "y"] }, db);
     expect(updated.tags).toEqual(["x", "y"]);
+  });
+
+  test("updates output fan-out targets", () => {
+    const c = base();
+    const updated = updateConfig(c.id, {
+      outputs: [
+        { agent: "cursor", target_path: "~/.cursor/rules/claude.mdc", transform: "cursor-mdc" },
+      ],
+    }, db);
+
+    expect(updated.outputs).toEqual([
+      { agent: "cursor", target_path: "~/.cursor/rules/claude.mdc", transform: "cursor-mdc" },
+    ]);
   });
 });
 

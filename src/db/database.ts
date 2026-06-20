@@ -97,6 +97,9 @@ const MIGRATIONS = [
   ALTER TABLE profiles ADD COLUMN variables TEXT NOT NULL DEFAULT '{}';
   ALTER TABLE machines ADD COLUMN arch TEXT;
   `,
+  `
+  ALTER TABLE configs ADD COLUMN outputs TEXT NOT NULL DEFAULT '[]';
+  `,
 ];
 
 let _db: Database | null = null;

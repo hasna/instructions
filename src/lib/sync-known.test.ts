@@ -1,11 +1,12 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { writeFileSync, mkdirSync, existsSync, rmSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, rmSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
-import { createConfig, listConfigs } from "../db/configs";
+import { createConfig, getConfig, listConfigs } from "../db/configs";
 import { syncKnown, KNOWN_CONFIGS, syncProject, PROJECT_CONFIG_FILES } from "./sync";
 import { detectMachineContext } from "./machine";
+import { CONFIG_AGENTS } from "../types/index";
 
 let tmpDir: string;
 
@@ -19,17 +20,41 @@ beforeEach(() => {
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
   delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["CONFIGS_HOME"];
 });
 
 describe("KNOWN_CONFIGS", () => {
-  test("has required configs (claude, codex, gemini, shell, git, tools)", () => {
+  test("has required configs (claude, codex, gemini, opencode, cursor, codewith, aicopilot, shell, git, tools)", () => {
     const agents = new Set(KNOWN_CONFIGS.map((k) => k.agent));
     expect(agents.has("claude")).toBe(true);
     expect(agents.has("codex")).toBe(true);
     expect(agents.has("gemini")).toBe(true);
+    expect(agents.has("opencode")).toBe(true);
+    expect(agents.has("cursor")).toBe(true);
+    expect(agents.has("codewith")).toBe(true);
+    expect(agents.has("aicopilot")).toBe(true);
     expect(agents.has("zsh")).toBe(true);
     expect(agents.has("git")).toBe(true);
     expect(agents.has("npm")).toBe(true);
+  });
+
+  test("CONFIG_AGENTS includes all coding agents", () => {
+    expect(CONFIG_AGENTS).toContain("opencode");
+    expect(CONFIG_AGENTS).toContain("cursor");
+    expect(CONFIG_AGENTS).toContain("codewith");
+    expect(CONFIG_AGENTS).toContain("aicopilot");
+  });
+
+  test("registers new coding agent rule and MCP targets", () => {
+    const paths = new Set(KNOWN_CONFIGS.map((k) => k.rulesDir ?? k.path));
+    expect(paths.has("~/.config/opencode/AGENTS.md")).toBe(true);
+    expect(paths.has("~/.config/opencode/opencode.json")).toBe(true);
+    expect(paths.has("~/.config/aicopilot/AGENTS.md")).toBe(true);
+    expect(paths.has("~/.config/aicopilot/opencode.json")).toBe(true);
+    expect(paths.has("~/.codewith/CODEWITH.md")).toBe(true);
+    expect(paths.has("~/.codewith/config.toml")).toBe(true);
+    expect(paths.has("~/.cursor/rules")).toBe(true);
+    expect(paths.has("~/.cursor/mcp.json")).toBe(true);
   });
 
   test("has optional flag on non-essential configs", () => {
@@ -62,6 +87,77 @@ describe("syncKnown", () => {
     const result = await syncKnown({ db, agent: "git", dryRun: true });
     // Should only report git configs
     expect(result.skipped.every((s) => !s.includes(".claude/"))).toBe(true);
+  });
+
+  test("ingests cursor .mdc rules from rulesDir", async () => {
+    const db = getDatabase();
+    const originalHome = process.env["CONFIGS_HOME"];
+    process.env["CONFIGS_HOME"] = tmpDir;
+    try {
+      mkdirSync(join(tmpDir, ".cursor", "rules"), { recursive: true });
+      writeFileSync(join(tmpDir, ".cursor", "rules", "security.mdc"), "---\nalwaysApply: true\n---\n# Security");
+
+      const result = await syncKnown({ db, agent: "cursor" });
+      const configs = listConfigs({ agent: "cursor" }, db);
+
+      expect(result.added).toBe(1);
+      expect(configs.length).toBe(1);
+      expect(configs[0]!.name).toBe("cursor-rules-security.mdc");
+      expect(configs[0]!.target_path).toBe("~/.cursor/rules/security.mdc");
+      expect(configs[0]!.content).toContain("# Security");
+    } finally {
+      if (originalHome === undefined) delete process.env["CONFIGS_HOME"];
+      else process.env["CONFIGS_HOME"] = originalHome;
+    }
+  });
+
+  test("syncs Claude prompt with fan-out outputs for all coding agents", async () => {
+    const db = getDatabase();
+    const originalHome = process.env["CONFIGS_HOME"];
+    process.env["CONFIGS_HOME"] = tmpDir;
+    try {
+      mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
+      writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nShared.");
+      writeFileSync(join(tmpDir, ".claude", "rules", "security.md"), "# Security");
+
+      const result = await syncKnown({ db, agent: "claude" });
+      const config = getConfig("claude-claude-md", db);
+
+      expect(result.added).toBe(2);
+      expect(config.outputs).toEqual([
+        { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
+        { agent: "codewith", target_path: "~/.codewith/CODEWITH.md", transform: "codex-flat" },
+        { agent: "opencode", target_path: "~/.config/opencode/AGENTS.md", transform: "opencode-flat" },
+        { agent: "aicopilot", target_path: "~/.config/aicopilot/AGENTS.md", transform: "opencode-flat" },
+        { agent: "cursor", target_path: "~/.cursor/rules/claude.mdc", transform: "cursor-mdc" },
+      ]);
+    } finally {
+      if (originalHome === undefined) delete process.env["CONFIGS_HOME"];
+      else process.env["CONFIGS_HOME"] = originalHome;
+    }
+  });
+
+  test("backfills fan-out outputs for unchanged migrated Claude rows", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nShared.");
+
+    createConfig({
+      name: "claude-claude-md",
+      category: "rules",
+      agent: "claude",
+      format: "markdown",
+      content: "# Claude\n\nShared.",
+      target_path: "~/.claude/CLAUDE.md",
+      outputs: [],
+    }, db);
+
+    const result = await syncKnown({ db, agent: "claude" });
+    const config = getConfig("claude-claude-md", db);
+
+    expect(result.updated).toBe(1);
+    expect(config.outputs.map((output) => output.agent)).toEqual(["codex", "codewith", "opencode", "aicopilot", "cursor"]);
   });
 });
 
@@ -180,6 +276,146 @@ describe("syncToDisk", () => {
     const result = await syncToDisk({ db });
     expect(result.skipped.length).toBe(0);
     expect(result.updated).toBe(0);
+  });
+
+  test("does not let stale generated target rows overwrite canonical fan-out outputs", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 1");
+    writeFileSync(join(tmpDir, ".claude", "rules", "security.md"), "# Security\n\nRule");
+
+    const { syncToDisk } = await import("./sync");
+    await syncKnown({ db, agent: "claude" });
+    await syncToDisk({ db });
+
+    await syncKnown({ db });
+    expect(listConfigs({ agent: "codex" }, db).some((config) => config.target_path === "~/.codex/AGENTS.md")).toBe(false);
+
+    createConfig({
+      name: "stale-codex-generated",
+      category: "rules",
+      agent: "codex",
+      format: "markdown",
+      content: "# Claude\n\nVersion 1",
+      target_path: "~/.codex/AGENTS.md",
+    }, db);
+    createConfig({
+      name: "stale-codewith-generated",
+      category: "rules",
+      agent: "codewith",
+      format: "markdown",
+      content: "# Claude\n\nVersion 1",
+      target_path: "~/.codewith/CODEWITH.md",
+    }, db);
+
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
+    await syncKnown({ db, agent: "claude" });
+    await syncToDisk({ db });
+
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
+    expect(readFileSync(join(tmpDir, ".codewith", "CODEWITH.md"), "utf-8")).toContain("Version 2");
+  });
+
+  test("agent-filtered syncToDisk applies canonical outputs for that agent", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 1");
+
+    const { syncToDisk } = await import("./sync");
+    await syncKnown({ db, agent: "claude" });
+    await syncToDisk({ db, agent: "codex" });
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 1");
+
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
+    await syncKnown({ db, agent: "claude" });
+    const result = await syncToDisk({ db, agent: "codex" });
+
+    expect(result.updated).toBe(1);
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
+    expect(existsSync(join(tmpDir, ".codewith", "CODEWITH.md"))).toBe(false);
+  });
+
+  test("syncToDisk skips stale generated rows with equivalent absolute target paths", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 1");
+
+    const { syncToDisk } = await import("./sync");
+    await syncKnown({ db, agent: "claude" });
+    await syncToDisk({ db });
+
+    createConfig({
+      name: "zz-stale-codex-generated-absolute",
+      category: "rules",
+      agent: "codex",
+      format: "markdown",
+      content: "# absolute stale",
+      target_path: join(tmpDir, ".codex", "AGENTS.md"),
+    }, db);
+
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
+    await syncKnown({ db, agent: "claude" });
+    await syncToDisk({ db });
+
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("absolute stale");
+  });
+
+  test("syncToDisk skips stale generated rows through equivalent symlink target paths", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const linkHome = join(tmpDir, "link-home");
+    symlinkSync(tmpDir, linkHome, "dir");
+    mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 1");
+
+    const { syncToDisk } = await import("./sync");
+    await syncKnown({ db, agent: "claude" });
+    await syncToDisk({ db });
+
+    createConfig({
+      name: "zz-stale-codex-generated-symlink",
+      category: "rules",
+      agent: "codex",
+      format: "markdown",
+      content: "# symlink stale",
+      target_path: join(linkHome, ".codex", "AGENTS.md"),
+    }, db);
+
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
+    await syncKnown({ db, agent: "claude" });
+    await syncToDisk({ db });
+
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("symlink stale");
+  });
+
+  test("syncToDisk skips symlink stale rows before generated output directory exists", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const linkHome = join(tmpDir, "link-home");
+    symlinkSync(tmpDir, linkHome, "dir");
+    mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nGenerated");
+    await syncKnown({ db, agent: "claude" });
+
+    createConfig({
+      name: "zz-stale-codex-generated-symlink-before-dir",
+      category: "rules",
+      agent: "codex",
+      format: "markdown",
+      content: "# symlink stale",
+      target_path: join(linkHome, ".codex", "AGENTS.md"),
+    }, db);
+
+    const { syncToDisk } = await import("./sync");
+    await syncToDisk({ db });
+
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Generated");
+    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("symlink stale");
   });
 });
 

@@ -63,7 +63,7 @@ export async function importConfigs(
           if (conflict === "skip") {
             result.skipped++;
           } else if (conflict === "overwrite" || conflict === "version") {
-            updateConfig(existing.id, { content, description: meta.description ?? undefined, tags: meta.tags }, d);
+            updateConfig(existing.id, { content, description: meta.description ?? undefined, tags: meta.tags, outputs: meta.outputs }, d);
             result.updated++;
           }
         } else {
@@ -73,6 +73,7 @@ export async function importConfigs(
             category: meta.category,
             agent: meta.agent,
             target_path: meta.target_path ?? undefined,
+            outputs: meta.outputs,
             format: meta.format,
             content,
             description: meta.description ?? undefined,

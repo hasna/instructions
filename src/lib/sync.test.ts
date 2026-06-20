@@ -110,4 +110,28 @@ describe("diffConfig", () => {
     const c = createConfig({ name: "missing", category: "tools", content: "x", target_path: join(tmpDir, "nope.txt") }, db);
     expect(diffConfig(c)).toContain("not found on disk");
   });
+
+  test("diff includes transformed output paths", () => {
+    const db = getDatabase();
+    const primary = join(tmpDir, "CLAUDE.md");
+    const output = join(tmpDir, "AGENTS.md");
+    writeFileSync(primary, "# Claude");
+    writeFileSync(output, "# stale");
+    const c = createConfig({
+      name: "Claude",
+      category: "rules",
+      agent: "claude",
+      content: "# Claude",
+      target_path: primary,
+      outputs: [
+        { agent: "codex", target_path: output, transform: "codex-flat" },
+      ],
+    }, db);
+
+    const diff = diffConfig(c, { db });
+
+    expect(diff).toContain(`+++ disk (${output})`);
+    expect(diff).toContain("-# Claude");
+    expect(diff).toContain("+# stale");
+  });
 });

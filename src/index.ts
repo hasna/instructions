@@ -27,6 +27,10 @@ export { PG_MIGRATIONS } from "./db/pg-migrations.js";
 export { applyConfig, applyConfigs, expandPath } from "./lib/apply.js";
 export type { ApplyOptions } from "./lib/apply.js";
 
+// Lib — transforms
+export { applyTransform, buildCodexAgentsMd, buildCursorMdc, buildOpenCodeAgentsMd, stripClaudeOnlySections, transformSkillContent } from "./lib/transforms.js";
+export type { TransformContext } from "./lib/transforms.js";
+
 // Lib — machine
 export { detectMachineContext, normalizeOsFamily, machineContextToVariables, resolveProfileVariables, templateizeMachineContent, renderMachineAwareContent } from "./lib/machine.js";
 export type { MachineContextOverrides } from "./lib/machine.js";

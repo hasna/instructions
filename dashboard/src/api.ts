@@ -37,7 +37,8 @@ export const api = {
   sync: (dir: string, direction = "from_disk") => req<SyncResult>("POST", "/api/sync", { dir, direction }),
 };
 
-export interface Config { id: string; name: string; slug: string; kind: string; category: string; agent: string; target_path: string | null; format: string; content: string; description: string | null; tags: string[]; is_template: boolean; version: number; created_at: string; updated_at: string; synced_at: string | null; }
+export interface ConfigOutput { agent: string; target_path: string; transform: string; }
+export interface Config { id: string; name: string; slug: string; kind: string; category: string; agent: string; target_path: string | null; outputs: ConfigOutput[]; format: string; content: string; description: string | null; tags: string[]; is_template: boolean; version: number; created_at: string; updated_at: string; synced_at: string | null; }
 export interface Profile { id: string; name: string; slug: string; description: string | null; selectors: { os?: string[]; arch?: string[]; hostnames?: string[] }; variables: Record<string, string>; created_at: string; updated_at: string; }
 export interface Machine { id: string; hostname: string; os: string | null; arch: string | null; last_applied_at: string | null; created_at: string; }
 export interface Snapshot { id: string; config_id: string; content: string; version: number; created_at: string; }

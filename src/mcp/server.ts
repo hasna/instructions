@@ -10,14 +10,14 @@ import { getProfile, listProfiles, getProfileConfigs, resolveProfileForMachine }
 import { applyConfigs } from "../lib/apply.js";
 import { listSnapshots, getSnapshotByVersion } from "../db/snapshots.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
-import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind } from "../types/index.js";
+import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, ConfigOutput } from "../types/index.js";
 
 // ── Tool descriptions (full, for describe_tools) ─────────────────────────────
 const TOOL_DOCS: Record<string, string> = {
   list_configs: "List configs. Params: category?, agent?, kind?, search?. Returns array of config objects.",
   get_config: "Get a config by id or slug. Returns full config including content.",
-  create_config: "Create a new config. Required: name, content, category. Optional: agent, target_path, kind, format, tags, description, is_template.",
-  update_config: "Update a config by id or slug. Optional: content, name, tags, description, category, agent, target_path.",
+  create_config: "Create a new config. Required: name, content, category. Optional: agent, target_path, outputs, kind, format, tags, description, is_template.",
+  update_config: "Update a config by id or slug. Optional: content, name, tags, description, category, agent, target_path, outputs.",
   apply_config: "Apply a config to its target_path on disk. Params: id_or_slug, dry_run?. Returns apply result.",
   sync_directory: "Sync a directory with the DB. Params: dir, direction ('from_disk'|'to_disk'). Returns sync result.",
   list_profiles: "List all profiles. Returns array of profile objects.",
@@ -46,8 +46,8 @@ const profileFilter = PROFILES[activeProfile];
 const ALL_LEAN_TOOLS = [
   { name: "list_configs", inputSchema: { type: "object", properties: { category: { type: "string" }, agent: { type: "string" }, kind: { type: "string" }, search: { type: "string" } } } },
   { name: "get_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" } }, required: ["id_or_slug"] } },
-  { name: "create_config", inputSchema: { type: "object", properties: { name: { type: "string" }, content: { type: "string" }, category: { type: "string" }, agent: { type: "string" }, target_path: { type: "string" }, kind: { type: "string" }, format: { type: "string" }, tags: { type: "array", items: { type: "string" } }, description: { type: "string" }, is_template: { type: "boolean" } }, required: ["name", "content", "category"] } },
-  { name: "update_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, content: { type: "string" }, name: { type: "string" }, tags: { type: "array", items: { type: "string" } }, description: { type: "string" }, category: { type: "string" }, agent: { type: "string" }, target_path: { type: "string" } }, required: ["id_or_slug"] } },
+  { name: "create_config", inputSchema: { type: "object", properties: { name: { type: "string" }, content: { type: "string" }, category: { type: "string" }, agent: { type: "string" }, target_path: { type: "string" }, outputs: { type: "array", items: { type: "object" } }, kind: { type: "string" }, format: { type: "string" }, tags: { type: "array", items: { type: "string" } }, description: { type: "string" }, is_template: { type: "boolean" } }, required: ["name", "content", "category"] } },
+  { name: "update_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, content: { type: "string" }, name: { type: "string" }, tags: { type: "array", items: { type: "string" } }, description: { type: "string" }, category: { type: "string" }, agent: { type: "string" }, target_path: { type: "string" }, outputs: { type: "array", items: { type: "object" } } }, required: ["id_or_slug"] } },
   { name: "delete_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" } }, required: ["id_or_slug"] } },
   { name: "apply_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, dry_run: { type: "boolean" } }, required: ["id_or_slug"] } },
   { name: "sync_directory", inputSchema: { type: "object", properties: { dir: { type: "string" }, direction: { type: "string" } }, required: ["dir"] } },
@@ -100,7 +100,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           kind: (args["kind"] as ConfigKind) || undefined,
           search: (args["search"] as string) || undefined,
         });
-        return ok(configs.map((c) => ({ id: c.id, slug: c.slug, name: c.name, category: c.category, agent: c.agent, kind: c.kind, target_path: c.target_path, version: c.version })));
+        return ok(configs.map((c) => ({ id: c.id, slug: c.slug, name: c.name, category: c.category, agent: c.agent, kind: c.kind, target_path: c.target_path, outputs: c.outputs, version: c.version })));
       }
       case "get_config": {
         const c = getConfig(args["id_or_slug"] as string);
@@ -113,6 +113,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           category: args["category"] as ConfigCategory,
           agent: (args["agent"] as ConfigAgent) || undefined,
           target_path: (args["target_path"] as string) || undefined,
+          outputs: args["outputs"] as ConfigOutput[] | undefined,
           kind: (args["kind"] as ConfigKind) || undefined,
           format: (args["format"] as ConfigFormat) || undefined,
           tags: (args["tags"] as string[]) || undefined,
@@ -130,6 +131,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           category: args["category"] as ConfigCategory | undefined,
           agent: args["agent"] as ConfigAgent | undefined,
           target_path: args["target_path"] as string | undefined,
+          outputs: args["outputs"] as ConfigOutput[] | undefined,
         });
         return ok({ id: c.id, slug: c.slug, version: c.version });
       }

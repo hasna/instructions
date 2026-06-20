@@ -14,6 +14,7 @@ export const PG_MIGRATIONS: string[] = [
     category TEXT NOT NULL,
     agent TEXT NOT NULL DEFAULT 'global',
     target_path TEXT,
+    outputs TEXT NOT NULL DEFAULT '[]',
     format TEXT NOT NULL DEFAULT 'text',
     content TEXT NOT NULL DEFAULT '',
     description TEXT,
@@ -71,4 +72,7 @@ export const PG_MIGRATIONS: string[] = [
     machine_id TEXT,
     created_at TEXT NOT NULL DEFAULT NOW()::text
   )`,
+
+  // Migration 7: output fan-out metadata
+  `ALTER TABLE configs ADD COLUMN IF NOT EXISTS outputs TEXT NOT NULL DEFAULT '[]'`,
 ];

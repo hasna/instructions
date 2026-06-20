@@ -28,7 +28,7 @@ export function normalizeOsFamily(os?: string | null): string {
 export function detectMachineContext(
   overrides: MachineContextOverrides = {}
 ): MachineContext {
-  const homeDir = overrides.home_dir ?? homedir();
+  const homeDir = overrides.home_dir ?? process.env["CONFIGS_HOME"] ?? process.env["HOME"] ?? homedir();
   const os = overrides.os ?? currentOsType();
   const osFamily = normalizeOsFamily(os);
   const bunBinDir = overrides.bun_bin_dir ?? join(homeDir, ".bun", "bin");

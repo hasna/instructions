@@ -20,12 +20,33 @@ export const CONFIG_AGENTS = [
   "claude",
   "codex",
   "gemini",
+  "opencode",
+  "cursor",
+  "codewith",
+  "aicopilot",
   "zsh",
   "git",
   "npm",
   "global",
 ] as const;
 export type ConfigAgent = (typeof CONFIG_AGENTS)[number];
+
+// Transform names used when a canonical config fans out to agent-specific files.
+export const CONFIG_TRANSFORMS = [
+  "passthrough",
+  "claude-passthrough",
+  "codex-flat",
+  "opencode-flat",
+  "cursor-mdc",
+  "skill-neutral",
+] as const;
+export type ConfigTransform = (typeof CONFIG_TRANSFORMS)[number];
+
+export interface ConfigOutput {
+  agent: ConfigAgent;
+  target_path: string;
+  transform: ConfigTransform;
+}
 
 // Config formats
 export const CONFIG_FORMATS = [
@@ -47,6 +68,7 @@ export interface Config {
   category: ConfigCategory;
   agent: ConfigAgent;
   target_path: string | null; // null for reference kind
+  outputs: ConfigOutput[];
   format: ConfigFormat;
   content: string;
   description: string | null;
@@ -67,6 +89,7 @@ export interface ConfigRow {
   category: string;
   agent: string;
   target_path: string | null;
+  outputs: string;
   format: string;
   content: string;
   description: string | null;
@@ -84,6 +107,7 @@ export interface CreateConfigInput {
   category: ConfigCategory;
   agent?: ConfigAgent;
   target_path?: string | null;
+  outputs?: ConfigOutput[];
   format?: ConfigFormat;
   content: string;
   description?: string;
@@ -97,6 +121,7 @@ export interface UpdateConfigInput {
   category?: ConfigCategory;
   agent?: ConfigAgent;
   target_path?: string | null;
+  outputs?: ConfigOutput[];
   format?: ConfigFormat;
   content?: string;
   description?: string;
@@ -202,6 +227,9 @@ export interface ApplyResult {
   new_content: string;
   dry_run: boolean;
   changed: boolean;
+  agent?: ConfigAgent;
+  transform?: ConfigTransform;
+  outputs?: ApplyResult[];
 }
 
 // Sync result

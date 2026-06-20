@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type {
   Config,
   ConfigFilter,
+  ConfigOutput,
   ConfigRow,
   CreateConfigInput,
   UpdateConfigInput,
@@ -10,9 +11,18 @@ import { ConfigNotFoundError } from "../types/index.js";
 import { getDatabase, now, slugify, uuid } from "./database.js";
 
 function rowToConfig(row: ConfigRow): Config {
+  let outputs: ConfigOutput[] = [];
+  try {
+    const parsed = JSON.parse(row.outputs || "[]") as unknown;
+    outputs = Array.isArray(parsed) ? parsed as ConfigOutput[] : [];
+  } catch {
+    outputs = [];
+  }
+
   return {
     ...row,
     tags: JSON.parse(row.tags || "[]") as string[],
+    outputs,
     is_template: !!row.is_template,
     kind: row.kind as Config["kind"],
     category: row.category as Config["category"],
@@ -40,10 +50,11 @@ export function createConfig(input: CreateConfigInput, db?: Database): Config {
   const ts = now();
   const slug = uniqueSlug(input.name, d);
   const tags = JSON.stringify(input.tags || []);
+  const outputs = JSON.stringify(input.outputs || []);
 
   d.run(
-    `INSERT INTO configs (id, name, slug, kind, category, agent, target_path, format, content, description, tags, is_template, version, created_at, updated_at, synced_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
+    `INSERT INTO configs (id, name, slug, kind, category, agent, target_path, outputs, format, content, description, tags, is_template, version, created_at, updated_at, synced_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
     [
       id,
       input.name,
@@ -52,6 +63,7 @@ export function createConfig(input: CreateConfigInput, db?: Database): Config {
       input.category,
       input.agent ?? "global",
       input.target_path ?? null,
+      outputs,
       input.format ?? "text",
       input.content,
       input.description ?? null,
@@ -145,6 +157,7 @@ export function updateConfig(
   if (input.category !== undefined) { updates.push("category = ?"); params.push(input.category); }
   if (input.agent !== undefined) { updates.push("agent = ?"); params.push(input.agent); }
   if (input.target_path !== undefined) { updates.push("target_path = ?"); params.push(input.target_path); }
+  if (input.outputs !== undefined) { updates.push("outputs = ?"); params.push(JSON.stringify(input.outputs)); }
   if (input.format !== undefined) { updates.push("format = ?"); params.push(input.format); }
   if (input.content !== undefined) { updates.push("content = ?"); params.push(input.content); }
   if (input.description !== undefined) { updates.push("description = ?"); params.push(input.description); }
