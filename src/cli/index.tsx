@@ -19,6 +19,8 @@ import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { getConfigsStatus } from "../status.js";
+import { registerStorageCommands } from "./storage.js";
+import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
 
 import { createRequire } from "node:module";
@@ -26,7 +28,7 @@ const pkg = createRequire(import.meta.url)("../../package.json") as { version: s
 
 function fmtConfig(c: ReturnType<typeof getConfig>, format: string) {
   if (format === "json") return JSON.stringify(c, null, 2);
-  if (format === "compact") return `${c.slug} [${c.category}/${c.agent}] ${c.kind === "reference" ? "(ref)" : c.target_path ?? "(no path)"}`;
+  if (format === "compact") return `${c.slug} [${c.category}/${c.agent}] ${c.kind === "reference" ? "(ref)" : truncateMiddle(c.target_path ?? "(no path)", 72)}`;
   // table
   return [
     `${chalk.bold(c.name)} ${chalk.dim(`(${c.slug})`)}`,
@@ -35,6 +37,25 @@ function fmtConfig(c: ReturnType<typeof getConfig>, format: string) {
     c.description ? `  ${chalk.dim(c.description)}` : "",
     c.tags.length > 0 ? `  ${chalk.dim("tags: " + c.tags.join(", "))}` : "",
   ].filter(Boolean).join("\n");
+}
+
+function pad(value: string, width: number): string {
+  return truncateText(value, width).padEnd(width);
+}
+
+function pageFooter(command: string, page: { items: unknown[]; total: number; limit: number; next_cursor: number | null }, detailsHint: string): void {
+  console.log(chalk.dim(`Showing ${page.items.length} of ${page.total}${page.next_cursor !== null ? ` (next cursor: ${page.next_cursor})` : ""}.`));
+  if (page.next_cursor !== null) console.log(chalk.dim(`Next: ${command} --cursor ${page.next_cursor} --limit ${page.limit}`));
+  console.log(chalk.dim(detailsHint));
+}
+
+function printConfigRows(configs: ReturnType<typeof listConfigs>): void {
+  console.log(`${pad("slug", 32)} ${pad("type", 15)} ${pad("fmt", 8)} ${pad("path", 44)} out v`);
+  for (const c of configs) {
+    const type = `${c.category}/${c.agent}`;
+    const path = c.kind === "reference" ? "(ref)" : c.target_path ?? "(no path)";
+    console.log(`${pad(c.slug, 32)} ${pad(type, 15)} ${pad(c.format, 8)} ${pad(truncateMiddle(path, 44), 44)} ${String(c.outputs.length).padStart(3)} ${c.version}`);
+  }
 }
 
 function splitCsv(value?: string): string[] | undefined {
@@ -95,10 +116,14 @@ program
   .option("-k, --kind <kind>", "filter by kind (file|reference)")
   .option("-t, --tag <tag>", "filter by tag")
   .option("-s, --search <query>", "search name/description/content")
-  .option("-f, --format <fmt>", "output format: table|json|compact", "table")
+  .option("-f, --format <fmt>", "output format: compact|table|json", "compact")
   .option("--brief", "shorthand for --format compact")
+  .option("--verbose", "show expanded metadata for each listed config")
+  .option("--json", "output full matching records as JSON")
+  .option("--limit <n>", `max rows for human output (default ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "zero-based pagination cursor for human output")
   .action(async (opts) => {
-    const fmt = opts.brief ? "compact" : opts.format;
+    const fmt = opts.json ? "json" : opts.verbose ? "table" : opts.brief ? "compact" : opts.format;
     const configs = listConfigs({
       category: opts.category as ConfigCategory,
       agent: opts.agent as ConfigAgent,
@@ -114,16 +139,22 @@ program
       console.log(JSON.stringify(configs, null, 2));
       return;
     }
-    for (const c of configs) {
-      console.log(fmtConfig(c, fmt));
-      if (fmt === "table") console.log();
+    const page = paginate(configs, { limit: opts.limit, cursor: opts.cursor });
+    if (fmt === "compact") {
+      printConfigRows(page.items);
+    } else {
+      for (const c of page.items) {
+        console.log(fmtConfig(c, fmt));
+        console.log();
+      }
     }
-    console.log(chalk.dim(`${configs.length} config(s)`));
+    pageFooter("configs list", page, "Use --verbose for expanded rows, --json for full records, or `configs show <slug>` for content.");
   });
 
 // ── show ─────────────────────────────────────────────────────────────────────
 program
   .command("show <id>")
+  .alias("inspect")
   .description("Show a config's content and metadata")
   .option("-f, --format <fmt>", "output format: table|json|content", "table")
   .action(async (id, opts) => {
@@ -246,6 +277,8 @@ program
   .option("--to-disk", "apply DB configs back to disk instead")
   .option("--dry-run", "preview without writing")
   .option("--list", "show which files would be synced without doing anything")
+  .option("--limit <n>", `with --list, max rows (default ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "with --list, zero-based pagination cursor")
   .action(async (opts) => {
     if (opts.list) {
       const targets = KNOWN_CONFIGS.filter((k) => {
@@ -253,11 +286,13 @@ program
         if (opts.category && k.category !== opts.category) return false;
         return true;
       });
+      const page = paginate(targets, { limit: opts.limit, cursor: opts.cursor });
       console.log(chalk.bold(`Known configs (${targets.length}):`));
-      for (const k of targets) {
+      for (const k of page.items) {
         const extensions = k.rulesDir ? `{${(k.rulesExtensions ?? [".md", ".mdc"]).join(",")}}` : "";
         console.log(`  ${chalk.cyan(k.rulesDir ? k.rulesDir + `/*${extensions}` : k.path)} ${chalk.dim(`[${k.category}/${k.agent}]`)}`);
       }
+      pageFooter("configs sync --list", page, "Use --agent, --category, --limit, or --cursor to narrow the listing.");
       return;
     }
     if (opts.project) {
@@ -360,16 +395,22 @@ const profileCmd = program.command("profile").description("Manage config profile
 
 profileCmd.command("list").description("List all profiles")
   .option("--brief", "compact one-line output")
-  .option("-f, --format <fmt>", "table|json|compact", "table")
+  .option("-f, --format <fmt>", "compact|table|json", "compact")
+  .option("--verbose", "show expanded profile metadata")
+  .option("--json", "output full profiles as JSON")
+  .option("--limit <n>", `max rows for human output (default ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "zero-based pagination cursor for human output")
   .action(async (opts) => {
-  const fmt = opts.brief ? "compact" : opts.format;
+  const fmt = opts.json ? "json" : opts.verbose ? "table" : opts.brief ? "compact" : opts.format;
   const profiles = listProfiles();
   if (profiles.length === 0) { console.log(chalk.dim("No profiles.")); return; }
   if (fmt === "json") { console.log(JSON.stringify(profiles, null, 2)); return; }
-  for (const p of profiles) {
+  const page = paginate(profiles, { limit: opts.limit, cursor: opts.cursor });
+  if (fmt === "compact") console.log(`${pad("slug", 28)} ${pad("configs", 8)} ${pad("match", 36)} vars`);
+  for (const p of page.items) {
     if (fmt === "compact") {
       const selectorSummary = formatProfileSelectorSummary(p);
-      console.log(`${p.slug} ${getProfileConfigs(p.id).length} configs${selectorSummary ? ` ${chalk.dim(selectorSummary)}` : ""}`);
+      console.log(`${pad(p.slug, 28)} ${pad(String(getProfileConfigs(p.id).length), 8)} ${pad(selectorSummary || "-", 36)} ${Object.keys(p.variables).length}`);
       continue;
     }
     const configs = getProfileConfigs(p.id);
@@ -380,6 +421,7 @@ profileCmd.command("list").description("List all profiles")
     const varSummary = formatProfileVariables(p);
     if (varSummary) console.log(`  ${chalk.dim(`vars: ${varSummary}`)}`);
   }
+  pageFooter("configs profile list", page, "Use --verbose for expanded rows, --json for full records, or `configs profile show <slug>` for details.");
 });
 
 profileCmd.command("create <name>").description("Create a new profile")
@@ -398,7 +440,10 @@ profileCmd.command("create <name>").description("Create a new profile")
     console.log(chalk.green("✓") + ` Created profile: ${chalk.bold(p.name)} ${chalk.dim(`(${p.slug})`)}`);
   });
 
-profileCmd.command("show <id>").description("Show profile and its configs").action(async (id) => {
+profileCmd.command("show <id>").description("Show profile and its configs")
+  .option("--limit <n>", `max config rows (default ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "zero-based pagination cursor")
+  .action(async (id, opts) => {
   try {
     const p = getProfile(id);
     const configs = getProfileConfigs(id);
@@ -409,7 +454,11 @@ profileCmd.command("show <id>").description("Show profile and its configs").acti
     const varSummary = formatProfileVariables(p);
     if (varSummary) console.log(chalk.dim(`vars: ${varSummary}`));
     console.log(chalk.cyan(`${configs.length} config(s):`));
-    for (const c of configs) console.log(`  ${c.slug} ${chalk.dim(`[${c.category}]`)}`);
+    const page = paginate(configs, { limit: opts.limit, cursor: opts.cursor });
+    for (const c of page.items) console.log(`  ${c.slug} ${chalk.dim(`[${c.category}/${c.agent}]`)}`);
+    if (page.has_more) {
+      console.log(chalk.dim(`Showing ${page.items.length} of ${page.total}. Next: configs profile show ${id} --cursor ${page.next_cursor} --limit ${page.limit}`));
+    }
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });
 
@@ -487,14 +536,19 @@ profileCmd.command("delete <id>").description("Delete a profile").action(async (
 // ── snapshot ──────────────────────────────────────────────────────────────────
 const snapshotCmd = program.command("snapshot").description("Manage config version history");
 
-snapshotCmd.command("list <config>").description("List snapshots for a config").action(async (configId) => {
+snapshotCmd.command("list <config>").description("List snapshots for a config")
+  .option("--limit <n>", `max rows (default ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "zero-based pagination cursor")
+  .action(async (configId, opts) => {
   try {
     const c = getConfig(configId);
     const snaps = listSnapshots(c.id);
     if (snaps.length === 0) { console.log(chalk.dim("No snapshots.")); return; }
-    for (const s of snaps) {
+    const page = paginate(snaps, { limit: opts.limit, cursor: opts.cursor });
+    for (const s of page.items) {
       console.log(`  v${s.version} ${chalk.dim(s.created_at)} ${chalk.dim(s.id)}`);
     }
+    pageFooter(`configs snapshot list ${configId}`, page, "Use `configs snapshot show <id>` to print snapshot content.");
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });
 
@@ -588,6 +642,7 @@ program
   .option("--fix", "redact found secrets in-place")
   .option("--all", "scan every config in the DB (slow on large DBs)")
   .option("-c, --category <cat>", "scan only a specific category")
+  .option("--limit <n>", `max findings to print (default ${DEFAULT_LIST_LIMIT})`)
   .action(async (id, opts) => {
     let configs;
     if (id) {
@@ -613,6 +668,9 @@ program
     }
 
     let total = 0;
+    let printed = 0;
+    let omitted = 0;
+    const maxPrinted = parseLimit(opts.limit, DEFAULT_LIST_LIMIT);
     const BATCH = 200;
     for (let i = 0; i < configs.length; i += BATCH) {
       const batch = configs.slice(i, i + BATCH);
@@ -621,19 +679,28 @@ program
         const secrets = scanSecrets(c.content, fmt);
         if (secrets.length === 0) continue;
         total += secrets.length;
-        console.log(chalk.yellow(`⚠ ${c.slug}`) + chalk.dim(` — ${secrets.length} secret(s):`));
-        for (const s of secrets) console.log(`  line ${s.line}: ${chalk.red(s.varName)} — ${s.reason}`);
+        const remaining = Math.max(0, maxPrinted - printed);
+        const visible = secrets.slice(0, remaining);
+        omitted += secrets.length - visible.length;
+        if (visible.length > 0) {
+          console.log(chalk.yellow(`⚠ ${c.slug}`) + chalk.dim(` — ${secrets.length} secret(s):`));
+          for (const s of visible) console.log(`  line ${s.line}: ${chalk.red(s.varName)} — ${s.reason}`);
+          printed += visible.length;
+        }
         if (opts.fix) {
           const { content, isTemplate } = redactContent(c.content, fmt);
           updateConfig(c.id, { content, is_template: isTemplate });
-          console.log(chalk.green("  ✓ Redacted."));
+          if (visible.length > 0) console.log(chalk.green("  ✓ Redacted."));
         }
       }
     }
     if (total === 0) {
       console.log(chalk.green("✓") + ` No secrets detected${opts.all ? "" : " (known configs). Use --all to scan entire DB"}.`);
     } else if (!opts.fix) {
+      if (omitted > 0) console.log(chalk.dim(`\nOmitted ${omitted} finding(s). Re-run with --limit ${total} or inspect a specific config id.`));
       console.log(chalk.yellow(`\nRun with --fix to redact in-place.`));
+    } else if (omitted > 0) {
+      console.log(chalk.dim(`\nRedacted all ${total} finding(s); printed ${printed}. Re-run without --fix and a higher --limit for full details.`));
     }
   });
 
@@ -1087,24 +1154,34 @@ program
   .command("clean")
   .description("Remove configs from DB whose target files no longer exist on disk")
   .option("--dry-run", "show what would be removed")
+  .option("--limit <n>", `max orphan rows to print (default ${DEFAULT_LIST_LIMIT})`)
   .action(async (opts) => {
     const configs = listConfigs({ kind: "file" });
     let removed = 0;
+    let printed = 0;
+    const maxPrinted = parseLimit(opts.limit, DEFAULT_LIST_LIMIT);
     for (const c of configs) {
       if (!c.target_path) continue;
       const abs = expandPath(c.target_path);
       if (!existsSync(abs)) {
-        if (opts.dryRun) {
-          console.log(chalk.yellow("  would remove:") + ` ${c.slug} ${chalk.dim(`(${c.target_path})`)}`);
-        } else {
-          deleteConfig(c.id);
-          console.log(chalk.red("  removed:") + ` ${c.slug} ${chalk.dim(`(${c.target_path})`)}`);
+        if (printed < maxPrinted) {
+          if (opts.dryRun) {
+            console.log(chalk.yellow("  would remove:") + ` ${c.slug} ${chalk.dim(`(${truncateMiddle(c.target_path, 88)})`)}`);
+          } else {
+            console.log(chalk.red("  removed:") + ` ${c.slug} ${chalk.dim(`(${truncateMiddle(c.target_path, 88)})`)}`);
+          }
+          printed++;
         }
+        if (!opts.dryRun) deleteConfig(c.id);
         removed++;
       }
     }
     if (removed === 0) console.log(chalk.green("✓") + " All stored configs still exist on disk.");
-    else console.log(chalk.dim(`\n${removed} orphaned config(s) ${opts.dryRun ? "found" : "removed"}`));
+    else {
+      const omitted = Math.max(0, removed - printed);
+      console.log(chalk.dim(`\n${removed} orphaned config(s) ${opts.dryRun ? "found" : "removed"}${omitted > 0 ? `, ${omitted} omitted from output` : ""}`));
+      if (omitted > 0) console.log(chalk.dim(`Use --limit ${removed} to print every orphan row.`));
+    }
   });
 
 // ── bootstrap ─────────────────────────────────────────────────────────────────
@@ -1232,5 +1309,6 @@ program
   });
 
 program.version(pkg.version).name("configs");
+registerStorageCommands(program);
 registerEventsCommands(program, { source: "configs" });
 program.parse(process.argv);

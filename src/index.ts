@@ -15,6 +15,30 @@ export { registerMachine, updateMachineApplied, listMachines, currentHostname, c
 
 // DB — database utilities
 export { getDatabase, resetDatabase, uuid, now, slugify } from "./db/database.js";
+export {
+  CONFIGS_STORAGE_ENV,
+  CONFIGS_STORAGE_FALLBACK_ENV,
+  CONFIGS_STORAGE_MODE_ENV,
+  CONFIGS_STORAGE_MODE_FALLBACK_ENV,
+  CONFIGS_STORAGE_TABLES,
+  STORAGE_DATABASE_ENV,
+  STORAGE_MODE_ENV,
+  STORAGE_TABLES,
+  getStorageDatabaseEnvName,
+  getStorageDatabaseUrl,
+  getStorageMode,
+  getStoragePg,
+  getStorageStatus,
+  getStorageSyncMetaAll,
+  getSyncMetaAll,
+  resolveTables,
+  runStorageMigrations,
+  storagePull,
+  storagePush,
+  storageSync,
+} from "./db/storage-sync.js";
+export type { StorageMode, StorageStatus, SyncMeta, SyncResult } from "./db/storage-sync.js";
+export * from "./db/remote-storage.js";
 
 // Status contract
 export { getConfigsStatus } from "./status.js";

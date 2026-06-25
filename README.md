@@ -15,15 +15,34 @@ npm install -g @hasna/configs
 
 ```bash
 configs --help
+configs list                    # compact, paged summary
+configs list --verbose          # expanded metadata, still paged
+configs list --json             # full machine-readable records
+configs show <slug>             # full metadata + content
+configs inspect <slug>          # alias for show
 configs profile resolve
 configs profile apply --auto
 ```
+
+Collection commands are compact by default to keep agent terminals and context
+small. Human output is capped at 20 rows unless you pass `--limit`; use
+`--cursor` to continue from the next page. Detail is explicit:
+
+- `--verbose` expands list rows with descriptions, tags, and paths.
+- `--json` preserves full machine-readable records for automation.
+- `show`/`inspect` and `snapshot show` print full config or snapshot content.
 
 ## MCP Server
 
 ```bash
 configs-mcp
 ```
+
+Agent-facing MCP tools follow the same gradual disclosure model. `list_configs`
+and `list_profiles` return paged compact envelopes by default and accept
+`limit`, `cursor`, and `verbose`. `apply_config` and `apply_profile` omit
+`previous_content` and `new_content` unless `verbose: true` is passed. Use
+`get_config` when full config content is needed.
 
 ## HTTP mode
 
@@ -40,15 +59,19 @@ Health: `GET http://127.0.0.1:8807/health`. MCP is also mounted on `configs-serv
 configs-serve
 ```
 
-## Cloud Sync
+## Storage Sync
 
-This package supports cloud sync via `@hasna/cloud`:
+This package supports optional remote storage sync through a package-local Postgres connection:
 
 ```bash
-cloud setup
-cloud sync push --service configs
-cloud sync pull --service configs
+export HASNA_CONFIGS_DATABASE_URL=postgres://...
+configs storage status
+configs storage push
+configs storage pull
+configs storage sync
 ```
+
+The MCP server also exposes `storage_status`, `storage_push`, `storage_pull`, and `storage_sync`.
 
 ## Data Directory
 

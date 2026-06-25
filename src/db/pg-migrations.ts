@@ -1,5 +1,5 @@
 /**
- * PostgreSQL migrations for open-configs cloud sync.
+ * PostgreSQL migrations for open-configs storage sync.
  *
  * Equivalent to the SQLite schema in database.ts, translated for PostgreSQL.
  */
@@ -41,6 +41,8 @@ export const PG_MIGRATIONS: string[] = [
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
     description TEXT,
+    selectors TEXT NOT NULL DEFAULT '{}',
+    variables TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -58,6 +60,7 @@ export const PG_MIGRATIONS: string[] = [
     id TEXT PRIMARY KEY,
     hostname TEXT NOT NULL UNIQUE,
     os TEXT,
+    arch TEXT,
     last_applied_at TEXT,
     created_at TEXT NOT NULL
   )`,
