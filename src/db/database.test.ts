@@ -1,10 +1,35 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { getDatabase, resetDatabase, uuid, now, slugify } from "./database";
+
+let originalHome: string | undefined;
+let tempHome: string | null = null;
 
 beforeEach(() => {
   resetDatabase();
+  originalHome = process.env["HOME"];
   process.env["CONFIGS_DB_PATH"] = ":memory:";
 });
+
+afterEach(() => {
+  resetDatabase();
+  if (originalHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = originalHome;
+  delete process.env["HASNA_CONFIGS_DB_PATH"];
+  delete process.env["CONFIGS_DB_PATH"];
+  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
+  tempHome = null;
+});
+
+function useTempHome(): string {
+  tempHome = mkdtempSync(join(tmpdir(), "configs-home-"));
+  process.env["HOME"] = tempHome;
+  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_CONFIGS_DB_PATH"];
+  return tempHome;
+}
 
 describe("database", () => {
   test("getDatabase returns a database instance", () => {
@@ -71,5 +96,40 @@ describe("database", () => {
     const db = getDatabase();
     const configColumns = db.query<{ name: string }, []>("PRAGMA table_info(configs)").all().map((row) => row.name);
     expect(configColumns).toContain("outputs");
+  });
+
+  test("migrates legacy ~/.open-configs into ~/.hasna/configs", () => {
+    const home = useTempHome();
+    mkdirSync(join(home, ".open-configs", "nested"), { recursive: true });
+    writeFileSync(join(home, ".open-configs", "config.json"), "{\"ok\":true}");
+    writeFileSync(join(home, ".open-configs", "nested", "profile.txt"), "profile");
+
+    getDatabase();
+
+    expect(readFileSync(join(home, ".hasna", "configs", "config.json"), "utf8")).toBe("{\"ok\":true}");
+    expect(readFileSync(join(home, ".hasna", "configs", "nested", "profile.txt"), "utf8")).toBe("profile");
+  });
+
+  test("migrates legacy ~/.configs when ~/.open-configs is absent", () => {
+    const home = useTempHome();
+    mkdirSync(join(home, ".configs"), { recursive: true });
+    writeFileSync(join(home, ".configs", "legacy.txt"), "legacy");
+
+    getDatabase();
+
+    expect(readFileSync(join(home, ".hasna", "configs", "legacy.txt"), "utf8")).toBe("legacy");
+  });
+
+  test("does not copy legacy data over an existing canonical directory", () => {
+    const home = useTempHome();
+    mkdirSync(join(home, ".open-configs"), { recursive: true });
+    mkdirSync(join(home, ".hasna", "configs"), { recursive: true });
+    writeFileSync(join(home, ".open-configs", "legacy.txt"), "legacy");
+    writeFileSync(join(home, ".hasna", "configs", "current.txt"), "current");
+
+    getDatabase();
+
+    expect(readFileSync(join(home, ".hasna", "configs", "current.txt"), "utf8")).toBe("current");
+    expect(existsSync(join(home, ".hasna", "configs", "legacy.txt"))).toBe(false);
   });
 });

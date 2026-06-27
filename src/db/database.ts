@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -156,18 +156,19 @@ function ensureFeedbackTable(db: Database): void {
 
 function migrateDotfile(): void {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-  const oldDir = join(home, ".configs");
+  const oldDirs = [join(home, ".open-configs"), join(home, ".configs")];
   const newDir = join(home, ".hasna", "configs");
-  if (!existsSync(oldDir) || existsSync(newDir)) return;
+  if (existsSync(newDir)) return;
 
-  mkdirSync(newDir, { recursive: true });
-  for (const file of readdirSync(oldDir)) {
-    const oldPath = join(oldDir, file);
-    const newPath = join(newDir, file);
+  for (const oldDir of oldDirs) {
+    if (!existsSync(oldDir)) continue;
     try {
-      if (statSync(oldPath).isFile()) copyFileSync(oldPath, newPath);
+      if (!statSync(oldDir).isDirectory()) continue;
+      mkdirSync(join(home, ".hasna"), { recursive: true });
+      cpSync(oldDir, newDir, { recursive: true, force: false });
+      return;
     } catch {
-      // Ignore legacy files that cannot be copied.
+      // Ignore legacy directories that cannot be copied.
     }
   }
 }
