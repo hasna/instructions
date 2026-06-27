@@ -1,6 +1,5 @@
 import { Database } from "bun:sqlite";
-import { SqliteAdapter, ensureFeedbackTable, migrateDotfile } from "@hasna/cloud";
-import { existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -11,7 +10,7 @@ function getDbPath(): string {
   if (process.env["CONFIGS_DB_PATH"]) {
     return process.env["CONFIGS_DB_PATH"]; // backward compat
   }
-  migrateDotfile("configs");
+  migrateDotfile();
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
   const dir = join(home, ".hasna", "configs");
   mkdirSync(dir, { recursive: true });
@@ -103,22 +102,24 @@ const MIGRATIONS = [
 ];
 
 let _db: Database | null = null;
-let _adapter: SqliteAdapter | null = null;
 
 export function getDatabase(path?: string): Database {
   if (_db) return _db;
   const dbPath = path || getDbPath();
-  _adapter = new SqliteAdapter(dbPath);
-  const db = _adapter.raw;
+  const db = new Database(dbPath);
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA foreign_keys = ON");
   applyMigrations(db);
-  ensureFeedbackTable(_adapter);
+  ensureFeedbackTable(db);
   _db = db;
   return db;
 }
 
 export function resetDatabase(): void {
+  if (_db) {
+    try { _db.close(); } catch { /* ignore */ }
+  }
   _db = null;
-  _adapter = null;
 }
 
 function applyMigrations(db: Database): void {
@@ -134,7 +135,39 @@ function applyMigrations(db: Database): void {
   }
 
   for (let i = currentVersion; i < MIGRATIONS.length; i++) {
-    db.run(MIGRATIONS[i]!);
+    db.exec(MIGRATIONS[i]!);
     db.run(`INSERT OR REPLACE INTO schema_version (version) VALUES (${i + 1})`);
+  }
+}
+
+function ensureFeedbackTable(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      message TEXT NOT NULL,
+      email TEXT,
+      category TEXT DEFAULT 'general',
+      version TEXT,
+      machine_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+}
+
+function migrateDotfile(): void {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
+  const oldDir = join(home, ".configs");
+  const newDir = join(home, ".hasna", "configs");
+  if (!existsSync(oldDir) || existsSync(newDir)) return;
+
+  mkdirSync(newDir, { recursive: true });
+  for (const file of readdirSync(oldDir)) {
+    const oldPath = join(oldDir, file);
+    const newPath = join(newDir, file);
+    try {
+      if (statSync(oldPath).isFile()) copyFileSync(oldPath, newPath);
+    } catch {
+      // Ignore legacy files that cannot be copied.
+    }
   }
 }

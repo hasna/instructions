@@ -3,6 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerCloudTools } from "@hasna/cloud";
+import { getStorageStatus, storagePull, storagePush, storageSync } from "../db/storage-sync.js";
 import { createConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
 import { applyConfig } from "../lib/apply.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
@@ -10,22 +11,23 @@ import { getProfile, listProfiles, getProfileConfigs, resolveProfileForMachine }
 import { applyConfigs } from "../lib/apply.js";
 import { listSnapshots, getSnapshotByVersion } from "../db/snapshots.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
+import { pagedPayload, summarizeApplyResult, summarizeConfig, summarizeProfile } from "../lib/compact-output.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, ConfigOutput } from "../types/index.js";
 
 // ── Tool descriptions (full, for describe_tools) ─────────────────────────────
 const TOOL_DOCS: Record<string, string> = {
-  list_configs: "List configs. Params: category?, agent?, kind?, search?. Returns array of config objects.",
+  list_configs: "List configs. Params: category?, agent?, kind?, search?, limit?, cursor?, verbose?. Defaults to a paged compact envelope without content; use get_config for full content.",
   get_config: "Get a config by id or slug. Returns full config including content.",
   create_config: "Create a new config. Required: name, content, category. Optional: agent, target_path, outputs, kind, format, tags, description, is_template.",
   update_config: "Update a config by id or slug. Optional: content, name, tags, description, category, agent, target_path, outputs.",
-  apply_config: "Apply a config to its target_path on disk. Params: id_or_slug, dry_run?. Returns apply result.",
+  apply_config: "Apply a config to its target_path on disk. Params: id_or_slug, dry_run?, verbose?. Defaults to a compact result without previous/new content.",
   sync_directory: "Sync a directory with the DB. Params: dir, direction ('from_disk'|'to_disk'). Returns sync result.",
-  list_profiles: "List all profiles. Returns array of profile objects.",
-  apply_profile: "Apply all configs in a profile to disk. Params: id_or_slug? or auto=true, dry_run?, hostname?, os?, arch?. Returns matched profile, machine context, and apply results.",
+  list_profiles: "List profiles. Params: limit?, cursor?, verbose?. Defaults to a paged compact envelope.",
+  apply_profile: "Apply all configs in a profile to disk. Params: id_or_slug? or auto=true, dry_run?, hostname?, os?, arch?, verbose?. Defaults to compact apply results without content.",
   get_snapshot: "Get snapshot(s) for a config. Params: config_id_or_slug, version?. Returns latest snapshot or specific version.",
   get_status: "Single-call orientation. Returns: total configs, counts by category, templates, DB path.",
   render_template: "Render a template config with variable substitution. Params: id_or_slug, vars? (object of KEY:VALUE), use_env? (fill from env vars). Returns rendered content.",
-  scan_secrets: "Scan configs for unredacted secrets. Params: id_or_slug? (omit for all known), fix? (true to redact in-place). Returns findings.",
+  scan_secrets: "Scan configs for unredacted secrets. Params: id_or_slug? (omit for all known), fix?, limit?, cursor?. Returns paged findings without secret values.",
   sync_known: "Sync all known config files from disk into DB. Params: agent?, category?. Replaces sync_directory for standard use.",
   sync_project: "Sync project-scoped configs (CLAUDE.md, .mcp.json, AGENTS.md, rules/*.md) from a project dir. Params: project_dir (default: cwd).",
   search_tools: "Search tool descriptions. Params: query. Returns matching tool names and descriptions.",
@@ -44,21 +46,21 @@ const profileFilter = PROFILES[activeProfile];
 
 // ── Lean stubs (minimal schema, no descriptions) ─────────────────────────────
 const ALL_LEAN_TOOLS = [
-  { name: "list_configs", inputSchema: { type: "object", properties: { category: { type: "string" }, agent: { type: "string" }, kind: { type: "string" }, search: { type: "string" } } } },
+  { name: "list_configs", inputSchema: { type: "object", properties: { category: { type: "string" }, agent: { type: "string" }, kind: { type: "string" }, search: { type: "string" }, limit: { type: "number" }, cursor: { type: "number" }, verbose: { type: "boolean" } } } },
   { name: "get_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" } }, required: ["id_or_slug"] } },
   { name: "create_config", inputSchema: { type: "object", properties: { name: { type: "string" }, content: { type: "string" }, category: { type: "string" }, agent: { type: "string" }, target_path: { type: "string" }, outputs: { type: "array", items: { type: "object" } }, kind: { type: "string" }, format: { type: "string" }, tags: { type: "array", items: { type: "string" } }, description: { type: "string" }, is_template: { type: "boolean" } }, required: ["name", "content", "category"] } },
   { name: "update_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, content: { type: "string" }, name: { type: "string" }, tags: { type: "array", items: { type: "string" } }, description: { type: "string" }, category: { type: "string" }, agent: { type: "string" }, target_path: { type: "string" }, outputs: { type: "array", items: { type: "object" } } }, required: ["id_or_slug"] } },
   { name: "delete_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" } }, required: ["id_or_slug"] } },
-  { name: "apply_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, dry_run: { type: "boolean" } }, required: ["id_or_slug"] } },
+  { name: "apply_config", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, dry_run: { type: "boolean" }, verbose: { type: "boolean" } }, required: ["id_or_slug"] } },
   { name: "sync_directory", inputSchema: { type: "object", properties: { dir: { type: "string" }, direction: { type: "string" } }, required: ["dir"] } },
-  { name: "list_profiles", inputSchema: { type: "object", properties: {} } },
-  { name: "apply_profile", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, auto: { type: "boolean" }, dry_run: { type: "boolean" }, hostname: { type: "string" }, os: { type: "string" }, arch: { type: "string" } } } },
+  { name: "list_profiles", inputSchema: { type: "object", properties: { limit: { type: "number" }, cursor: { type: "number" }, verbose: { type: "boolean" } } } },
+  { name: "apply_profile", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, auto: { type: "boolean" }, dry_run: { type: "boolean" }, hostname: { type: "string" }, os: { type: "string" }, arch: { type: "string" }, verbose: { type: "boolean" } } } },
   { name: "get_snapshot", inputSchema: { type: "object", properties: { config_id_or_slug: { type: "string" }, version: { type: "number" } }, required: ["config_id_or_slug"] } },
   { name: "get_status", inputSchema: { type: "object", properties: {} } },
   { name: "sync_known", inputSchema: { type: "object", properties: { agent: { type: "string" }, category: { type: "string" } } } },
   { name: "sync_project", inputSchema: { type: "object", properties: { project_dir: { type: "string" } } } },
   { name: "render_template", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, vars: { type: "object" }, use_env: { type: "boolean" } }, required: ["id_or_slug"] } },
-  { name: "scan_secrets", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, fix: { type: "boolean" } } } },
+  { name: "scan_secrets", inputSchema: { type: "object", properties: { id_or_slug: { type: "string" }, fix: { type: "boolean" }, limit: { type: "number" }, cursor: { type: "number" } } } },
   { name: "search_tools", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
   { name: "describe_tools", inputSchema: { type: "object", properties: { names: { type: "array", items: { type: "string" } } } } },
   { name: "register_agent", description: "Register agent session.", inputSchema: { type: "object", properties: { name: { type: "string" }, session_id: { type: "string" } }, required: ["name"] } },
@@ -66,6 +68,10 @@ const ALL_LEAN_TOOLS = [
   { name: "set_focus", description: "Set active project context.", inputSchema: { type: "object", properties: { agent_id: { type: "string" }, project_id: { type: "string" } }, required: ["agent_id"] } },
   { name: "list_agents", description: "List all registered agents.", inputSchema: { type: "object", properties: {} } },
   { name: "send_feedback", description: "Send feedback about this service", inputSchema: { type: "object", properties: { message: { type: "string" }, email: { type: "string" }, category: { type: "string", enum: ["bug", "feature", "general"] } }, required: ["message"] } },
+  { name: "storage_status", description: "Show storage sync configuration and local sync history.", inputSchema: { type: "object", properties: {} } },
+  { name: "storage_push", description: "Push local configs data to storage PostgreSQL.", inputSchema: { type: "object", properties: { tables: { type: "array", items: { type: "string" } } } } },
+  { name: "storage_pull", description: "Pull configs data from storage PostgreSQL to local SQLite.", inputSchema: { type: "object", properties: { tables: { type: "array", items: { type: "string" } } } } },
+  { name: "storage_sync", description: "Bidirectional configs sync: pull then push.", inputSchema: { type: "object", properties: { tables: { type: "array", items: { type: "string" } } } } },
 ];
 
 function ok(data: unknown) {
@@ -100,7 +106,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           kind: (args["kind"] as ConfigKind) || undefined,
           search: (args["search"] as string) || undefined,
         });
-        return ok(configs.map((c) => ({ id: c.id, slug: c.slug, name: c.name, category: c.category, agent: c.agent, kind: c.kind, target_path: c.target_path, outputs: c.outputs, version: c.version })));
+        const summaries = configs.map((c) => summarizeConfig(c, { verbose: Boolean(args["verbose"]) }));
+        return ok(pagedPayload(summaries, {
+          limit: args["limit"],
+          cursor: args["cursor"],
+          hint: "Use get_config with id_or_slug for full content, or list_configs verbose=true for tags/output targets.",
+        }));
       }
       case "get_config": {
         const c = getConfig(args["id_or_slug"] as string);
@@ -143,7 +154,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "apply_config": {
         const config = getConfig(args["id_or_slug"] as string);
         const result = await applyConfig(config, { dryRun: args["dry_run"] as boolean });
-        return ok(result);
+        return ok(args["verbose"] ? result : summarizeApplyResult(result));
       }
       case "sync_directory": {
         const dir = args["dir"] as string;
@@ -154,7 +165,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok(result);
       }
       case "list_profiles": {
-        return ok(listProfiles());
+        const profiles = listProfiles().map((profile) => summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }));
+        return ok(pagedPayload(profiles, {
+          limit: args["limit"],
+          cursor: args["cursor"],
+          hint: "Use apply_profile/get profile-specific commands for details; verbose=true includes selectors and variables.",
+        }));
       }
       case "apply_profile": {
         const machine = detectMachineContext({
@@ -170,7 +186,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const configs = getProfileConfigs(profile.id);
         const vars = resolveProfileVariables(profile, machine);
         const results = await applyConfigs(configs, { dryRun: args["dry_run"] as boolean, vars });
-        return ok({ profile, machine, results });
+        return ok({
+          profile: summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }),
+          machine: {
+            id: machine.id,
+            os_family: machine.os_family,
+            arch: machine.arch,
+          },
+          results: args["verbose"] ? results : results.map(summarizeApplyResult),
+          total: results.length,
+          changed: results.filter((result) => result.changed).length,
+          hint: "Set verbose=true to include previous_content/new_content in apply results.",
+        });
       }
       case "get_snapshot": {
         const config = getConfig(args["config_id_or_slug"] as string);
@@ -256,7 +283,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             }
           }
         }
-        return ok({ clean: findings.length === 0, findings, fixed: !!args["fix"] });
+        return ok({
+          clean: findings.length === 0,
+          fixed: !!args["fix"],
+          ...pagedPayload(findings, {
+            limit: args["limit"],
+            cursor: args["cursor"],
+            hint: "Secret values are never returned. Use id_or_slug to inspect one config, or increase limit/cursor for more findings.",
+          }),
+        });
       }
       case "search_tools": {
         const query = ((args["query"] as string) || "").toLowerCase();
@@ -305,6 +340,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           [args["message"] as string, (args["email"] as string) || null, (args["category"] as string) || "general", pkg.version]
         );
         return ok({ message: "Feedback saved. Thank you!" });
+      }
+      case "storage_status": {
+        return ok(getStorageStatus());
+      }
+      case "storage_push": {
+        const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
+        return ok(await storagePush(tables ? { tables } : undefined));
+      }
+      case "storage_pull": {
+        const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
+        return ok(await storagePull(tables ? { tables } : undefined));
+      }
+      case "storage_sync": {
+        const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
+        return ok(await storageSync(tables ? { tables } : undefined));
       }
       default:
         return err(`Unknown tool: ${name}`);
