@@ -18,6 +18,7 @@ import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
+import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { getConfigsStatus } from "../status.js";
 import { registerStorageCommands } from "./storage.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
@@ -815,6 +816,7 @@ program
         createConfig({ name: ref.name, category: ref.category, agent: "global", format: "markdown", content: ref.content, kind: "reference", description: ref.desc });
       }
     }
+    ensureProjectDashboardStandardConfig();
 
     // Create default profile
     try { getProfile("my-setup"); } catch {

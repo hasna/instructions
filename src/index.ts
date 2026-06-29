@@ -61,6 +61,12 @@ export type { MachineContextOverrides } from "./lib/machine.js";
 
 // Lib — platform profile presets
 export { PLATFORM_PROFILE_PRESETS, ensurePlatformProfiles } from "./lib/platform-profiles.js";
+export {
+  PROJECT_DASHBOARD_PROFILE_VARIABLES,
+  PROJECT_DASHBOARD_STANDARD_CONTENT,
+  PROJECT_DASHBOARD_STANDARD_SLUG,
+  ensureProjectDashboardStandardConfig,
+} from "./lib/project-dashboard-standard.js";
 
 // Lib — sync
 export { syncKnown, syncToDisk, syncProject, diffConfig, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS, PROJECT_CONFIG_FILES } from "./lib/sync.js";

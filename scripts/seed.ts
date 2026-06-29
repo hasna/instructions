@@ -8,6 +8,7 @@ import { getConfigStats } from "../src/db/configs";
 import { syncKnown } from "../src/lib/sync";
 import { createConfig, getConfig } from "../src/db/configs";
 import { ensurePlatformProfiles } from "../src/lib/platform-profiles";
+import { ensureProjectDashboardStandardConfig } from "../src/lib/project-dashboard-standard";
 
 const db = getDatabase();
 
@@ -80,6 +81,9 @@ for (const ref of refs) {
     console.log(`  + ${c.slug} (reference)`);
   }
 }
+
+const projectDashboardStandard = ensureProjectDashboardStandardConfig(db);
+console.log(`  = ${projectDashboardStandard.slug}`);
 
 const machineProfiles = ensurePlatformProfiles(db);
 console.log(`\nMachine-aware profiles: ${machineProfiles.map((profile) => profile.slug).join(", ")}`);

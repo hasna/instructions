@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { CreateProfileInput, Profile } from "../types/index.js";
 import { addConfigToProfile, createProfile, getProfile, profileHasSelectors, updateProfile } from "../db/profiles.js";
 import { listConfigs } from "../db/configs.js";
+import { PROJECT_DASHBOARD_PROFILE_VARIABLES } from "./project-dashboard-standard.js";
 
 export const PLATFORM_PROFILE_PRESETS: CreateProfileInput[] = [
   {
@@ -13,6 +14,7 @@ export const PLATFORM_PROFILE_PRESETS: CreateProfileInput[] = [
       BUN_BIN_DIR: "{{HOME_DIR}}/.bun/bin",
       BUN_PATH: "{{BUN_BIN_DIR}}/bun",
       PATH_PREFIX: "{{BUN_BIN_DIR}}",
+      ...PROJECT_DASHBOARD_PROFILE_VARIABLES,
     },
   },
   {
@@ -24,6 +26,7 @@ export const PLATFORM_PROFILE_PRESETS: CreateProfileInput[] = [
       BUN_BIN_DIR: "{{HOME_DIR}}/.bun/bin",
       BUN_PATH: "/opt/homebrew/bin/bun",
       PATH_PREFIX: "/opt/homebrew/bin:{{BUN_BIN_DIR}}",
+      ...PROJECT_DASHBOARD_PROFILE_VARIABLES,
     },
   },
 ];
