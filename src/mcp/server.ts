@@ -2,7 +2,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { registerCloudTools } from "@hasna/cloud";
 import { getStorageStatus, storagePull, storagePush, storageSync } from "../db/storage-sync.js";
 import { createConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
 import { applyConfig } from "../lib/apply.js";
@@ -363,12 +362,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     return err(e instanceof Error ? e.message : String(e));
   }
 });
-
-  try {
-    registerCloudTools(server as any, "configs");
-  } catch {
-    // Cloud tool registration still targets the high-level MCP server API.
-  }
 
   return server;
 }

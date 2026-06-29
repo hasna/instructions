@@ -1,6 +1,6 @@
 {
   "name": "@hasna/configs",
-  "version": "0.2.39",
+  "version": "0.2.40",
   "description": "AI coding agent configuration manager — store, version, apply, and share all your AI coding configs. CLI + MCP + REST API + Dashboard.",
   "type": "module",
   "main": "dist/index.js",
@@ -58,7 +58,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasna/open-configs.git"
+    "url": "git+https://github.com/hasna/open-configs.git"
   },
   "homepage": "https://github.com/hasna/open-configs",
   "bugs": {
@@ -70,7 +70,6 @@
   "author": "Andrei Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
-    "@hasna/cloud": "0.1.24",
     "@hasna/events": "^0.1.6",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
