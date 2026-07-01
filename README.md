@@ -77,6 +77,33 @@ The MCP server also exposes `storage_status`, `storage_push`, `storage_pull`, an
 
 Data is stored in `~/.hasna/configs/`.
 
+## Session Instruction Rendering
+
+`configs session plan` and `configs session apply` render OpenIdentities and
+OpenConfigs instruction sources into provider-native files for Claude, Codex,
+Cursor, OpenCode, and Codewith.
+
+```bash
+configs session plan \
+  --tool codewith \
+  --profile account999 \
+  --identity-export ./instructions.json \
+  --source project:repo-rules=./CODEWITH.md \
+  --json
+
+configs session apply \
+  --tool codex \
+  --profile account999 \
+  --identity-export ./instructions.json
+```
+
+Accepted source layers are `global`, `provider`/`tool`, `account`,
+`identity`/`agent`, `project`, and `local`. Empty renders fail closed unless
+`--allow-empty-sources` is passed. Apply writes generated manifests with file
+hashes, checks previous manifests for drift, refuses unmanaged file conflicts
+unless `--force` is passed, removes stale managed mirrors only when safe, and
+writes local snapshots before mutating managed files.
+
 ## Machine-aware Profiles
 
 `configs init` now seeds two platform profiles:

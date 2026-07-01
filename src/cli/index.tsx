@@ -4,7 +4,7 @@ import { program } from "commander";
 import chalk from "chalk";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { createConfig, deleteConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
 import { createProfile, deleteProfile, getProfile, getProfileConfigs, listProfiles, updateProfile, addConfigToProfile, removeConfigFromProfile, resolveProfileForMachine } from "../db/profiles.js";
 import { listSnapshots, getSnapshot } from "../db/snapshots.js";
@@ -17,6 +17,8 @@ import { exportConfigs } from "../lib/export.js";
 import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
+import { applySessionRender } from "../lib/session-apply.js";
+import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { getConfigsStatus } from "../status.js";
@@ -63,6 +65,100 @@ function splitCsv(value?: string): string[] | undefined {
   if (!value) return undefined;
   const items = value.split(",").map((item) => item.trim()).filter(Boolean);
   return items.length > 0 ? items : undefined;
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+const SESSION_SOURCE_LAYERS = new Set<SessionInstructionLayer>(["global", "tool", "account", "agent", "project", "local"]);
+
+function parseSessionLayer(value: string): SessionInstructionLayer {
+  if (value === "provider") return "tool";
+  if (value === "identity") return "agent";
+  if (SESSION_SOURCE_LAYERS.has(value as SessionInstructionLayer)) return value as SessionInstructionLayer;
+  throw new Error(`Invalid source layer "${value}"`);
+}
+
+function parseSessionSource(value: string, order: number, replaceIds: Set<string>): SessionInstructionSource {
+  const idx = value.indexOf("=");
+  let id = idx > 0 ? value.slice(0, idx).trim() : "";
+  const path = idx > 0 ? value.slice(idx + 1).trim() : value.trim();
+  let layer: SessionInstructionLayer = "agent";
+  const layerIdx = id.indexOf(":");
+  if (layerIdx > 0) {
+    layer = parseSessionLayer(id.slice(0, layerIdx));
+    id = id.slice(layerIdx + 1).trim();
+  }
+  if (!path) throw new Error(`Invalid --source "${value}" (expected path or id=path)`);
+  const absPath = resolveSessionPath(path);
+  if (!existsSync(absPath)) throw new Error(`Instruction source file not found: ${absPath}`);
+  const content = readFileSync(absPath, "utf-8");
+  const source = sourceFromFilePath(absPath, content, order);
+  const resolvedId = id || source.id || basename(absPath);
+  return {
+    ...source,
+    id: resolvedId,
+    label: id ? resolvedId : source.label ?? resolvedId,
+    layer,
+    merge: replaceIds.has(resolvedId) ? "replace" : "append",
+  };
+}
+
+function parseLayeredReference(value: string): { layer?: SessionInstructionLayer; id: string } {
+  const trimmed = value.trim();
+  const idx = trimmed.indexOf(":");
+  if (idx > 0) {
+    const candidate = trimmed.slice(0, idx);
+    if (candidate === "provider" || candidate === "identity" || SESSION_SOURCE_LAYERS.has(candidate as SessionInstructionLayer)) {
+      const id = trimmed.slice(idx + 1).trim();
+      if (!id) throw new Error(`Invalid layered reference "${value}"`);
+      return { layer: parseSessionLayer(candidate), id };
+    }
+  }
+  if (!trimmed) throw new Error("Instruction reference cannot be empty.");
+  return { id: trimmed };
+}
+
+function collectSessionSources(
+  opts: {
+    source?: string[];
+    config?: string[];
+    identityExport?: string[];
+    replaceSource?: string[];
+  },
+  tool: SessionRenderTool,
+): SessionInstructionSource[] {
+  const replaceIds = new Set<string>(opts.replaceSource ?? []);
+  const sources = (opts.source ?? []).map((value, index) => parseSessionSource(value, index, replaceIds));
+
+  for (const value of opts.config ?? []) {
+    const { layer, id } = parseLayeredReference(value);
+    sources.push(sourceFromConfig(getConfig(id), sources.length, layer));
+  }
+
+  for (const value of opts.identityExport ?? []) {
+    const path = resolveSessionPath(value);
+    if (!existsSync(path)) throw new Error(`Identity instruction export not found: ${path}`);
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    sources.push(...sourcesFromIdentityExport(parsed, { path, tool, orderOffset: sources.length }));
+  }
+
+  return sources.map((source) => replaceIds.has(source.id) ? { ...source, merge: "replace" } : source);
+}
+
+function stripSessionFileContent(file: SessionRenderFile): Omit<SessionRenderFile, "content"> {
+  const { content: _content, ...rest } = file;
+  return rest;
+}
+
+function planJsonForOutput(plan: SessionRenderPlan) {
+  return {
+    ...plan,
+    files: plan.files.map(stripSessionFileContent),
+    manifestFile: stripSessionFileContent(plan.manifestFile),
+    allFiles: plan.allFiles.map(stripSessionFileContent),
+  };
 }
 
 function parseVarArgs(values?: string[]): ProfileVariables | undefined {
@@ -534,6 +630,129 @@ profileCmd.command("delete <id>").description("Delete a profile").action(async (
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });
 
+// ── session ──────────────────────────────────────────────────────────────────
+const sessionCmd = program.command("session").description("Plan and apply session-scoped agent instruction files");
+
+sessionCmd.command("plan")
+  .description("Produce a dry-run render plan for profile-scoped instruction injection")
+  .requiredOption("--tool <tool>", `target tool (${SESSION_RENDER_TOOLS.join("|")})`)
+  .requiredOption("--profile <profile>", "account/profile name that owns the rendered instruction home")
+  .option("--target-home <path>", "override generated profile-scoped target home")
+  .option("--project-root <path>", "repository root for project-scoped adapters such as Cursor")
+  .option("--session-id <id>", "session id to include in the manifest")
+  .option("--source <layer:id=path>", "instruction source file; layers: global|provider|tool|account|identity|agent|project|local", collectOption, [])
+  .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
+  .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
+  .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
+  .option("--allow-empty-sources", "allow an explicit empty render plan")
+  .option("--json", "output dry-run JSON")
+  .action(async (opts) => {
+    try {
+      const tool = opts.tool as SessionRenderTool;
+      if (!SESSION_RENDER_TOOLS.includes(tool)) {
+        console.error(chalk.red(`Unsupported tool: ${opts.tool}`));
+        process.exit(1);
+      }
+      const sources = collectSessionSources(opts, tool);
+      const plan = planSessionRender({
+        tool,
+        profile: opts.profile,
+        targetHome: opts.targetHome,
+        projectRoot: opts.projectRoot,
+        sessionId: opts.sessionId,
+        allowEmptySources: opts.allowEmptySources,
+        sources,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(planJsonForOutput(plan), null, 2));
+        return;
+      }
+      console.log(chalk.bold(`${plan.tool} session render plan`) + chalk.dim(` (${plan.adapter.mode})`));
+      console.log(`${chalk.cyan("profile:")} ${plan.profile}`);
+      console.log(`${chalk.cyan("target:")} ${plan.targetHome}`);
+      console.log(`${chalk.cyan("owner:")} ${plan.targetOwner.kind} ${chalk.dim(plan.targetOwner.reason)}`);
+      if (plan.blocked) console.log(chalk.red(`blocked: ${plan.blockers.join("; ")}`));
+      const envEntries = Object.entries(plan.env);
+      if (envEntries.length > 0) {
+        console.log(`${chalk.cyan("env:")} ${envEntries.map(([key, value]) => `${key}=${value}`).join(" ")}`);
+      }
+      for (const file of plan.allFiles) {
+        console.log(`  ${chalk.dim(file.role.padEnd(8))} ${file.relativePath} ${chalk.dim(file.sha256.slice(0, 12))}`);
+      }
+      if (plan.warnings.length > 0) {
+        for (const warning of plan.warnings) console.log(chalk.yellow(`warning: ${warning}`));
+      }
+      console.log(chalk.dim("Dry run only. No files were written."));
+    } catch (e) {
+      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      process.exit(1);
+    }
+  });
+
+sessionCmd.command("apply")
+  .description("Write a session render plan to its managed target home or explicit project root")
+  .requiredOption("--tool <tool>", `target tool (${SESSION_RENDER_TOOLS.join("|")})`)
+  .requiredOption("--profile <profile>", "account/profile name that owns the rendered instruction home")
+  .option("--target-home <path>", "override generated profile-scoped target home")
+  .option("--project-root <path>", "repository root for project-scoped adapters such as Cursor")
+  .option("--session-id <id>", "session id to include in the manifest")
+  .option("--source <layer:id=path>", "instruction source file; layers: global|provider|tool|account|identity|agent|project|local", collectOption, [])
+  .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
+  .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
+  .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
+  .option("--allow-empty-sources", "allow an explicit empty render")
+  .option("--dry-run", "preview writes and conflicts without writing")
+  .option("--force", "overwrite existing unmanaged files")
+  .option("--json", "output apply JSON")
+  .action(async (opts) => {
+    try {
+      const tool = opts.tool as SessionRenderTool;
+      if (!SESSION_RENDER_TOOLS.includes(tool)) {
+        console.error(chalk.red(`Unsupported tool: ${opts.tool}`));
+        process.exit(1);
+      }
+      const sources = collectSessionSources(opts, tool);
+      const plan = planSessionRender({
+        tool,
+        profile: opts.profile,
+        targetHome: opts.targetHome,
+        projectRoot: opts.projectRoot,
+        sessionId: opts.sessionId,
+        allowEmptySources: opts.allowEmptySources,
+        sources,
+      });
+      const result = applySessionRender(plan, { dryRun: opts.dryRun, force: opts.force });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        if (result.conflicts.length > 0) process.exitCode = 1;
+        return;
+      }
+      const prefix = opts.dryRun ? chalk.yellow("[dry-run]") : chalk.green("OK");
+      console.log(`${prefix} ${plan.tool} session apply ${chalk.dim(`(${plan.adapter.mode})`)}`);
+      console.log(`${chalk.cyan("target:")} ${result.targetHome}`);
+      console.log(`${chalk.cyan("owner:")} ${plan.targetOwner.kind}`);
+      if (result.snapshotPath) console.log(`${chalk.cyan("snapshot:")} ${result.snapshotPath}`);
+      if (Object.keys(result.env).length > 0) {
+        console.log(`${chalk.cyan("env:")} ${Object.entries(result.env).map(([key, value]) => `${key}=${value}`).join(" ")}`);
+      }
+      if (result.drift.checked && !result.drift.clean) {
+        console.log(chalk.yellow(`drift: ${result.drift.missing.length} missing, ${result.drift.drifted.length} changed before apply`));
+      }
+      for (const file of result.files) {
+        const status = file.action === "conflict" ? chalk.red(file.action) : file.changed ? chalk.green(file.action) : chalk.dim(file.action);
+        console.log(`  ${status.padEnd(18)} ${file.relativePath} ${chalk.dim(file.newSha256.slice(0, 12))}`);
+        if (file.reason) console.log(chalk.dim(`    ${file.reason}`));
+      }
+      if (result.conflicts.length > 0) {
+        console.error(chalk.red(`Conflicts: ${result.conflicts.length}. Re-run with --force to overwrite unmanaged files.`));
+        process.exitCode = 1;
+      }
+    } catch (e) {
+      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      process.exit(1);
+    }
+  });
+
 // ── snapshot ──────────────────────────────────────────────────────────────────
 const snapshotCmd = program.command("snapshot").description("Manage config version history");
 
@@ -961,6 +1180,7 @@ _configs() {
     'init:First-time setup'
     'scan:Scan for secrets'
     'profile:Manage profiles'
+    'session:Plan and apply session instructions'
     'snapshot:Version history'
     'template:Template operations'
     'mcp:Install MCP server'
@@ -976,7 +1196,7 @@ compdef _configs configs`);
       console.log(`# bash completion for configs
 _configs_completions() {
   local cur="\${COMP_WORDS[COMP_CWORD]}"
-  local commands="list show add apply diff sync export import whoami status init scan profile snapshot template mcp backup restore doctor completions"
+  local commands="list show add apply diff sync export import whoami status init scan profile session snapshot template mcp backup restore doctor completions"
   COMPREPLY=( $(compgen -W "\${commands}" -- "\${cur}") )
 }
 complete -F _configs_completions configs`);
