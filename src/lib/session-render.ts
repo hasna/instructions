@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, extname, isAbsolute, join, parse, posix, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import type { Config } from "../types/index.js";
 
 export const CODEWITH_NATIVE_IMPORTS_ENV = "HASNA_CONFIGS_CODEWITH_NATIVE_IMPORTS";
@@ -91,6 +92,8 @@ interface OrderedSessionInstructionRule extends SessionInstructionRule {
   resolvedLabel: string;
   resolvedPath: string;
 }
+
+type IdentityExportShape = "configs-contract" | "canonical-open-identities";
 
 export interface SessionTargetOwner {
   kind: SessionTargetOwnerKind;
@@ -338,9 +341,10 @@ function normalizeSources(
         resolvedLayer: source.layer ?? "agent",
         resolvedMerge: source.merge ?? "append",
         resolvedOrder: source.order ?? index,
-        resolvedRules: normalizeInstructionRules(source),
+        resolvedRules: normalizeInstructionRules(source, tool),
       };
-      if (!allowEmptySources && !normalized.content.trim() && normalized.resolvedRules.length === 0) {
+      const hasPathReferences = (normalized.sourcePaths ?? []).length > 0;
+      if (!allowEmptySources && !normalized.content.trim() && normalized.resolvedRules.length === 0 && !hasPathReferences) {
         throw new Error(`Session instruction source "${source.id}" is empty. Pass --allow-empty-sources only for explicit empty renders.`);
       }
       return normalized;
@@ -395,6 +399,19 @@ function sectionForSource(source: OrderedSessionInstructionSource): string {
     `# ${source.resolvedLabel}`,
   ];
   if (source.path) parts.push(`Source: ${source.path}`);
+  if (source.sourcePaths && source.sourcePaths.length > 0) {
+    parts.push([
+      "Source paths:",
+      ...source.sourcePaths.map((sourcePath) => {
+        const flags = [
+          sourcePath.editable ? "editable" : null,
+          sourcePath.required ? "required" : null,
+          sourcePath.hash ? sourcePath.hash : null,
+        ].filter(Boolean);
+        return `- ${sourcePath.path}${flags.length > 0 ? ` (${flags.join(", ")})` : ""}`;
+      }),
+    ].join("\n"));
+  }
   if (source.owner) parts.push(`Owner: ${source.owner.kind}:${source.owner.id}`);
   const content = source.content.trim();
   if (content) parts.push(content);
@@ -835,9 +852,7 @@ export function sourcesFromIdentityExport(
   options: { path?: string; tool?: SessionRenderTool; orderOffset?: number } = {},
 ): SessionInstructionSource[] {
   const record = asRecord(value, "identity instruction export");
-  if (record["contract"] !== "hasna.identities.configs-instructions/v1") {
-    throw new Error("Unsupported identity instruction export contract.");
-  }
+  const shape = requireIdentityExportShape(record);
   const validation = asOptionalRecord(record["validation"]);
   if (validation && validation["valid"] === false) {
     const issues = Array.isArray(validation["issues"]) ? validation["issues"] : [];
@@ -851,21 +866,30 @@ export function sourcesFromIdentityExport(
       path: options.path,
       tool: options.tool,
       orderFallback: offset + index,
+      exportShape: shape,
     }))
     .filter((source): source is SessionInstructionSource => source !== null);
 }
 
-function normalizeInstructionRules(source: SessionInstructionSource): OrderedSessionInstructionRule[] {
+function requireIdentityExportShape(record: Record<string, unknown>): IdentityExportShape {
+  if (record["contract"] === "hasna.identities.configs-instructions/v1") return "configs-contract";
+  if (record["version"] === 1 && record["package"] === "@hasna/identities") return "canonical-open-identities";
+  throw new Error("Unsupported identity instruction export contract.");
+}
+
+function normalizeInstructionRules(source: SessionInstructionSource, tool: SessionRenderTool): OrderedSessionInstructionRule[] {
   const seen = new Set<string>();
   return (source.rules ?? []).map((rule) => {
     if (!rule.id.trim()) throw new Error(`Instruction rule id is required for source ${source.id}.`);
-    if (!rule.content.trim()) throw new Error(`Instruction rule content is required for rule ${rule.id}.`);
+    const content = filterProviderOnlyBlocks(rule.content ?? "", tool);
+    if (!content.trim() && !rule.path) throw new Error(`Instruction rule content or path is required for rule ${rule.id}.`);
     const resolvedPath = normalizeRulePath(rule.path ?? `${slug(rule.id)}.md`);
     const key = resolvedPath.toLowerCase();
     if (seen.has(key)) throw new Error(`Duplicate rule path for source ${source.id}: ${resolvedPath}`);
     seen.add(key);
     return {
       ...rule,
+      content,
       normalizedId: slug(rule.id),
       resolvedLabel: rule.label ?? rule.id,
       resolvedPath,
@@ -915,33 +939,127 @@ function normalizeRulePath(path: string): string {
 
 function identitySourceToSessionSource(
   value: unknown,
-  options: { path?: string; tool?: SessionRenderTool; orderFallback: number },
+  options: { path?: string; tool?: SessionRenderTool; orderFallback: number; exportShape: IdentityExportShape },
 ): SessionInstructionSource | null {
   const record = asRecord(value, "identity instruction source");
   const providers = asStringArray(record["targetProviders"]);
   if (options.tool && providers.length > 0 && !providerTargetsTool(providers, options.tool)) return null;
-  const layer = requireLayer(record["layer"]);
-  const merge = requireMerge(record["merge"] ?? "append");
+  const sourcePaths = normalizeSourcePaths(record["sourcePaths"]);
+  const kind = maybeString(record["kind"]);
+  const layer = record["layer"] === undefined ? layerFromIdentityKind(kind, options.exportShape) : requireLayer(record["layer"]);
+  const merge = requireMerge(record["merge"] ?? record["mergePolicy"] ?? "append");
   const id = requireString(record["id"], "identity instruction source id");
+  const inlineContent = maybeString(record["content"]);
+  const resolvedContent = inlineContent && inlineContent.trim()
+    ? inlineContent
+    : contentFromIdentitySourcePaths(sourcePaths, options.path, id) ?? inlineContent;
   return {
     id,
-    label: maybeString(record["label"]) ?? id,
+    label: maybeString(record["label"]) ?? maybeString(record["title"]) ?? id,
     layer,
     merge,
-    order: typeof record["order"] === "number" ? record["order"] : options.orderFallback,
-    content: maybeString(record["content"]) ?? "",
+    order: typeof record["order"] === "number"
+      ? record["order"]
+      : typeof record["precedence"] === "number"
+        ? record["precedence"]
+        : options.orderFallback,
+    content: resolvedContent ?? "",
     path: options.path,
     rules: normalizeIdentityRules(record["rules"]),
     provenance: asOptionalRecord(record["provenance"]) ?? null,
     targetProviders: providers,
     owner: normalizeIdentityOwner(record["owner"]),
-    sourcePaths: normalizeSourcePaths(record["sourcePaths"]),
+    sourcePaths,
     globs: asStringArray(record["globs"]),
     hash: maybeString(record["hash"]),
     nonOverridable: record["nonOverridable"] === true,
     replacementScope: maybeString(record["replacementScope"]),
     metadata: asOptionalRecord(record["metadata"]) ?? null,
   };
+}
+
+function layerFromIdentityKind(kind: string | undefined, exportShape: IdentityExportShape): SessionInstructionLayer {
+  if (!kind) {
+    if (exportShape === "configs-contract") throw new Error("Invalid session instruction layer: undefined");
+    return "agent";
+  }
+  switch (kind) {
+    case "global-rules":
+    case "global-system-prompt":
+      return "global";
+    case "provider-rules":
+    case "provider-system-prompt":
+      return "tool";
+    case "identity-doc":
+    case "persona-doc":
+      return "agent";
+    case "account-overlay":
+      return "account";
+    case "project-overlay":
+      return "project";
+    case "machine-overlay":
+    case "session-overlay":
+      return "local";
+    default:
+      throw new Error(`Invalid identity instruction source kind: ${kind}`);
+  }
+}
+
+function contentFromIdentitySourcePaths(
+  sourcePaths: SessionInstructionSourcePath[],
+  exportPath: string | undefined,
+  sourceId: string,
+): string | undefined {
+  if (sourcePaths.length === 0 || !exportPath) return undefined;
+  const baseDir = dirname(resolveSessionPath(exportPath));
+  const contents: Array<{ path: string; content: string }> = [];
+  for (const sourcePath of sourcePaths) {
+    const content = readIdentitySourcePath(sourcePath, baseDir, sourceId);
+    if (content !== undefined) contents.push({ path: sourcePath.path, content });
+  }
+  if (contents.length === 0) return undefined;
+  if (contents.length === 1) return ensureTrailingNewline(contents[0]!.content);
+  return ensureTrailingNewline(contents.map((item) => `<!-- Source path: ${item.path} -->\n${item.content.trimEnd()}`).join("\n\n"));
+}
+
+function readIdentitySourcePath(
+  sourcePath: SessionInstructionSourcePath,
+  baseDir: string,
+  sourceId: string,
+): string | undefined {
+  const resolvedPath = resolveIdentitySourcePath(sourcePath.path, baseDir, sourceId);
+  if (!existsSync(resolvedPath)) {
+    if (sourcePath.required) {
+      throw new Error(`Required identity instruction source path not found for ${sourceId}: ${sourcePath.path}`);
+    }
+    return undefined;
+  }
+  const stat = statSync(resolvedPath);
+  if (!stat.isFile()) {
+    throw new Error(`Identity instruction source path is not a file for ${sourceId}: ${sourcePath.path}`);
+  }
+  const realBase = realpathSync(baseDir);
+  const realPath = realpathSync(resolvedPath);
+  if (!pathIsInside(realPath, realBase)) {
+    throw new Error(`Identity instruction source path escapes export directory for ${sourceId}: ${sourcePath.path}`);
+  }
+  return readFileSync(realPath, "utf-8");
+}
+
+function resolveIdentitySourcePath(path: string, baseDir: string, sourceId: string): string {
+  const cleaned = cleanSessionPathInput(path);
+  if (!cleaned) throw new Error(`Identity instruction source path cannot be empty for ${sourceId}.`);
+  if (cleaned.includes("\\")) throw new Error(`Identity instruction source path must use POSIX separators for ${sourceId}: ${path}`);
+  const resolvedPath = isAbsolute(cleaned) ? resolve(cleaned) : resolve(baseDir, cleaned);
+  if (!pathIsInside(resolvedPath, resolve(baseDir))) {
+    throw new Error(`Identity instruction source path escapes export directory for ${sourceId}: ${path}`);
+  }
+  return resolvedPath;
+}
+
+function pathIsInside(path: string, baseDir: string): boolean {
+  const rel = relative(baseDir, path);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 function providerTargetsTool(targets: string[], tool: SessionRenderTool): boolean {

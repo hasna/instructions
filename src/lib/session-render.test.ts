@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -327,6 +327,141 @@ describe("session render planner", () => {
     expect(plan.manifest.sources[1]?.owner).toMatchObject({ kind: "project" });
   });
 
+  test("accepts canonical OpenIdentities exports without the configs contract field", () => {
+    const sources = sourcesFromIdentityExport({
+      version: 1,
+      package: "@hasna/identities",
+      exportedAt: "2026-07-01T00:00:00.000Z",
+      sources: [
+        {
+          id: "canonical-provider-codewith",
+          kind: "provider-rules",
+          title: "Canonical Provider Codewith",
+          content: "Canonical Codewith provider rules.",
+          owner: { kind: "provider", id: "codewith" },
+          sensitivity: "internal",
+          precedence: 200,
+          mergePolicy: "append",
+          safety: "standard",
+          nonOverridable: false,
+          ruleIds: [],
+          targetProviders: ["codewith"],
+          providerCompatibility: [],
+          sourcePaths: [],
+          globs: [],
+          hash: "sha256:canonical",
+          provenance: { createdAt: "2026-07-01T00:00:00.000Z", updatedAt: "2026-07-01T00:00:00.000Z" },
+          metadata: {},
+        },
+      ],
+      validation: { valid: true, sourceCount: 1, issues: [], effectiveHash: "sha256:canonical", nonOverridableSafetyRules: [] },
+      metadata: {},
+    }, { tool: "codewith" });
+
+    const plan = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: "/tmp/codewith-account999",
+      sources,
+    });
+
+    expect(plan.manifest.sources[0]).toMatchObject({
+      id: "canonical-provider-codewith",
+      layer: "tool",
+      merge: "append",
+      order: 200,
+    });
+    expect(plan.files[0]?.content).toContain("Canonical Codewith provider rules.");
+  });
+
+  test("maps kind contract exports to renderer layers and merge policies", () => {
+    const sources = sourcesFromIdentityExport({
+      contract: "hasna.identities.configs-instructions/v1",
+      sources: [
+        {
+          id: "kind-project-overlay",
+          kind: "project-overlay",
+          title: "Kind Project Overlay",
+          content: "Project overlay from canonical fields.",
+          precedence: 700,
+          mergePolicy: "replace",
+          targetProviders: ["codewith"],
+        },
+      ],
+      validation: { valid: true },
+    }, { tool: "codewith" });
+
+    expect(sources[0]).toMatchObject({
+      id: "kind-project-overlay",
+      label: "Kind Project Overlay",
+      layer: "project",
+      merge: "replace",
+      order: 700,
+    });
+  });
+
+  test("resolves source-path-only identity exports relative to the export file", () => {
+    const exportDir = join(tmpRoot, "identity-export");
+    mkdirSync(join(exportDir, "providers"), { recursive: true });
+    writeFileSync(join(exportDir, "providers", "codewith.md"), "Resolved source-path-only Codewith rules.");
+    const exportPath = join(exportDir, "instructions.json");
+    const sources = sourcesFromIdentityExport({
+      contract: "hasna.identities.configs-instructions/v1",
+      sources: [
+        {
+          id: "path-only-codewith",
+          kind: "provider-rules",
+          title: "Path Only Codewith",
+          precedence: 200,
+          mergePolicy: "append",
+          targetProviders: ["codewith"],
+          sourcePaths: [{ path: "providers/codewith.md", editable: true, required: true }],
+        },
+      ],
+      validation: { valid: true },
+    }, { tool: "codewith", path: exportPath });
+
+    const plan = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: "/tmp/codewith-account999",
+      sources,
+    });
+
+    expect(plan.manifest.sources[0]?.sourcePaths[0]?.path).toBe("providers/codewith.md");
+    expect(plan.files[0]?.content).toContain("Source paths:");
+    expect(plan.files[0]?.content).toContain("Resolved source-path-only Codewith rules.");
+  });
+
+  test("renders rule-path-only identity rules without requiring inline rule content", () => {
+    const sources = sourcesFromIdentityExport({
+      contract: "hasna.identities.configs-instructions/v1",
+      sources: [
+        {
+          id: "rule-path-only",
+          label: "Rule Path Only",
+          layer: "global",
+          merge: "append",
+          order: 0,
+          content: "Rule path source container.",
+          rules: [{ id: "safety:path-only", path: "rules/path-only.md", hash: "sha256:path-only" }],
+        },
+      ],
+      validation: { valid: true },
+    }, { tool: "claude", path: "/tmp/export.json" });
+
+    const plan = planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome: "/tmp/claude-account999",
+      sources,
+    });
+
+    const ruleFile = plan.files.find((file) => file.relativePath === ".hasna/instructions/rules/rule-path-only/rules/path-only.md");
+    expect(ruleFile?.content).toContain("Rule path: rules/path-only.md");
+    expect(plan.manifest.sources[0]?.rules[0]).toMatchObject({ id: "safety:path-only", path: "rules/path-only.md", hash: "sha256:path-only" });
+  });
+
   test("renders first-class identity rules and provenance", () => {
     const sources = sourcesFromIdentityExport({
       contract: "hasna.identities.configs-instructions/v1",
@@ -392,6 +527,38 @@ describe("session render planner", () => {
     expect(codewith.files[0]?.content).not.toContain("Only Claude.");
     expect(claude.files.find((file) => file.role === "fragment")?.content).toContain("Only Claude.");
     expect(claude.files.find((file) => file.role === "fragment")?.content).not.toContain("Only Codewith.");
+  });
+
+  test("filters provider-only blocks in first-class rule content per target tool", () => {
+    const source: SessionInstructionSource = {
+      id: "provider-rule-blocks",
+      layer: "tool",
+      content: "Shared source.",
+      rules: [
+        {
+          id: "rule:provider-blocks",
+          content: [
+            "Shared rule.",
+            "<!-- @hasna-provider: claude -->",
+            "Only Claude rule.",
+            "<!-- @hasna-end-provider -->",
+            "<!-- @hasna-provider: codewith -->",
+            "Only Codewith rule.",
+            "<!-- @hasna-end-provider -->",
+          ].join("\n"),
+        },
+      ],
+    };
+
+    const codewith = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: "/tmp/codewith-account999",
+      sources: [source],
+    });
+
+    expect(codewith.files[0]?.content).toContain("Only Codewith rule.");
+    expect(codewith.files[0]?.content).not.toContain("Only Claude rule.");
   });
 
   test("rejects duplicate identity rule paths across sources", () => {

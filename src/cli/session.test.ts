@@ -215,4 +215,82 @@ describe("configs session CLI", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test("applies canonical identity exports with source paths and filters rule provider blocks", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    try {
+      const exportDir = join(home, "identity-export");
+      mkdirSync(join(exportDir, "providers"), { recursive: true });
+      writeFileSync(join(exportDir, "providers", "codewith.md"), "CLI resolved path-only Codewith rules.");
+      const exportPath = join(exportDir, "instructions.json");
+      writeFileSync(exportPath, JSON.stringify({
+        version: 1,
+        package: "@hasna/identities",
+        exportedAt: "2026-07-01T00:00:00.000Z",
+        sources: [
+          {
+            id: "canonical-path-only-codewith",
+            kind: "provider-rules",
+            title: "Canonical Path Only Codewith",
+            owner: { kind: "provider", id: "codewith" },
+            sensitivity: "internal",
+            precedence: 200,
+            mergePolicy: "append",
+            safety: "standard",
+            nonOverridable: false,
+            ruleIds: ["rule:provider-filter"],
+            targetProviders: ["codewith"],
+            providerCompatibility: [],
+            sourcePaths: [{ path: "providers/codewith.md", editable: true, required: true }],
+            globs: [],
+            hash: "sha256:canonical-path",
+            provenance: { createdAt: "2026-07-01T00:00:00.000Z", updatedAt: "2026-07-01T00:00:00.000Z" },
+            metadata: {},
+            rules: [
+              {
+                id: "rule:provider-filter",
+                path: "rules/provider-filter.md",
+                content: [
+                  "CLI shared provider-filter rule.",
+                  "<!-- @hasna-provider: claude -->",
+                  "CLI Claude-only rule leak.",
+                  "<!-- @hasna-end-provider -->",
+                  "<!-- @hasna-provider: codewith -->",
+                  "CLI Codewith-only rule.",
+                  "<!-- @hasna-end-provider -->",
+                ].join("\n"),
+              },
+            ],
+          },
+        ],
+        validation: { valid: true, sourceCount: 1, issues: [], effectiveHash: "sha256:canonical", nonOverridableSafetyRules: [] },
+        metadata: {},
+      }));
+
+      const result = runCli([
+        "session",
+        "apply",
+        "--tool",
+        "codewith",
+        "--profile",
+        "account999",
+        "--target-home",
+        "~/codewith-home",
+        "--identity-export",
+        exportPath,
+        "--json",
+      ], {
+        HOME: home,
+        HASNA_CONFIGS_HOME: join(home, ".hasna", "configs"),
+      });
+
+      expect(result.status).toBe(0);
+      const rendered = readFileSync(join(home, "codewith-home", "CODEWITH.md"), "utf-8");
+      expect(rendered).toContain("CLI resolved path-only Codewith rules.");
+      expect(rendered).toContain("CLI Codewith-only rule.");
+      expect(rendered).not.toContain("CLI Claude-only rule leak.");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

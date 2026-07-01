@@ -305,4 +305,39 @@ describe("session apply writer", () => {
     expect(manifest.sources[0]?.provenance).toMatchObject({ source: "test-fixture" });
     expect(manifest.sources[0]?.rules).toHaveLength(1);
   });
+
+  test("applies source-path-only sources and rule-path-only rules", () => {
+    const targetHome = targetFor("codewith-path-only-export");
+    const exportDir = targetFor("identity-export-paths");
+    mkdirSync(join(exportDir, "providers"), { recursive: true });
+    writeFileSync(join(exportDir, "providers", "codewith.md"), "Resolved path-only apply content.");
+    const sources = sourcesFromIdentityExport({
+      contract: "hasna.identities.configs-instructions/v1",
+      sources: [
+        {
+          id: "path-only-apply",
+          kind: "provider-rules",
+          title: "Path Only Apply",
+          precedence: 200,
+          mergePolicy: "append",
+          targetProviders: ["codewith"],
+          sourcePaths: [{ path: "providers/codewith.md", editable: true, required: true }],
+          rules: [{ id: "rule:path-only-apply", path: "rules/path-only-apply.md" }],
+        },
+      ],
+      validation: { valid: true },
+    }, { tool: "codewith", path: join(exportDir, "instructions.json") });
+    const plan = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome,
+      sources,
+    });
+
+    applySessionRender(plan);
+
+    const codewith = readFileSync(join(targetHome, "CODEWITH.md"), "utf-8");
+    expect(codewith).toContain("Resolved path-only apply content.");
+    expect(codewith).toContain("Rule path: rules/path-only-apply.md");
+  });
 });
