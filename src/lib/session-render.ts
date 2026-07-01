@@ -248,11 +248,12 @@ export const SESSION_TOOL_ADAPTERS: Record<SessionRenderTool, SessionToolAdapter
   opencode: {
     tool: "opencode",
     mode: "opencode-instructions",
+    indexFile: "AGENTS.md",
     configFile: "opencode.json",
     managedDir: ".hasna/instructions",
     envVar: "OPENCODE_CONFIG_DIR",
     nativeImports: false,
-    description: "OpenCode opencode.json instructions pointing at managed fragments.",
+    description: "OpenCode AGENTS.md plus opencode.json instructions pointing at managed fragments.",
   },
   codewith: CODEWITH_FLATTENED_ADAPTER,
 };
@@ -549,6 +550,7 @@ function buildCursorRuleFiles(
 function buildOpenCodeFiles(
   targetHome: string,
   adapter: SessionToolAdapter,
+  profile: string,
   sources: OrderedSessionInstructionSource[],
 ): SessionRenderFile[] {
   const fragments = sources.flatMap((source, index) => [
@@ -557,11 +559,28 @@ function buildOpenCodeFiles(
       makeFile(targetHome, ruleFragmentPath(adapter, source, rule), "rule", sectionForRule(source, rule), [source.id, rule.id])
     ),
   ]);
+  const flattenedIndex = makeFile(
+    targetHome,
+    adapter.indexFile!,
+    "index",
+    [
+      indexHeader(adapter.tool, profile),
+      ...sources.flatMap((source) => [
+        sectionForSource(source),
+        ...source.resolvedRules.map((rule) => sectionForRule(source, rule)),
+      ]),
+    ].join("\n\n"),
+    [
+      ...sources.map((source) => source.id),
+      ...sources.flatMap((source) => source.resolvedRules.map((rule) => rule.id)),
+    ],
+  );
   const config = {
     $schema: "https://opencode.ai/config.json",
     instructions: fragments.map((file) => file.relativePath),
   };
   return [
+    flattenedIndex,
     makeFile(targetHome, adapter.configFile!, "config", JSON.stringify(config, null, 2), sources.map((source) => source.id)),
     ...fragments,
   ];
@@ -581,7 +600,7 @@ function buildFiles(
     case "cursor-mdc":
       return buildCursorRuleFiles(targetHome, adapter, sources);
     case "opencode-instructions":
-      return buildOpenCodeFiles(targetHome, adapter, sources);
+      return buildOpenCodeFiles(targetHome, adapter, profile, sources);
   }
 }
 

@@ -191,7 +191,7 @@ describe("session render planner", () => {
     expect(plan.blockers.join("\n")).toContain("Cursor rules are project-scoped");
   });
 
-  test("plans OpenCode as opencode.json instructions plus fragments", () => {
+  test("plans OpenCode as managed AGENTS.md plus opencode.json instructions and fragments", () => {
     const plan = planSessionRender({
       tool: "opencode",
       profile: "account999",
@@ -201,8 +201,12 @@ describe("session render planner", () => {
 
     expect(plan.adapter.mode).toBe("opencode-instructions");
     expect(plan.env).toEqual({ OPENCODE_CONFIG_DIR: "/tmp/opencode-account999" });
-    expect(plan.files[0]?.relativePath).toBe("opencode.json");
-    const config = JSON.parse(plan.files[0]!.content) as { instructions: string[] };
+    expect(plan.files[0]?.relativePath).toBe("AGENTS.md");
+    expect(plan.files[0]?.role).toBe("index");
+    expect(plan.files[0]?.content).toContain("Managed by @hasna/configs");
+    expect(plan.files[0]?.content).toContain("Global Codewith Identity");
+    expect(plan.files[1]?.relativePath).toBe("opencode.json");
+    const config = JSON.parse(plan.files[1]!.content) as { instructions: string[] };
     expect(config.instructions).toEqual([
       ".hasna/instructions/01-global-codewith.md",
       ".hasna/instructions/02-agent-marcus.md",

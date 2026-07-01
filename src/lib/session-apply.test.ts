@@ -76,7 +76,7 @@ describe("session apply writer", () => {
       {
         tool: "opencode",
         targetHome: targetFor("opencode"),
-        expected: ["opencode.json", ".hasna/instructions/01-global-codewith.md", ".hasna/instructions/02-agent-marcus.md"],
+        expected: ["AGENTS.md", "opencode.json", ".hasna/instructions/01-global-codewith.md", ".hasna/instructions/02-agent-marcus.md"],
       },
       {
         tool: "codewith",
