@@ -11,8 +11,42 @@ import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind } from "../types/index.js";
 import { mountMcpHttpRoutes } from "../mcp/http.js";
+import { getPackageVersion } from "../lib/package-version.js";
+import { handleV1Request } from "./v1.js";
+import {
+  getHonoAuthMiddleware,
+  isCloudModeEnabled,
+  pingCloud,
+  resolveCloudDatabaseUrl,
+  ensureCloudSchema,
+  closeCloud,
+} from "./cloud.js";
+import { buildV1OpenApiDocument } from "./openapi.js";
 
-const PORT = Number(process.env["CONFIGS_PORT"] ?? 3457);
+// ── One-shot schema migration (used by the ECS migration task) ───────────────
+//   instructions-serve migrate   |   instructions db migrate
+if (process.argv.includes("migrate")) {
+  if (!resolveCloudDatabaseUrl()) {
+    console.error("migrate: no database URL (HASNA_INSTRUCTIONS_DATABASE_URL / INSTRUCTIONS_DATABASE_URL / DATABASE_URL)");
+    process.exit(2);
+  }
+  console.log("migrate: connecting…");
+  await pingCloud();
+  console.log("migrate: applying schema (instructions tables + api_keys)…");
+  await ensureCloudSchema();
+  console.log("migrate: done");
+  await closeCloud();
+  process.exit(0);
+}
+
+if (process.argv.includes("--version") || process.argv.includes("-V")) {
+  console.log(getPackageVersion());
+  process.exit(0);
+}
+
+const PORT = Number(
+  process.env["PORT"] ?? process.env["INSTRUCTIONS_PORT"] ?? process.env["CONFIGS_PORT"] ?? 3457,
+);
 
 function pickFields<T extends object>(obj: T, fields?: string): Partial<T> | T {
   if (!fields) return obj;
@@ -23,6 +57,52 @@ function pickFields<T extends object>(obj: T, fields?: string): Partial<T> | T {
 
 const app = new Hono();
 app.use("*", cors());
+
+// ── Service surface probes (unauthenticated): /health /ready /version ─────────
+function serviceMode(): "cloud" | "local" {
+  return isCloudModeEnabled() ? "cloud" : "local";
+}
+
+app.get("/health", (c) => c.json({ status: "ok", version: getPackageVersion(), mode: serviceMode(), name: "instructions" }));
+
+app.get("/version", (c) => c.json({ status: "ok", version: getPackageVersion(), mode: serviceMode(), name: "instructions" }));
+
+app.get("/ready", async (c) => {
+  const version = getPackageVersion();
+  const mode = serviceMode();
+  if (mode === "cloud") {
+    try {
+      await pingCloud();
+    } catch (e) {
+      return c.json({ status: "unavailable", version, mode, error: (e as Error).message }, 503);
+    }
+  }
+  return c.json({ status: "ready", version, mode });
+});
+
+// ── OpenAPI document (unauthenticated; the SDK's source of truth) ─────────────
+app.get("/openapi.json", (c) => c.json(buildV1OpenApiDocument()));
+app.get("/v1/openapi.json", (c) => c.json(buildV1OpenApiDocument()));
+
+// ── Versioned cloud API (/v1/*): A1 pure-remote, contracts API-key auth ───────
+// Auth is the contracts `honoApiKey` middleware; reads need `instructions:read`,
+// writes need `instructions:write` (an `instructions:*` key satisfies both).
+app.use("/v1/*", async (c, next) => {
+  const isWrite = c.req.method !== "GET" && c.req.method !== "HEAD";
+  let mw;
+  try {
+    mw = getHonoAuthMiddleware([isWrite ? "instructions:write" : "instructions:read"]);
+  } catch (e) {
+    // Fail closed: /v1 is never an unauthenticated backdoor.
+    return c.json({ error: (e as Error).message }, 503);
+  }
+  return mw(c, next);
+});
+
+app.all("/v1/*", async (c) => {
+  const res = await handleV1Request(c.req.raw, new URL(c.req.url));
+  return res ?? c.json({ error: "Not found" }, 404);
+});
 
 // ── Status + Stats ────────────────────────────────────────────────────────────
 app.get("/api/stats", (c) => c.json(getConfigStats()));
@@ -378,6 +458,6 @@ if (dashDir) {
   });
 }
 
-const HOST = process.env["CONFIGS_HOST"] ?? "localhost";
-console.log(`configs-serve listening on http://${HOST}:${PORT}${dashDir ? " (dashboard: /" : " (no dashboard found)"}`);
+const HOST = process.env["HOST"] ?? process.env["INSTRUCTIONS_HOST"] ?? process.env["CONFIGS_HOST"] ?? "localhost";
+console.log(`instructions-serve listening on http://${HOST}:${PORT} (mode: ${serviceMode()})${dashDir ? " (dashboard: /)" : " (no dashboard)"}`);
 export default { port: PORT, hostname: HOST, fetch: app.fetch };

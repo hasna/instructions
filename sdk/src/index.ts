@@ -1,4 +1,4 @@
-// @hasna/configs-sdk — zero-dependency TypeScript client for the configs REST API
+// @hasna/instructions-sdk — zero-dependency TypeScript client for the instructions REST API
 // Works in Node, Bun, Deno, and browser environments.
 
 export interface Config {
@@ -248,3 +248,16 @@ export class ConfigsClient {
 }
 
 export default ConfigsClient;
+
+// ── Versioned /v1 cloud client ───────────────────────────────────────────────
+// Generated from the serve OpenAPI document (src/server/openapi.ts).
+// Regenerate with `bun run scripts/generate-sdk.ts`.
+export { InstructionsV1Client, ApiError as InstructionsV1ApiError } from "./v1.generated.js";
+export type {
+  InstructionsV1ClientOptions,
+  Config as InstructionsV1Config,
+  Profile as InstructionsV1Profile,
+  CreateConfigInput as InstructionsV1CreateConfigInput,
+  UpdateConfigInput as InstructionsV1UpdateConfigInput,
+  CreateProfileInput as InstructionsV1CreateProfileInput,
+} from "./v1.generated.js";
