@@ -3,9 +3,14 @@
   "name": "instructions",
   "class": "service",
   "contractVersion": "v1",
-  "kitVersion": "0.4.1",
+  "kitVersion": "0.4.2",
   "description": "AI coding agent instruction & configuration manager (formerly @hasna/configs). CLI + MCP + HTTP API (instructions-serve) + generated SDK. Cloud mode (HASNA_INSTRUCTIONS_DATABASE_URL set) is PURE REMOTE per Amendment A1: the serve process reads/writes the shared cloud Postgres directly with API-key auth via @hasna/contracts. The MCP server keeps the legacy name 'configs' aliased for the existing fleet.",
-  "bins": ["instructions", "instructions-mcp", "instructions-serve", "configs-mcp"],
+  "bins": [
+    "instructions",
+    "instructions-mcp",
+    "instructions-serve",
+    "configs-mcp"
+  ],
   "storage": {
     "mode": "local",
     "envPrefix": "HASNA_INSTRUCTIONS_",
