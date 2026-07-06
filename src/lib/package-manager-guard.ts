@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type PackageManagerSurface =
   | "repo-npmrc"
@@ -83,6 +83,17 @@ export function scanPackageManagerSecrets(options: PackageManagerScanOptions = {
 
   for (const root of roots) {
     if (!existsSync(root)) continue;
+    const stat = lstatSync(root);
+    if (stat.isFile()) {
+      if (!shouldScanRepoFile(root)) continue;
+      const text = readTextFile(root);
+      if (text === null) continue;
+      scannedFiles++;
+      findings.push(...scanFile(root, text, classifyRepoFile(root), isTrackedFile(root), dirname(root)));
+      continue;
+    }
+    if (!stat.isDirectory()) continue;
+
     const tracked = trackedFiles(root);
     for (const file of collectRepoFiles(root)) {
       const rel = toPosix(relative(root, file));
@@ -136,12 +147,12 @@ function collectRepoFiles(root: string): string[] {
 
 function shouldScanRepoFile(file: string): boolean {
   const name = basename(file);
-  return name === ".npmrc" || isBunConfigName(name) || LOCKFILE_NAMES.has(name);
+  return isNpmrcName(name) || isBunConfigName(name) || LOCKFILE_NAMES.has(name);
 }
 
 function classifyRepoFile(file: string): PackageManagerSurface {
   const name = basename(file);
-  if (name === ".npmrc") return "repo-npmrc";
+  if (isNpmrcName(name)) return "repo-npmrc";
   if (isBunConfigName(name)) return "bun-config";
   return "lockfile";
 }
@@ -154,6 +165,10 @@ function classifyHomeFile(name: string): PackageManagerSurface {
 
 function isBunConfigName(name: string): boolean {
   return name === "bunfig.toml" || name === ".bunfig.toml";
+}
+
+function isNpmrcName(name: string): boolean {
+  return name === ".npmrc" || name.startsWith(".npmrc.") || name.endsWith(".npmrc");
 }
 
 function readTextFile(file: string): string | null {
@@ -171,17 +186,14 @@ function readTextFile(file: string): string | null {
 function scanFile(file: string, text: string, surface: PackageManagerSurface, tracked: boolean, root: string): PackageManagerFinding[] {
   const findings: PackageManagerFinding[] = [];
   const path = displayPath(file, root);
+  if (surface === "bun-config") return scanBunConfigFile(text, path, tracked);
+
   const lines = text.split(/\r?\n/);
-  let inBunReleaseAgeExcludes = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     const lineNo = i + 1;
     if (surface === "repo-npmrc" || surface === "home-npmrc") {
       findings.push(...scanNpmrcLine(line, path, lineNo, surface, tracked));
-    } else if (surface === "bun-config") {
-      const bun = scanBunConfigLine(line, path, lineNo, tracked, inBunReleaseAgeExcludes);
-      findings.push(...bun.findings);
-      inBunReleaseAgeExcludes = bun.inReleaseAgeExcludes;
     } else if (surface === "shell-profile") {
       findings.push(...scanShellProfileLine(line, path, lineNo, tracked));
     } else {
@@ -214,57 +226,79 @@ function scanNpmrcLine(lineText: string, path: string, line: number, surface: Pa
     }
   }
 
+  findings.push(...scanCredentialedUrl(stripped, path, line, surface, tracked));
   findings.push(...scanKnownTokenPatterns(stripped, path, line, surface, tracked));
   return findings;
 }
 
-function scanBunConfigLine(
-  lineText: string,
-  path: string,
-  line: number,
-  tracked: boolean,
-  inReleaseAgeExcludes: boolean,
-): { findings: PackageManagerFinding[]; inReleaseAgeExcludes: boolean } {
+function scanBunConfigFile(text: string, path: string, tracked: boolean): PackageManagerFinding[] {
   const findings: PackageManagerFinding[] = [];
-  const stripped = lineText.trim();
-  if (stripped === "" || stripped.startsWith("#")) return { findings, inReleaseAgeExcludes };
+  const lines = text.split(/\r?\n/);
+  let inReleaseAgeExcludes = false;
+  let hasMinimumReleaseAge = false;
 
-  if (/^minimumReleaseAge\s*=\s*(0|"0"|'0')\s*(?:#.*)?$/i.test(stripped)) {
-    findings.push({
-      path,
-      line,
-      rule: "bun-release-age-disabled",
-      surface: "bun-config",
-      severity: "error",
-      tracked,
-      detail: "Bun release-age quarantine is disabled",
-    });
-  }
+  for (let i = 0; i < lines.length; i++) {
+    const lineText = lines[i]!;
+    const line = i + 1;
+    const stripped = lineText.trim();
+    if (stripped === "" || stripped.startsWith("#")) continue;
 
-  const startsReleaseAgeExcludes = /minimumReleaseAgeExcludes/i.test(stripped);
-  const scanExcludes = startsReleaseAgeExcludes || inReleaseAgeExcludes;
-  if (scanExcludes) {
-    const quoted = [...stripped.matchAll(/["']([^"']+)["']/g)].map((m) => m[1]!);
-    for (const item of quoted) {
-      if (item === "*" || item.endsWith("/*") || !item.startsWith("@hasna/")) {
+    const releaseAge = stripped.match(/^minimumReleaseAge\s*=\s*(?:"([^"]+)"|'([^']+)'|([0-9]+))\s*(?:#.*)?$/i);
+    if (releaseAge) {
+      hasMinimumReleaseAge = true;
+      const rawValue = releaseAge[1] ?? releaseAge[2] ?? releaseAge[3] ?? "";
+      const value = Number(rawValue);
+      if (!Number.isFinite(value) || value <= 0) {
         findings.push({
           path,
           line,
-          rule: "bun-release-age-broad-exclude",
+          rule: "bun-release-age-disabled",
           surface: "bun-config",
           severity: "error",
           tracked,
-          detail: "Bun release-age exclude must be an exact @hasna package name",
+          detail: "Bun release-age quarantine is disabled",
         });
       }
     }
+
+    const startsReleaseAgeExcludes = /minimumReleaseAgeExcludes/i.test(stripped);
+    const scanExcludes = startsReleaseAgeExcludes || inReleaseAgeExcludes;
+    if (scanExcludes) {
+      const quoted = [...stripped.matchAll(/["']([^"']+)["']/g)].map((m) => m[1]!);
+      for (const item of quoted) {
+        if (!isExactHasnaPackageName(item)) {
+          findings.push({
+            path,
+            line,
+            rule: "bun-release-age-broad-exclude",
+            surface: "bun-config",
+            severity: "error",
+            tracked,
+            detail: "Bun release-age exclude must be an exact @hasna package name",
+          });
+        }
+      }
+    }
+
+    inReleaseAgeExcludes = startsReleaseAgeExcludes
+      ? stripped.includes("[") && !stripped.includes("]")
+      : inReleaseAgeExcludes && !stripped.includes("]");
+    findings.push(...scanKnownTokenPatterns(stripped, path, line, "bun-config", tracked));
   }
 
-  const nextInReleaseAgeExcludes = startsReleaseAgeExcludes
-    ? stripped.includes("[") && !stripped.includes("]")
-    : inReleaseAgeExcludes && !stripped.includes("]");
-  findings.push(...scanKnownTokenPatterns(stripped, path, line, "bun-config", tracked));
-  return { findings, inReleaseAgeExcludes: nextInReleaseAgeExcludes };
+  if (!hasMinimumReleaseAge) {
+    findings.push({
+      path,
+      line: 1,
+      rule: "bun-release-age-missing",
+      surface: "bun-config",
+      severity: "error",
+      tracked,
+      detail: "Bun release-age quarantine must be configured with a positive minimumReleaseAge",
+    });
+  }
+
+  return findings;
 }
 
 function scanShellProfileLine(lineText: string, path: string, line: number, tracked: boolean): PackageManagerFinding[] {
@@ -326,6 +360,26 @@ function scanKnownTokenPatterns(lineText: string, path: string, line: number, su
   return findings;
 }
 
+function scanCredentialedUrl(lineText: string, path: string, line: number, surface: PackageManagerSurface, tracked: boolean): PackageManagerFinding[] {
+  const findings: PackageManagerFinding[] = [];
+  for (const match of lineText.matchAll(/\bhttps?:\/\/([^/\s#;]+)@/gi)) {
+    const userInfo = match[1]!;
+    const password = userInfo.includes(":") ? userInfo.split(":").slice(1).join(":") : userInfo;
+    if (password && !isSafeReference(password)) {
+      findings.push({
+        path,
+        line,
+        rule: "package-manager-url-credentials",
+        surface,
+        severity: "error",
+        tracked,
+        detail: "package-manager URL embeds literal credentials",
+      });
+    }
+  }
+  return findings;
+}
+
 function trackedFiles(root: string): Set<string> {
   try {
     const output = execFileSync("git", ["-C", root, "ls-files", "-z"], {
@@ -336,6 +390,26 @@ function trackedFiles(root: string): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+function isTrackedFile(file: string): boolean {
+  try {
+    const repoRoot = execFileSync("git", ["-C", dirname(file), "rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    const rel = toPosix(relative(repoRoot, file));
+    execFileSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", rel], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isExactHasnaPackageName(item: string): boolean {
+  return /^@hasna\/[a-z0-9][a-z0-9._-]*$/.test(item);
 }
 
 function isSafeReference(value: string): boolean {
