@@ -924,6 +924,42 @@ program
     }
   });
 
+// ── package-manager-scan ─────────────────────────────────────────────────────
+program
+  .command("package-manager-scan [paths...]")
+  .description("Scan package-manager config for literal token ingress without printing values")
+  .option("--home", "also scan home .npmrc, Bun config, and shell profiles")
+  .option("--fail-on-findings", "exit nonzero when any finding is detected")
+  .option("--json", "output machine-readable JSON")
+  .option("--limit <n>", `max findings to print (default ${DEFAULT_LIST_LIMIT})`)
+  .action(async (paths: string[] | undefined, opts: { home?: boolean; failOnFindings?: boolean; json?: boolean; limit?: string }) => {
+    const { scanPackageManagerSecrets } = await import("../lib/package-manager-guard.js");
+    const roots = paths && paths.length > 0 ? paths : [process.cwd()];
+    const result = scanPackageManagerSecrets({ roots, includeHome: !!opts.home });
+    const maxPrinted = parseLimit(opts.limit, DEFAULT_LIST_LIMIT);
+    const visible = result.findings.slice(0, maxPrinted);
+    const omitted = Math.max(0, result.findings.length - visible.length);
+
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.findings.length === 0) {
+      console.log(chalk.green("✓") + ` Package-manager scan clean (${result.scannedFiles} file(s)).`);
+    } else {
+      console.log(chalk.red(`✗ ${result.findings.length} package-manager finding(s) detected.`));
+      for (const finding of visible) {
+        const tracked = finding.tracked ? "tracked" : "untracked";
+        const color = finding.severity === "error" ? chalk.red : chalk.yellow;
+        console.log(color(`  ${finding.path}:${finding.line} ${finding.rule}`) + chalk.dim(` [${finding.surface}, ${tracked}] ${finding.detail}`));
+      }
+      if (omitted > 0) console.log(chalk.dim(`  Omitted ${omitted} finding(s). Re-run with --limit ${result.findings.length} or --json.`));
+      console.log(chalk.dim("  Secret values are never printed by this command."));
+    }
+
+    if (opts.failOnFindings && result.findings.length > 0) {
+      process.exitCode = 1;
+    }
+  });
+
 // ── mcp ───────────────────────────────────────────────────────────────────────
 const mcpCmd = program.command("mcp").description("Install/remove MCP server for AI agents");
 

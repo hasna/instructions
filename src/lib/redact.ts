@@ -147,9 +147,9 @@ function redactIni(content: string): RedactResult {
     const line = lines[i]!;
     // //registry:_authToken=value (npmrc style)
     const authM = line.match(/^(\/\/[^:]+:_authToken=)(.+)$/);
-    if (authM && !authM[2]!.startsWith("{{")) {
-      redacted.push({ varName: "NPM_AUTH_TOKEN", line: i + 1, reason: "npm auth token" });
-      out.push(`${authM[1]}{{NPM_AUTH_TOKEN}}`);
+    if (authM && !isReferenceValue(authM[2]!.trim())) {
+      redacted.push({ varName: "NPM_TOKEN", line: i + 1, reason: "npm auth token" });
+      out.push(`${authM[1]}\${NPM_TOKEN}`);
       continue;
     }
     // key=value
@@ -197,6 +197,7 @@ function redactGeneric(content: string): RedactResult {
 
 function shouldRedactKeyValue(key: string, value: string): boolean {
   if (!value || value.startsWith("{{")) return false; // already redacted
+  if (isReferenceValue(value.trim())) return false; // env/template references are safe to store
   if (value.length < MIN_SECRET_VALUE_LEN) return false;
   // Skip obviously non-secret values
   if (/^(true|false|yes|no|on|off|null|undefined|\d+)$/i.test(value)) return false;
@@ -215,6 +216,15 @@ function reasonFor(key: string, value: string): string {
     if (re.test(value)) return reason;
   }
   return "secret value pattern";
+}
+
+function isReferenceValue(value: string): boolean {
+  return (
+    /^\{\{[A-Z][A-Z0-9_]*\}\}$/.test(value) ||
+    /^\$\{[A-Z][A-Z0-9_]*\}$/.test(value) ||
+    /^\$[A-Z][A-Z0-9_]*$/.test(value) ||
+    /^%[A-Z][A-Z0-9_]*%$/.test(value)
+  );
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

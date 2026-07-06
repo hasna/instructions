@@ -84,10 +84,15 @@ describe("redactContent — toml", () => {
 });
 
 describe("redactContent — ini/.npmrc", () => {
-  test("redacts //registry:_authToken=value", () => {
+  test("redacts npmrc auth value to npm env reference", () => {
     const r = redactContent("//registry.npmjs.org/:_authToken=npm_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890", "ini");
-    expect(r.content).toBe("//registry.npmjs.org/:_authToken={{NPM_AUTH_TOKEN}}");
-    expect(r.redacted[0]!.varName).toBe("NPM_AUTH_TOKEN");
+    expect(r.content).toBe("//registry.npmjs.org/:_authToken=${NPM_TOKEN}");
+    expect(r.redacted[0]!.varName).toBe("NPM_TOKEN");
+  });
+
+  test("does not flag npm env references as secrets", () => {
+    const r = redactContent("//registry.npmjs.org/:_authToken=${NPM_TOKEN}", "ini");
+    expect(r.redacted).toHaveLength(0);
   });
 });
 

@@ -22,6 +22,8 @@ configs show <slug>             # full metadata + content
 configs inspect <slug>          # alias for show
 configs profile resolve
 configs profile apply --auto
+configs package-manager-scan --fail-on-findings .
+configs package-manager-scan --home --fail-on-findings .
 ```
 
 Collection commands are compact by default to keep agent terminals and context
@@ -31,6 +33,36 @@ small. Human output is capped at 20 rows unless you pass `--limit`; use
 - `--verbose` expands list rows with descriptions, tags, and paths.
 - `--json` preserves full machine-readable records for automation.
 - `show`/`inspect` and `snapshot show` print full config or snapshot content.
+
+## Package-Manager Secret Guard
+
+`configs package-manager-scan` blocks package-manager credential ingress without
+printing credential values. It scans repo `.npmrc` files, home `.npmrc`, Bun
+config, lockfiles, and shell profiles, then reports only path, line, rule,
+surface, and tracked status.
+
+Use it in CI or pre-commit hooks:
+
+```bash
+configs package-manager-scan --fail-on-findings .
+```
+
+Use `--home` for local operator scans:
+
+```bash
+configs package-manager-scan --home --fail-on-findings .
+```
+
+Safe `.npmrc` auth uses npm's environment reference, not a rendered literal:
+
+```ini
+@hasna:registry=https://registry.npmjs.org/
+//registry.npmjs.org/:_authToken=${NPM_TOKEN}
+```
+
+Bun release-age quarantine must stay enabled. Keep
+`minimumReleaseAgeExcludes` narrowed to exact `@hasna/<package>` names only;
+wildcards and third-party package names fail the guard.
 
 ## MCP Server
 
