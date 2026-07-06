@@ -38,7 +38,7 @@ src/cli/index.tsx     — 28 CLI commands (Commander + chalk)
 src/mcp/index.ts      — 16 MCP tools (lean stubs + CONFIGS_PROFILE)
 src/server/index.ts   — Hono REST API (port 3457, serves dashboard + ?fields=)
 src/index.ts          — library exports
-sdk/                  — @hasna/configs-sdk (zero-dep fetch client)
+sdk/                  — @hasna/instructions-sdk (zero-dep fetch client)
 dashboard/            — React+Vite (5 pages)
 ```
 

@@ -1,0 +1,36 @@
+{
+  "schema": "hasna.service_contract.v1",
+  "name": "instructions",
+  "class": "service",
+  "contractVersion": "v1",
+  "kitVersion": "0.4.1",
+  "description": "AI coding agent instruction & configuration manager (formerly @hasna/configs). CLI + MCP + HTTP API (instructions-serve) + generated SDK. Cloud mode (HASNA_INSTRUCTIONS_DATABASE_URL set) is PURE REMOTE per Amendment A1: the serve process reads/writes the shared cloud Postgres directly with API-key auth via @hasna/contracts. The MCP server keeps the legacy name 'configs' aliased for the existing fleet.",
+  "bins": ["instructions", "instructions-mcp", "instructions-serve", "configs-mcp"],
+  "storage": {
+    "mode": "local",
+    "envPrefix": "HASNA_INSTRUCTIONS_",
+    "aliasEnvPrefix": "INSTRUCTIONS_",
+    "databaseUrlSecretRef": "hasna/oss/instructions/database-url",
+    "sqlitePath": "~/.hasna/instructions/instructions.db"
+  },
+  "metadata": {
+    "service": {
+      "port": 8080,
+      "healthPath": "/health",
+      "readyPath": "/ready",
+      "versionPath": "/version",
+      "openapiPath": "/openapi.json",
+      "apiVersion": "v1",
+      "auth": "api-key",
+      "signingSecretSecretRef": "hasna/oss/instructions/api-key-signing-secret"
+    },
+    "client": {
+      "apiUrlEnv": "INSTRUCTIONS_API_URL",
+      "apiKeyEnv": "INSTRUCTIONS_API_KEY"
+    },
+    "mcp": {
+      "name": "configs",
+      "note": "MCP server identity intentionally kept as 'configs' so the 17-machine fleet MCP config keeps working; fleet rename is a separate controlled step."
+    }
+  }
+}

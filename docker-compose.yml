@@ -1,0 +1,46 @@
+# Local development stack for @hasna/instructions in cloud (PURE REMOTE) mode.
+#   docker compose run --rm instructions-migrate     # apply schema first
+#   docker compose up --build instructions-serve
+# Auth: mint a key with
+#   contracts issue-key --app instructions --scopes instructions:*
+# using the SAME HASNA_INSTRUCTIONS_API_SIGNING_KEY and HASNA_INSTRUCTIONS_DATABASE_URL.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: instructions
+      POSTGRES_PASSWORD: instructions
+      POSTGRES_DB: instructions
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instructions"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  instructions-migrate:
+    build: .
+    command: ["bun", "dist/server/index.js", "migrate"]
+    environment:
+      HASNA_INSTRUCTIONS_STORAGE_MODE: cloud
+      HASNA_INSTRUCTIONS_DATABASE_URL: postgres://instructions:instructions@postgres:5432/instructions?sslmode=disable
+      HASNA_INSTRUCTIONS_API_SIGNING_KEY: dev-signing-secret-change-me
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  instructions-serve:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      HOST: 0.0.0.0
+      INSTRUCTIONS_NO_OPEN: "true"
+      HASNA_INSTRUCTIONS_STORAGE_MODE: cloud
+      HASNA_INSTRUCTIONS_DATABASE_URL: postgres://instructions:instructions@postgres:5432/instructions?sslmode=disable
+      HASNA_INSTRUCTIONS_API_SIGNING_KEY: dev-signing-secret-change-me
+    depends_on:
+      instructions-migrate:
+        condition: service_completed_successfully

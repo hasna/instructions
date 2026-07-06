@@ -1,4 +1,4 @@
-# AGENTS.md — How AI Agents Should Use @hasna/configs
+# AGENTS.md — How AI Agents Should Use @hasna/instructions
 
 ## MCP Setup
 
