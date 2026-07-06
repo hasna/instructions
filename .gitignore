@@ -9,4 +9,4 @@ sdk/node_modules/
 *.db-wal
 .env
 .env.local
-bun.lock
+.hasna/

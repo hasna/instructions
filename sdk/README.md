@@ -1,17 +1,17 @@
-# @hasna/configs-sdk
+# @hasna/instructions-sdk
 
-Zero-dependency TypeScript client for the `@hasna/configs` REST API. Works in Node, Bun, Deno, and browser.
+Zero-dependency TypeScript client for the `@hasna/instructions` REST API. Works in Node, Bun, Deno, and browser.
 
 ## Install
 
 ```bash
-bun add @hasna/configs-sdk
+bun add @hasna/instructions-sdk
 ```
 
 ## Quick Start
 
 ```typescript
-import { ConfigsClient } from "@hasna/configs-sdk";
+import { ConfigsClient } from "@hasna/instructions-sdk";
 
 const client = new ConfigsClient({ baseUrl: "http://localhost:3457" });
 // Or: reads CONFIGS_URL env var
@@ -77,7 +77,7 @@ const snaps = await client.getSnapshots("claude-claude-md");
 
 ## Part of the @hasna ecosystem
 
-- [`@hasna/configs`](https://npm.im/@hasna/configs) — CLI + MCP + REST server
+- [`@hasna/instructions`](https://npm.im/@hasna/instructions) — CLI + MCP + REST server
 - [`@hasna/todos`](https://npm.im/@hasna/todos) — task management
 - [`@hasna/mementos`](https://npm.im/@hasna/mementos) — persistent memory
 - [`@hasna/sessions`](https://npm.im/@hasna/sessions) — session search

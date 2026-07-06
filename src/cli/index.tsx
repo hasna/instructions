@@ -1530,7 +1530,7 @@ program
     console.log(chalk.green("✓") + " Feedback saved. Thank you!");
   });
 
-program.version(pkg.version).name("configs");
+program.version(pkg.version).name("instructions");
 registerStorageCommands(program);
 registerEventsCommands(program, { source: "configs" });
 program.parse(process.argv);

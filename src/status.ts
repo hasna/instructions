@@ -7,8 +7,8 @@ import { listMachines } from "./db/machines.js";
 import { expandPath } from "./lib/apply.js";
 import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
 
-const PACKAGE_NAME = "@hasna/configs";
-const PACKAGE_VERSION = "0.2.38";
+const PACKAGE_NAME = "@hasna/instructions";
+const PACKAGE_VERSION = "0.3.0";
 
 type ActiveDbEnv = "HASNA_CONFIGS_DB_PATH" | "CONFIGS_DB_PATH" | null;
 type DatabaseKind = "memory" | "file";

@@ -1,14 +1,15 @@
 {
-  "name": "@hasna/configs",
-  "version": "0.2.45",
-  "description": "AI coding agent configuration manager — store, version, apply, and share all your AI coding configs. CLI + MCP + REST API + Dashboard.",
+  "name": "@hasna/instructions",
+  "version": "0.3.0",
+  "description": "AI coding agent instruction & configuration manager — store, version, apply, and share all your AI coding configs. CLI + MCP + HTTP API (instructions-serve) + generated SDK + Dashboard.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "configs": "dist/cli/index.js",
-    "configs-mcp": "dist/mcp/index.js",
-    "configs-serve": "dist/server/index.js"
+    "instructions": "dist/cli/index.js",
+    "instructions-mcp": "dist/mcp/index.js",
+    "instructions-serve": "dist/server/index.js",
+    "configs-mcp": "dist/mcp/index.js"
   },
   "exports": {
     ".": {
@@ -29,7 +30,11 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "bun run clean && bun build src/cli/index.tsx --outdir dist/cli --target bun --external ink --external react --external chalk --external pg --external @modelcontextprotocol/sdk && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external pg --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun --external pg && bun build src/index.ts src/storage.ts --outdir dist --target bun --external pg && tsc --emitDeclarationOnly --outDir dist",
+    "build:server": "bun run clean && bun build src/cli/index.tsx --outdir dist/cli --target bun --external ink --external react --external chalk --external pg --external @modelcontextprotocol/sdk && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external pg --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun --external pg && bun build src/index.ts src/storage.ts --outdir dist --target bun --external pg",
     "build:dashboard": "cd dashboard && bun run build",
+    "migrate": "bun run src/server/index.ts migrate",
+    "generate:sdk": "bun run scripts/generate-sdk.ts",
+    "kit:check": "bunx @hasna/contracts vendor-kit --check",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.tsx",
@@ -37,9 +42,10 @@
     "dev:serve": "bun run src/server/index.ts",
     "seed": "bun run scripts/seed.ts",
     "prepublishOnly": "bun run build",
-    "postinstall": "mkdir -p $HOME/.hasna/configs $HOME/.hasna/configs/backups 2>/dev/null || true"
+    "postinstall": "mkdir -p $HOME/.hasna/instructions $HOME/.hasna/instructions/backups 2>/dev/null || true"
   },
   "keywords": [
+    "instructions",
     "configs",
     "dotfiles",
     "agent-config",
@@ -58,11 +64,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hasna/open-configs.git"
+    "url": "git+https://github.com/hasna/instructions.git"
   },
-  "homepage": "https://github.com/hasna/open-configs",
+  "homepage": "https://github.com/hasna/instructions",
   "bugs": {
-    "url": "https://github.com/hasna/open-configs/issues"
+    "url": "https://github.com/hasna/instructions/issues"
   },
   "engines": {
     "bun": ">=1.0.0"
@@ -70,6 +76,7 @@
   "author": "Andrei Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
+    "@hasna/contracts": "^0.4.1",
     "@hasna/events": "^0.1.6",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
