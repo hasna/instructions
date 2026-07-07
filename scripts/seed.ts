@@ -65,7 +65,7 @@ Format: export KEY_NAME="value"
 | ANTHROPIC_API_KEY | Claude/Anthropic AI |
 | OPENAI_API_KEY | OpenAI/GPT |
 | EXA_API_KEY | Exa semantic search |
-| NPM_TOKEN | npm publish token |
+| NPM_TOKEN | npm publish token; keep the value in the runtime environment or approved vault, never as a literal ~/.npmrc value |
 | GITHUB_TOKEN | GitHub API |
 `,
   },

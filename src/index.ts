@@ -136,3 +136,13 @@ export type { TemplateVar } from "./lib/template.js";
 // Lib — redact
 export { redactContent, scanSecrets, hasSecrets } from "./lib/redact.js";
 export type { RedactResult, RedactedVar, RedactFormat } from "./lib/redact.js";
+
+// Lib — package-manager guard
+export { scanPackageManagerSecrets } from "./lib/package-manager-guard.js";
+export type {
+  PackageManagerFinding,
+  PackageManagerScanOptions,
+  PackageManagerScanResult,
+  PackageManagerSeverity,
+  PackageManagerSurface,
+} from "./lib/package-manager-guard.js";

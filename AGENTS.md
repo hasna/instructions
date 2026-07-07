@@ -39,9 +39,14 @@ configs mcp install --claude --profile minimal    # 3 tools (lowest context cost
 ### Restore Secrets on New Machine
 ```
 1. Import backup: configs import backup.tar.gz (CLI)
-2. render_template("npmrc", use_env=true) → fills {{NPM_AUTH_TOKEN}} from env
-3. apply_config("npmrc") → writes to ~/.npmrc
+2. Keep ~/.npmrc env-backed: //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+3. Load NPM_TOKEN from the shell, CI secret store, or an approved vault at runtime
+4. Run configs package-manager-scan --home --fail-on-findings before committing
 ```
+
+Do not render or write a literal npm token into `~/.npmrc`. The safe home
+credential flow stores only the scoped registry line plus `${NPM_TOKEN}` and
+keeps the token value in the runtime environment or secret manager.
 
 ### Sync Project Configs
 ```
@@ -84,7 +89,20 @@ Configs automatically redacts secrets before storing. Patterns detected:
 - Key names: `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIAL`, `*_AUTH*`
 - Value patterns: npm tokens, GitHub tokens, Anthropic/OpenAI keys, AWS keys, JWTs, Slack tokens
 
-Redacted values become `{{VAR_NAME}}` template placeholders. Use `render_template` with `use_env=true` to fill them from environment variables.
+Redacted values become `{{VAR_NAME}}` template placeholders, except `.npmrc`
+auth tokens, which are converted to npm's `${NPM_TOKEN}` environment reference
+so home and repo package-manager configs do not store literal tokens.
+
+## Package-Manager Secret Guard
+
+Use `configs package-manager-scan --fail-on-findings .` in repo CI or
+pre-commit hooks. Add `--home` for local operator checks. The guard scans repo
+`.npmrc`, home `.npmrc`, Bun config, lockfiles, and shell profiles, and prints
+only paths, line numbers, rule names, surfaces, and tracked status.
+
+Bun release-age quarantine must remain enabled. `minimumReleaseAgeExcludes`
+should contain only exact `@hasna/<package>` names; do not use wildcard or
+third-party excludes.
 
 ## Constraints
 
