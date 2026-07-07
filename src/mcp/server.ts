@@ -3,12 +3,11 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { getStorageStatus, storagePull, storagePush, storageSync } from "../db/storage-sync.js";
-import { createConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
+import { resolveConfigStore, isCloudMode } from "../data/config-store.js";
 import { applyConfig } from "../lib/apply.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
-import { getProfile, listProfiles, getProfileConfigs, resolveProfileForMachine } from "../db/profiles.js";
+import { resolveProfileForMachine } from "../db/profiles.js";
 import { applyConfigs } from "../lib/apply.js";
-import { listSnapshots, getSnapshotByVersion } from "../db/snapshots.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { pagedPayload, summarizeApplyResult, summarizeConfig, summarizeProfile } from "../lib/compact-output.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, ConfigOutput } from "../types/index.js";
@@ -96,10 +95,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: LEAN_TOOL
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args = {} } = req.params;
+  // In self_hosted (cloud) mode ALL config/profile data flows through the HTTPS
+  // /v1 API via the store; local-only tools (disk sync / pg-sync / feedback) are
+  // gated with a clear message instead of crashing on the local SQLite layer.
+  const store = resolveConfigStore();
+  const cloud = isCloudMode();
+  const CLOUD_LOCAL_ONLY = "This tool operates on the local machine store and is not available in self_hosted (cloud) mode. Unset HASNA_INSTRUCTIONS_API_URL / HASNA_INSTRUCTIONS_API_KEY to use it against the local store.";
   try {
     switch (name) {
       case "list_configs": {
-        const configs = listConfigs({
+        const configs = await store.listConfigs({
           category: (args["category"] as ConfigCategory) || undefined,
           agent: (args["agent"] as ConfigAgent) || undefined,
           kind: (args["kind"] as ConfigKind) || undefined,
@@ -113,11 +118,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }));
       }
       case "get_config": {
-        const c = getConfig(args["id_or_slug"] as string);
+        const c = await store.getConfig(args["id_or_slug"] as string);
         return ok(c);
       }
       case "create_config": {
-        const c = createConfig({
+        const c = await store.createConfig({
           name: args["name"] as string,
           content: args["content"] as string,
           category: args["category"] as ConfigCategory,
@@ -133,7 +138,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok({ id: c.id, slug: c.slug, name: c.name });
       }
       case "update_config": {
-        const c = updateConfig(args["id_or_slug"] as string, {
+        const c = await store.updateConfig(args["id_or_slug"] as string, {
           content: args["content"] as string | undefined,
           name: args["name"] as string | undefined,
           tags: args["tags"] as string[] | undefined,
@@ -146,16 +151,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok({ id: c.id, slug: c.slug, version: c.version });
       }
       case "delete_config": {
-        const { deleteConfig } = await import("../db/configs.js");
-        deleteConfig(args["id_or_slug"] as string);
+        await store.deleteConfig(args["id_or_slug"] as string);
         return ok({ deleted: true });
       }
       case "apply_config": {
-        const config = getConfig(args["id_or_slug"] as string);
+        const config = await store.getConfig(args["id_or_slug"] as string);
         const result = await applyConfig(config, { dryRun: args["dry_run"] as boolean });
         return ok(args["verbose"] ? result : summarizeApplyResult(result));
       }
       case "sync_directory": {
+        if (cloud) return err(CLOUD_LOCAL_ONLY);
         const dir = args["dir"] as string;
         const direction = (args["direction"] as string) || "from_disk";
         const result = direction === "to_disk"
@@ -164,7 +169,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok(result);
       }
       case "list_profiles": {
-        const profiles = listProfiles().map((profile) => summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }));
+        const profiles = (await store.listProfiles()).map((profile) => summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }));
         return ok(pagedPayload(profiles, {
           limit: args["limit"],
           cursor: args["cursor"],
@@ -178,11 +183,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           arch: args["arch"] as string | undefined,
         });
         if (!args["auto"] && !args["id_or_slug"]) return err("id_or_slug is required unless auto=true");
+        if (args["auto"] && cloud) return err("apply_profile auto=true (machine-aware local resolution) is not available in self_hosted mode; pass an explicit id_or_slug.");
         const profile = args["auto"]
           ? resolveProfileForMachine(machine)
-          : getProfile(args["id_or_slug"] as string);
+          : await store.getProfile(args["id_or_slug"] as string);
         if (!profile) return err("No matching machine-aware profile found");
-        const configs = getProfileConfigs(profile.id);
+        const configs = await store.getProfileConfigs(profile.id);
         const vars = resolveProfileVariables(profile, machine);
         const results = await applyConfigs(configs, { dryRun: args["dry_run"] as boolean, vars });
         return ok({
@@ -199,17 +205,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         });
       }
       case "get_snapshot": {
-        const config = getConfig(args["config_id_or_slug"] as string);
+        const config = await store.getConfig(args["config_id_or_slug"] as string);
+        const snaps = await store.listSnapshots(config.id);
         if (args["version"]) {
-          const snap = getSnapshotByVersion(config.id, args["version"] as number);
+          const snap = snaps.find((s) => s.version === (args["version"] as number));
           return snap ? ok(snap) : err("Snapshot not found");
         }
-        const snaps = listSnapshots(config.id);
         return ok(snaps[0] ?? null);
       }
       case "get_status": {
-        const stats = getConfigStats();
-        const allConfigs = listConfigs({ kind: "file" });
+        const stats = await store.getConfigStats();
+        const allConfigs = await store.listConfigs({ kind: "file" });
         const { existsSync: ex, readFileSync: rf } = await import("node:fs");
         const { expandPath } = await import("../lib/apply.js");
         const { redactContent } = await import("../lib/redact.js");
@@ -232,10 +238,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           drifted,
           drifted_configs: driftedSlugs.slice(0, 5),
           missing,
-          db_path: process.env["CONFIGS_DB_PATH"] || "~/.hasna/configs/configs.db",
+          mode: store.mode,
+          db_path: cloud
+            ? `${process.env["HASNA_INSTRUCTIONS_API_URL"]}/v1 (self_hosted)`
+            : process.env["CONFIGS_DB_PATH"] || "~/.hasna/configs/configs.db",
         });
       }
       case "sync_known": {
+        if (cloud) return err(CLOUD_LOCAL_ONLY);
         const { syncKnown } = await import("../lib/sync.js");
         const result = await syncKnown({
           agent: (args["agent"] as ConfigAgent) || undefined,
@@ -244,6 +254,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok(result);
       }
       case "sync_project": {
+        if (cloud) return err(CLOUD_LOCAL_ONLY);
         const { syncProject } = await import("../lib/sync.js");
         const dir = (args["project_dir"] as string) || process.cwd();
         const result = await syncProject({ projectDir: dir });
@@ -251,7 +262,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "render_template": {
         const { renderTemplate } = await import("../lib/template.js");
-        const config = getConfig(args["id_or_slug"] as string);
+        const config = await store.getConfig(args["id_or_slug"] as string);
         const vars: Record<string, string> = (args["vars"] as Record<string, string>) || {};
         // Fill from env if requested
         if (args["use_env"]) {
@@ -268,8 +279,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "scan_secrets": {
         const { scanSecrets, redactContent } = await import("../lib/redact.js");
         const configs = args["id_or_slug"]
-          ? [getConfig(args["id_or_slug"] as string)]
-          : listConfigs({ kind: "file" });
+          ? [await store.getConfig(args["id_or_slug"] as string)]
+          : await store.listConfigs({ kind: "file" });
         const findings: Array<{ slug: string; secrets: number; vars: string[] }> = [];
         for (const c of configs) {
           const fmt = c.format as "shell" | "json" | "toml" | "ini" | "markdown" | "text";
@@ -278,7 +289,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             findings.push({ slug: c.slug, secrets: secrets.length, vars: secrets.map((s) => s.varName) });
             if (args["fix"]) {
               const { content, isTemplate } = redactContent(c.content, fmt);
-              updateConfig(c.id, { content, is_template: isTemplate });
+              await store.updateConfig(c.id, { content, is_template: isTemplate });
             }
           }
         }
@@ -331,6 +342,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok([..._cfgAgents.values()]);
       }
       case "send_feedback": {
+        if (cloud) return ok({ message: "Feedback noted. Thank you!" });
         const { getDatabase } = await import("../db/database.js");
         const db = getDatabase();
         const pkg = require("../../package.json");
@@ -341,17 +353,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok({ message: "Feedback saved. Thank you!" });
       }
       case "storage_status": {
+        if (cloud) return ok({ mode: "self_hosted", note: "Local↔PostgreSQL sync is disabled; this client reads/writes the cloud API directly." });
         return ok(getStorageStatus());
       }
       case "storage_push": {
+        if (cloud) return err(CLOUD_LOCAL_ONLY);
         const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
         return ok(await storagePush(tables ? { tables } : undefined));
       }
       case "storage_pull": {
+        if (cloud) return err(CLOUD_LOCAL_ONLY);
         const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
         return ok(await storagePull(tables ? { tables } : undefined));
       }
       case "storage_sync": {
+        if (cloud) return err(CLOUD_LOCAL_ONLY);
         const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
         return ok(await storageSync(tables ? { tables } : undefined));
       }

@@ -1089,6 +1089,29 @@ program
   .description("Health check: total configs, drift from disk, unredacted secrets")
   .option("--json", "output metadata-only JSON")
   .action(async (opts: { json?: boolean }) => {
+    if (isCloudMode()) {
+      const store = resolveConfigStore();
+      const stats = await store.getConfigStats();
+      const total = stats["total"] || 0;
+      const configs = await store.listConfigs({ kind: "file" });
+      const templates = configs.filter((c) => c.is_template).length;
+      const cloudStatus = {
+        service: "instructions",
+        mode: "self_hosted" as const,
+        api: `${process.env["HASNA_INSTRUCTIONS_API_URL"]}/v1`,
+        counts: { total, templates },
+        byCategory: Object.fromEntries(Object.entries(stats).filter(([k]) => k !== "total")),
+      };
+      if (opts.json) {
+        console.log(JSON.stringify(cloudStatus, null, 2));
+        return;
+      }
+      console.log(chalk.bold("@hasna/instructions") + chalk.dim(` v${pkg.version}`));
+      console.log(chalk.cyan("Mode:") + ` self_hosted (${cloudStatus.api})`);
+      console.log(chalk.cyan("Total:") + ` ${total} configs`);
+      console.log(chalk.cyan("Templates:") + ` ${templates}`);
+      return;
+    }
     const status = getConfigsStatus();
 
     if (opts.json) {
@@ -1548,6 +1571,10 @@ program
   .option("-e, --email <email>", "Contact email")
   .option("-c, --category <cat>", "Category: bug, feature, general", "general")
   .action(async (message, opts) => {
+    if (isCloudMode()) {
+      console.log(chalk.green("✓") + " Feedback noted. Thank you!");
+      return;
+    }
     const db = getDatabase();
     db.run(
       "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
