@@ -22,6 +22,7 @@ import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFile
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { getConfigsStatus } from "../status.js";
+import { resolveConfigStore, isCloudMode } from "../data/config-store.js";
 import { registerStorageCommands } from "./storage.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
@@ -221,7 +222,7 @@ program
   .option("--cursor <n>", "zero-based pagination cursor for human output")
   .action(async (opts) => {
     const fmt = opts.json ? "json" : opts.verbose ? "table" : opts.brief ? "compact" : opts.format;
-    const configs = listConfigs({
+    const configs = await resolveConfigStore().listConfigs({
       category: opts.category as ConfigCategory,
       agent: opts.agent as ConfigAgent,
       kind: opts.kind as ConfigKind,
@@ -256,7 +257,7 @@ program
   .option("-f, --format <fmt>", "output format: table|json|content", "table")
   .action(async (id, opts) => {
     try {
-      const c = getConfig(id);
+      const c = await resolveConfigStore().getConfig(id);
       if (opts.format === "json") { console.log(JSON.stringify(c, null, 2)); return; }
       if (opts.format === "content") { console.log(c.content); return; }
       console.log(fmtConfig(c, "table"));
@@ -290,7 +291,7 @@ program
     const { content, redacted, isTemplate } = redactContent(rawContent, fmt as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
     const targetPath = abs.startsWith(homedir()) ? abs.replace(homedir(), "~") : abs;
     const name = opts.name || filePath.split("/").pop()!;
-    const config = createConfig({
+    const config = await resolveConfigStore().createConfig({
       name,
       kind: (opts.kind as ConfigKind) ?? "file",
       category: (opts.category as ConfigCategory) ?? detectCategory(abs),
@@ -305,6 +306,25 @@ program
       console.log(chalk.yellow(`  ⚠ Redacted ${redacted.length} secret(s):`));
       for (const r of redacted) console.log(chalk.yellow(`    line ${r.line}: {{${r.varName}}} — ${r.reason}`));
       console.log(chalk.dim("  Config stored as a template. Use `configs template vars` to see placeholders."));
+    }
+  });
+
+// ── delete ─────────────────────────────────────────────────────────────────────
+program
+  .command("delete <id>")
+  .alias("rm")
+  .description("Delete a config record (by id or slug)")
+  .option("--json", "output result as JSON")
+  .action(async (id, opts) => {
+    try {
+      const store = resolveConfigStore();
+      const config = await store.getConfig(id);
+      await store.deleteConfig(config.id);
+      if (opts.json) { console.log(JSON.stringify({ deleted: true, id: config.id, slug: config.slug }, null, 2)); return; }
+      console.log(chalk.green("✓") + ` Deleted: ${chalk.bold(config.name)} ${chalk.dim(`(${config.slug})`)}`);
+    } catch (e) {
+      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      process.exit(1);
     }
   });
 
@@ -467,10 +487,13 @@ program
   .command("whoami")
   .description("Show setup summary")
   .action(async () => {
-    const dbPath = process.env["CONFIGS_DB_PATH"] || join(homedir(), ".hasna", "configs", "configs.db");
-    const stats = getConfigStats();
+    const store = resolveConfigStore();
+    const dbPath = isCloudMode()
+      ? `${process.env["HASNA_INSTRUCTIONS_API_URL"]}/v1 (self_hosted)`
+      : process.env["CONFIGS_DB_PATH"] || join(homedir(), ".hasna", "configs", "configs.db");
+    const stats = await store.getConfigStats();
     console.log(chalk.bold("@hasna/configs") + chalk.dim(" v" + pkg.version));
-    console.log(chalk.cyan("DB:") + " " + dbPath);
+    console.log(chalk.cyan(isCloudMode() ? "API:" : "DB:") + " " + dbPath);
     console.log(chalk.cyan("Total configs:") + " " + (stats["total"] || 0));
     console.log();
     console.log(chalk.bold("By category:"));
@@ -479,7 +502,7 @@ program
       const count = stats[cat] || 0;
       if (count > 0) console.log(`  ${chalk.cyan(cat.padEnd(16))} ${count}`);
     }
-    const profiles = listProfiles();
+    const profiles = await store.listProfiles();
     if (profiles.length > 0) {
       console.log();
       console.log(chalk.bold("Profiles:") + chalk.dim(` (${profiles.length})`));
@@ -499,7 +522,8 @@ profileCmd.command("list").description("List all profiles")
   .option("--cursor <n>", "zero-based pagination cursor for human output")
   .action(async (opts) => {
   const fmt = opts.json ? "json" : opts.verbose ? "table" : opts.brief ? "compact" : opts.format;
-  const profiles = listProfiles();
+  const store = resolveConfigStore();
+  const profiles = await store.listProfiles();
   if (profiles.length === 0) { console.log(chalk.dim("No profiles.")); return; }
   if (fmt === "json") { console.log(JSON.stringify(profiles, null, 2)); return; }
   const page = paginate(profiles, { limit: opts.limit, cursor: opts.cursor });
@@ -507,10 +531,10 @@ profileCmd.command("list").description("List all profiles")
   for (const p of page.items) {
     if (fmt === "compact") {
       const selectorSummary = formatProfileSelectorSummary(p);
-      console.log(`${pad(p.slug, 28)} ${pad(String(getProfileConfigs(p.id).length), 8)} ${pad(selectorSummary || "-", 36)} ${Object.keys(p.variables).length}`);
+      console.log(`${pad(p.slug, 28)} ${pad(String((await store.getProfileConfigs(p.id)).length), 8)} ${pad(selectorSummary || "-", 36)} ${Object.keys(p.variables).length}`);
       continue;
     }
-    const configs = getProfileConfigs(p.id);
+    const configs = await store.getProfileConfigs(p.id);
     console.log(`${chalk.bold(p.name)} ${chalk.dim(`(${p.slug})`)} — ${configs.length} config(s)`);
     if (p.description) console.log(`  ${chalk.dim(p.description)}`);
     const selectorSummary = formatProfileSelectorSummary(p);
@@ -528,7 +552,7 @@ profileCmd.command("create <name>").description("Create a new profile")
   .option("--hostname <hosts>", "comma-separated hostname matchers")
   .option("--var <vars...>", "set profile variable(s) as KEY=VALUE")
   .action(async (name, opts) => {
-    const p = createProfile({
+    const p = await resolveConfigStore().createProfile({
       name,
       description: opts.description,
       selectors: parseProfileSelectors(opts),
@@ -542,8 +566,9 @@ profileCmd.command("show <id>").description("Show profile and its configs")
   .option("--cursor <n>", "zero-based pagination cursor")
   .action(async (id, opts) => {
   try {
-    const p = getProfile(id);
-    const configs = getProfileConfigs(id);
+    const store = resolveConfigStore();
+    const p = await store.getProfile(id);
+    const configs = await store.getProfileConfigs(id);
     console.log(chalk.bold(p.name) + chalk.dim(` (${p.slug})`));
     if (p.description) console.log(chalk.dim(p.description));
     const selectorSummary = formatProfileSelectorSummary(p);
@@ -624,8 +649,9 @@ profileCmd.command("resolve").description("Resolve the matching machine-aware pr
 
 profileCmd.command("delete <id>").description("Delete a profile").action(async (id) => {
   try {
-    const p = getProfile(id);
-    deleteProfile(id);
+    const store = resolveConfigStore();
+    const p = await store.getProfile(id);
+    await store.deleteProfile(p.id);
     console.log(chalk.green("✓") + ` Deleted profile: ${p.name}`);
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });

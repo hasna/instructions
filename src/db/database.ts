@@ -105,6 +105,17 @@ let _db: Database | null = null;
 
 export function getDatabase(path?: string): Database {
   if (_db) return _db;
+  // In self_hosted (cloud) mode the client must never read/write the local
+  // SQLite database. Any code path that still reaches for the local DB while
+  // both HASNA_INSTRUCTIONS_API_URL and HASNA_INSTRUCTIONS_API_KEY are set is a
+  // bug that would cause silent local drift — fail loudly instead. Pass an
+  // explicit path (e.g. tests) to bypass this guard.
+  if (!path && process.env["HASNA_INSTRUCTIONS_API_URL"] && process.env["HASNA_INSTRUCTIONS_API_KEY"]) {
+    throw new Error(
+      "instructions is in self_hosted (cloud) mode: this command is not wired to the cloud API yet. " +
+        "Unset HASNA_INSTRUCTIONS_API_URL / HASNA_INSTRUCTIONS_API_KEY to use it against the local store.",
+    );
+  }
   const dbPath = path || getDbPath();
   const db = new Database(dbPath);
   db.run("PRAGMA journal_mode = WAL");
