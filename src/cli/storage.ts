@@ -6,6 +6,7 @@ import {
   storageSync,
   type SyncResult,
 } from "../db/storage-sync.js";
+import { ensureLocalMode } from "./cloud-mode.js";
 
 function parseTables(value?: string): string[] | undefined {
   if (!value) return undefined;
@@ -29,6 +30,12 @@ export function registerStorageCommands(program: Command): void {
   const storageCmd = program.command("storage").description("Storage sync commands");
 
   storageCmd.command("status").description("Show storage config and local sync state").option("--json", "Output as JSON").action((opts: { json?: boolean }) => {
+    try {
+      ensureLocalMode("configs storage status");
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
     const info = getStorageStatus();
     if (opts.json) { printJson(info); return; }
     console.log(`Storage configured: ${info.configured ? "yes" : "no"}`);
@@ -39,6 +46,7 @@ export function registerStorageCommands(program: Command): void {
 
   storageCmd.command("push").description("Push local configs data to storage PostgreSQL").option("--tables <tables>", "Comma-separated table names").option("--json", "Output as JSON").action(async (opts: { tables?: string; json?: boolean }) => {
     try {
+      ensureLocalMode("configs storage push");
       const results = await storagePush({ tables: parseTables(opts.tables) });
       if (opts.json) { printJson(results); return; }
       printResults(results, "pushed");
@@ -50,6 +58,7 @@ export function registerStorageCommands(program: Command): void {
 
   storageCmd.command("pull").description("Pull configs data from storage PostgreSQL to local SQLite").option("--tables <tables>", "Comma-separated table names").option("--json", "Output as JSON").action(async (opts: { tables?: string; json?: boolean }) => {
     try {
+      ensureLocalMode("configs storage pull");
       const results = await storagePull({ tables: parseTables(opts.tables) });
       if (opts.json) { printJson(results); return; }
       printResults(results, "pulled");
@@ -61,6 +70,7 @@ export function registerStorageCommands(program: Command): void {
 
   storageCmd.command("sync").description("Bidirectional sync: pull then push").option("--tables <tables>", "Comma-separated table names").option("--json", "Output as JSON").action(async (opts: { tables?: string; json?: boolean }) => {
     try {
+      ensureLocalMode("configs storage sync");
       const result = await storageSync({ tables: parseTables(opts.tables) });
       if (opts.json) { printJson(result); return; }
       printResults(result.pull, "pulled");

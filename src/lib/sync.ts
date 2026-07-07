@@ -371,6 +371,7 @@ export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResu
 // ── Diff a config against disk ────────────────────────────────────────────────
 export interface DiffConfigOptions {
   db?: ReturnType<typeof getDatabase>;
+  contextConfigs?: Config[];
 }
 
 function buildDiff(expectedContent: string, targetPath: string): string {
@@ -399,10 +400,9 @@ export function diffConfig(config: Config, opts: DiffConfigOptions = {}): string
   if (!config.target_path && config.outputs.length === 0) return "(reference — no target path)";
 
   const diffs: string[] = [];
-  const db = opts.db || getDatabase();
-  const contextConfigs = config.outputs.length > 0 || config.target_path
-    ? listConfigs(undefined, db)
-    : [config];
+  const needsContext = config.outputs.length > 0 || config.target_path;
+  const db = opts.db ?? (needsContext && !opts.contextConfigs ? getDatabase() : undefined);
+  const contextConfigs = opts.contextConfigs ?? (needsContext ? listConfigs(undefined, db!) : [config]);
 
   if (isGeneratedOutputTarget(config, outputOwnerIdsByTarget(contextConfigs))) {
     return "(generated output — managed by fan-out)";

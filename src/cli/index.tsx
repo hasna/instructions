@@ -9,7 +9,7 @@ import { createConfig, deleteConfig, getConfig, getConfigStats, listConfigs, upd
 import { createProfile, deleteProfile, getProfile, getProfileConfigs, listProfiles, updateProfile, addConfigToProfile, removeConfigFromProfile, resolveProfileForMachine } from "../db/profiles.js";
 import { listSnapshots, getSnapshot } from "../db/snapshots.js";
 import { getDatabase, resetDatabase } from "../db/database.js";
-import { applyConfig, applyConfigs, expandPath } from "../lib/apply.js";
+import { applyConfig, applyConfigs, expandPath, type ApplyOptions } from "../lib/apply.js";
 import { diffConfig, syncKnown, syncToDisk, syncProject, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS } from "../lib/sync.js";
 import { syncFromDir } from "../lib/sync-dir.js";
 import { redactContent, scanSecrets } from "../lib/redact.js";
@@ -22,10 +22,11 @@ import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFile
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { getConfigsStatus } from "../status.js";
-import { resolveConfigStore, isCloudMode } from "../data/config-store.js";
+import { resolveConfigStore, isCloudMode, type ConfigStore } from "../data/config-store.js";
 import { registerStorageCommands } from "./storage.js";
+import { ensureLocalMode } from "./cloud-mode.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
-import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
+import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
 
 import { createRequire } from "node:module";
 const pkg = createRequire(import.meta.url)("../../package.json") as { version: string };
@@ -121,7 +122,7 @@ function parseLayeredReference(value: string): { layer?: SessionInstructionLayer
   return { id: trimmed };
 }
 
-function collectSessionSources(
+async function collectSessionSources(
   opts: {
     source?: string[];
     config?: string[];
@@ -129,13 +130,13 @@ function collectSessionSources(
     replaceSource?: string[];
   },
   tool: SessionRenderTool,
-): SessionInstructionSource[] {
+): Promise<SessionInstructionSource[]> {
   const replaceIds = new Set<string>(opts.replaceSource ?? []);
   const sources = (opts.source ?? []).map((value, index) => parseSessionSource(value, index, replaceIds));
 
   for (const value of opts.config ?? []) {
     const { layer, id } = parseLayeredReference(value);
-    sources.push(sourceFromConfig(getConfig(id), sources.length, layer));
+    sources.push(sourceFromConfig(await resolveConfigStore().getConfig(id), sources.length, layer));
   }
 
   for (const value of opts.identityExport ?? []) {
@@ -146,6 +147,26 @@ function collectSessionSources(
   }
 
   return sources.map((source) => replaceIds.has(source.id) ? { ...source, merge: "replace" } : source);
+}
+
+async function storeApplyOptions(store: ConfigStore, dryRun?: boolean): Promise<Pick<ApplyOptions, "contextConfigs" | "recordLocalSnapshots" | "updateSyncedAt">> {
+  if (store.mode !== "cloud") return {};
+  return {
+    contextConfigs: await store.listConfigs(),
+    recordLocalSnapshots: false,
+    updateSyncedAt: dryRun ? false : async (configId: string) => {
+      await store.updateConfig(configId, { synced_at: new Date().toISOString() });
+    },
+  };
+}
+
+function requireLocalMode(command: string): void {
+  try {
+    ensureLocalMode(command);
+  } catch (e) {
+    console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+    process.exit(1);
+  }
 }
 
 function stripSessionFileContent(file: SessionRenderFile): Omit<SessionRenderFile, "content"> {
@@ -336,8 +357,12 @@ program
   .option("--force", "overwrite even if unchanged")
   .action(async (id, opts) => {
     try {
-      const config = getConfig(id);
-      const result = await applyConfig(config, { dryRun: opts.dryRun });
+      const store = resolveConfigStore();
+      const config = await store.getConfig(id);
+      const result = await applyConfig(config, {
+        dryRun: opts.dryRun,
+        ...(await storeApplyOptions(store, opts.dryRun)),
+      });
       const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.changed ? chalk.green("✓") : chalk.dim("="));
       const change = result.changed ? "changed" : "unchanged";
       console.log(`${status} ${result.path} ${chalk.dim(`(${change})`)}`);
@@ -359,17 +384,20 @@ program
   .option("--all", "diff every known config against disk")
   .action(async (id, opts) => {
     try {
+      const store = resolveConfigStore();
       if (id) {
-        const config = getConfig(id);
-        console.log(diffConfig(config));
+        const config = await store.getConfig(id);
+        const contextConfigs = store.mode === "cloud" ? await store.listConfigs() : undefined;
+        console.log(diffConfig(config, { contextConfigs }));
         return;
       }
       // --all or no id: diff all known file-type configs
-      const configs = listConfigs({ kind: "file" });
+      const contextConfigs = store.mode === "cloud" ? await store.listConfigs() : undefined;
+      const configs = contextConfigs?.filter((config) => config.kind === "file") ?? await store.listConfigs({ kind: "file" });
       let drifted = 0;
       for (const c of configs) {
         if (!c.target_path) continue;
-        const diff = diffConfig(c);
+        const diff = diffConfig(c, { contextConfigs });
         if (diff.includes("no diff") || diff.includes("not found")) continue;
         drifted++;
         console.log(chalk.bold(c.slug) + chalk.dim(` (${c.target_path})`));
@@ -397,6 +425,12 @@ program
   .option("--limit <n>", `with --list, max rows (default ${DEFAULT_LIST_LIMIT})`)
   .option("--cursor <n>", "with --list, zero-based pagination cursor")
   .action(async (opts) => {
+    try {
+      ensureLocalMode("configs sync");
+    } catch (e) {
+      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      process.exit(1);
+    }
     if (opts.list) {
       const targets = KNOWN_CONFIGS.filter((k) => {
         if (opts.agent && k.agent !== opts.agent) return false;
@@ -460,6 +494,7 @@ program
   .option("-o, --output <path>", "output file", "./configs-export.tar.gz")
   .option("-c, --category <cat>", "filter by category")
   .action(async (opts) => {
+    requireLocalMode("configs export");
     const result = await exportConfigs(opts.output, {
       filter: opts.category ? { category: opts.category as ConfigCategory } : undefined,
     });
@@ -472,6 +507,7 @@ program
   .description("Import configs from a tar.gz bundle")
   .option("--overwrite", "overwrite existing configs")
   .action(async (file, opts) => {
+    requireLocalMode("configs import");
     const result = await importConfigs(file, {
       conflict: opts.overwrite ? "overwrite" : "skip",
     });
@@ -586,6 +622,7 @@ profileCmd.command("show <id>").description("Show profile and its configs")
 
 profileCmd.command("add <profile> <config>").description("Add a config to a profile").action(async (profile, config) => {
   try {
+    ensureLocalMode("configs profile add");
     const c = getConfig(config);
     addConfigToProfile(profile, c.id);
     console.log(chalk.green("✓") + ` Added ${c.slug} to profile ${profile}`);
@@ -594,6 +631,7 @@ profileCmd.command("add <profile> <config>").description("Add a config to a prof
 
 profileCmd.command("remove <profile> <config>").description("Remove a config from a profile").action(async (profile, config) => {
   try {
+    ensureLocalMode("configs profile remove");
     const c = getConfig(config);
     removeConfigFromProfile(profile, c.id);
     console.log(chalk.green("✓") + ` Removed ${c.slug} from profile ${profile}`);
@@ -608,15 +646,23 @@ profileCmd.command("apply [id]").description("Apply all configs in a profile to 
   .option("--arch <arch>", "override detected arch for auto resolution")
   .action(async (id, opts) => {
     try {
-      const { machine, profile } = getMachineProfileContext(opts);
-      const selected = opts.auto ? profile : (id ? getProfile(id) : null);
+      const machine = detectMachineContext({ hostname: opts.hostname, os: opts.os, arch: opts.arch });
+      const store = resolveConfigStore();
+      const selected = opts.auto ? (() => {
+        ensureLocalMode("configs profile apply --auto");
+        return resolveProfileForMachine(machine);
+      })() : (id ? await store.getProfile(id) : null);
       if (!selected) {
         console.error(chalk.red(opts.auto ? "No matching machine-aware profile found." : "Provide a profile id or use --auto."));
         process.exit(1);
       }
-      const configs = getProfileConfigs(selected.id);
+      const configs = opts.auto ? getProfileConfigs(selected.id) : await store.getProfileConfigs(selected.id);
       const vars = resolveProfileVariables(selected, machine);
-      const results = await applyConfigs(configs, { dryRun: opts.dryRun, vars });
+      const results = await applyConfigs(configs, {
+        dryRun: opts.dryRun,
+        vars,
+        ...(await storeApplyOptions(store, opts.dryRun)),
+      });
       let changed = 0;
       for (const r of results) {
         const status = opts.dryRun ? chalk.yellow("[dry-run]") : (r.changed ? chalk.green("✓") : chalk.dim("="));
@@ -632,6 +678,12 @@ profileCmd.command("resolve").description("Resolve the matching machine-aware pr
   .option("--os <os>", "override detected OS")
   .option("--arch <arch>", "override detected arch")
   .action(async (opts) => {
+    try {
+      ensureLocalMode("configs profile resolve");
+    } catch (e) {
+      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      process.exit(1);
+    }
     const { machine, profile, vars } = getMachineProfileContext(opts);
     if (!profile) {
       console.log(chalk.yellow(`No matching profile for ${machine.hostname} ${machine.os_family}/${machine.arch}`));
@@ -679,7 +731,7 @@ sessionCmd.command("plan")
         console.error(chalk.red(`Unsupported tool: ${opts.tool}`));
         process.exit(1);
       }
-      const sources = collectSessionSources(opts, tool);
+      const sources = await collectSessionSources(opts, tool);
       const plan = planSessionRender({
         tool,
         profile: opts.profile,
@@ -737,7 +789,7 @@ sessionCmd.command("apply")
         console.error(chalk.red(`Unsupported tool: ${opts.tool}`));
         process.exit(1);
       }
-      const sources = collectSessionSources(opts, tool);
+      const sources = await collectSessionSources(opts, tool);
       const plan = planSessionRender({
         tool,
         profile: opts.profile,
@@ -787,8 +839,9 @@ snapshotCmd.command("list <config>").description("List snapshots for a config")
   .option("--cursor <n>", "zero-based pagination cursor")
   .action(async (configId, opts) => {
   try {
-    const c = getConfig(configId);
-    const snaps = listSnapshots(c.id);
+    const store = resolveConfigStore();
+    const c = await store.getConfig(configId);
+    const snaps = await store.listSnapshots(c.id);
     if (snaps.length === 0) { console.log(chalk.dim("No snapshots.")); return; }
     const page = paginate(snaps, { limit: opts.limit, cursor: opts.cursor });
     for (const s of page.items) {
@@ -799,6 +852,12 @@ snapshotCmd.command("list <config>").description("List snapshots for a config")
 });
 
 snapshotCmd.command("show <id>").description("Show a snapshot's content").action(async (id) => {
+  try {
+    ensureLocalMode("configs snapshot show");
+  } catch (e) {
+    console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+    process.exit(1);
+  }
   const snap = getSnapshot(id);
   if (!snap) { console.error(chalk.red("Snapshot not found: " + id)); process.exit(1); }
   console.log(snap.content);
@@ -806,6 +865,7 @@ snapshotCmd.command("show <id>").description("Show a snapshot's content").action
 
 snapshotCmd.command("restore <config> <snapshot-id>").description("Restore a config to a snapshot version").action(async (configId, snapId) => {
   try {
+    ensureLocalMode("configs snapshot restore");
     const snap = getSnapshot(snapId);
     if (!snap) { console.error(chalk.red("Snapshot not found: " + snapId)); process.exit(1); }
     updateConfig(configId, { content: snap.content });
@@ -818,7 +878,7 @@ const templateCmd = program.command("template").description("Work with template 
 
 templateCmd.command("vars <id>").description("Show template variables").action(async (id) => {
   try {
-    const c = getConfig(id);
+    const c = await resolveConfigStore().getConfig(id);
     const vars = extractTemplateVars(c.content);
     if (vars.length === 0) { console.log(chalk.dim("No template variables found.")); return; }
     for (const v of vars) {
@@ -836,7 +896,7 @@ templateCmd.command("render <id>")
   .action(async (id, opts) => {
     try {
       const { renderTemplate } = await import("../lib/template.js");
-      const c = getConfig(id);
+      const c = await resolveConfigStore().getConfig(id);
       const vars: Record<string, string> = {};
 
       // Collect vars from --var KEY=VALUE
@@ -890,12 +950,13 @@ program
   .option("-c, --category <cat>", "scan only a specific category")
   .option("--limit <n>", `max findings to print (default ${DEFAULT_LIST_LIMIT})`)
   .action(async (id, opts) => {
-    let configs;
+    const store = resolveConfigStore();
+    let configs: Config[];
     if (id) {
-      configs = [getConfig(id)];
+      configs = [await store.getConfig(id)];
     } else if (opts.all) {
       // Scan full DB in batches to avoid OOM
-      configs = listConfigs(opts.category ? { kind: "file", category: opts.category as ConfigCategory } : { kind: "file" });
+      configs = await store.listConfigs(opts.category ? { kind: "file", category: opts.category as ConfigCategory } : { kind: "file" });
     } else {
       // Default: fetch only the ~30 known configs individually by slug (fast, no full table scan)
       const { KNOWN_CONFIGS } = await import("../lib/sync.js");
@@ -903,12 +964,12 @@ program
         ...KNOWN_CONFIGS.filter((k) => !k.rulesDir).map((k) => k.name),
         // rules/*.md slugs follow pattern claude-rules-{filename}-md
       ];
-      const fetched = [];
+      const fetched: Config[] = [];
       for (const slug of slugs) {
-        try { fetched.push(getConfig(slug)); } catch { /* not in DB yet */ }
+        try { fetched.push(await store.getConfig(slug)); } catch { /* not in DB yet */ }
       }
       // Also grab rules by category+agent (small set)
-      const rules = listConfigs({ category: "rules", agent: "claude" });
+      const rules = await store.listConfigs({ category: "rules", agent: "claude" });
       for (const r of rules) if (!fetched.find((c) => c.id === r.id)) fetched.push(r);
       configs = fetched;
     }
@@ -935,7 +996,7 @@ program
         }
         if (opts.fix) {
           const { content, isTemplate } = redactContent(c.content, fmt);
-          updateConfig(c.id, { content, is_template: isTemplate });
+          await store.updateConfig(c.id, { content, is_template: isTemplate });
           if (visible.length > 0) console.log(chalk.green("  ✓ Redacted."));
         }
       }
@@ -962,6 +1023,7 @@ mcpCmd.command("install")
   .option("--all", "install into all agents")
   .option("--profile <level>", "set CONFIGS_PROFILE (minimal|standard|full)", "standard")
   .action(async (opts) => {
+    requireLocalMode("configs mcp install");
     const targets = opts.all ? ["claude", "codex", "gemini"] : [
       ...(opts.claude ? ["claude"] : []),
       ...(opts.codex ? ["codex"] : []),
@@ -1035,6 +1097,7 @@ program
   .description("First-time setup: sync all known configs, create default profile")
   .option("--force", "delete existing DB and start fresh")
   .action(async (opts) => {
+    requireLocalMode("configs init");
     const dbPath = join(homedir(), ".hasna", "configs", "configs.db");
     if (opts.force && existsSync(dbPath)) {
       const { rmSync } = await import("node:fs");
@@ -1136,6 +1199,7 @@ program
   .command("backup")
   .description("Export configs to a timestamped backup file")
   .action(async () => {
+    requireLocalMode("configs backup");
     const { mkdirSync: mk } = await import("node:fs");
     const backupDir = join(homedir(), ".hasna", "configs", "backups");
     mk(backupDir, { recursive: true });
@@ -1152,6 +1216,7 @@ program
   .description("Restore configs from a backup file")
   .option("--overwrite", "overwrite existing configs (default: skip)")
   .action(async (file, opts) => {
+    requireLocalMode("configs restore");
     const result = await importConfigs(file, { conflict: opts.overwrite ? "overwrite" : "skip" });
     console.log(chalk.green("✓") + ` Restored: +${result.created} updated:${result.updated} skipped:${result.skipped}`);
     if (result.errors.length > 0) {
@@ -1164,6 +1229,7 @@ program
   .command("doctor")
   .description("Validate configs: syntax, permissions, missing files, secrets")
   .action(async () => {
+    requireLocalMode("configs doctor");
     let issues = 0;
     const pass = (msg: string) => console.log(chalk.green("  ✓ ") + msg);
     const fail = (msg: string) => { issues++; console.log(chalk.red("  ✗ ") + msg); };
@@ -1258,8 +1324,9 @@ program
   .description("Diff two stored configs against each other")
   .action(async (a, b) => {
     try {
-      const configA = getConfig(a);
-      const configB = getConfig(b);
+      const store = resolveConfigStore();
+      const configA = await store.getConfig(a);
+      const configB = await store.getConfig(b);
       console.log(chalk.bold(`${configA.slug}`) + chalk.dim(` (${configA.category}/${configA.agent})`));
       console.log(chalk.bold(`${configB.slug}`) + chalk.dim(` (${configB.category}/${configB.agent})`));
       console.log();
@@ -1297,6 +1364,7 @@ program
   .description("Watch known config files for changes and auto-sync to DB")
   .option("-i, --interval <ms>", "poll interval in milliseconds", "3000")
   .action(async (opts) => {
+    requireLocalMode("configs watch");
     const interval = Number(opts.interval);
     const { statSync: st } = await import("node:fs");
     const { expandPath } = await import("../lib/apply.js");
@@ -1373,6 +1441,7 @@ program
   .option("--json", "output as JSON")
   .option("--markdown", "output as markdown")
   .action(async () => {
+    requireLocalMode("configs report");
     const stats = getConfigStats();
     const allConfigs = listConfigs();
     const fileConfigs = allConfigs.filter((c) => c.kind === "file");
@@ -1427,6 +1496,7 @@ program
   .option("--dry-run", "show what would be removed")
   .option("--limit <n>", `max orphan rows to print (default ${DEFAULT_LIST_LIMIT})`)
   .action(async (opts) => {
+    requireLocalMode("configs clean");
     const configs = listConfigs({ kind: "file" });
     let removed = 0;
     let printed = 0;
@@ -1462,6 +1532,7 @@ program
   .option("--dry-run", "show what would be installed without doing it")
   .option("--skip-mcp", "skip MCP server registration")
   .action(async (opts) => {
+    requireLocalMode("configs bootstrap");
     const packages = [
       { name: "@hasna/todos", bin: "todos", mcp: "todos-mcp" },
       { name: "@hasna/mementos", bin: "mementos", mcp: "mementos-mcp" },
@@ -1524,6 +1595,7 @@ program
   .option("-a, --agent <agent>", "only sync this agent")
   .option("--dry-run", "preview without writing")
   .action(async (opts) => {
+    requireLocalMode("configs pull");
     const result = await syncKnown({ dryRun: opts.dryRun, agent: opts.agent });
     console.log(chalk.green("✓") + ` Pulled: +${result.added} updated:${result.updated} unchanged:${result.unchanged}`);
   });
@@ -1534,6 +1606,7 @@ program
   .option("-a, --agent <agent>", "only push this agent")
   .option("--dry-run", "preview without writing")
   .action(async (opts) => {
+    requireLocalMode("configs push");
     const result = await syncToDisk({ dryRun: opts.dryRun, agent: opts.agent });
     console.log(chalk.green("✓") + ` Pushed: updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
   });

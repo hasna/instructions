@@ -3,8 +3,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { getStorageStatus, storagePull, storagePush, storageSync } from "../db/storage-sync.js";
-import { resolveConfigStore, isCloudMode } from "../data/config-store.js";
-import { applyConfig } from "../lib/apply.js";
+import { resolveConfigStore, isCloudMode, type ConfigStore } from "../data/config-store.js";
+import { applyConfig, type ApplyOptions } from "../lib/apply.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
 import { resolveProfileForMachine } from "../db/profiles.js";
 import { applyConfigs } from "../lib/apply.js";
@@ -77,6 +77,17 @@ function ok(data: unknown) {
 }
 function err(msg: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }], isError: true };
+}
+
+async function storeApplyOptions(store: ConfigStore, dryRun?: boolean): Promise<Pick<ApplyOptions, "contextConfigs" | "recordLocalSnapshots" | "updateSyncedAt">> {
+  if (store.mode !== "cloud") return {};
+  return {
+    contextConfigs: await store.listConfigs(),
+    recordLocalSnapshots: false,
+    updateSyncedAt: dryRun ? false : async (configId: string) => {
+      await store.updateConfig(configId, { synced_at: new Date().toISOString() });
+    },
+  };
 }
 
 const _cfgAgents = new Map<string, { id: string; name: string; last_seen_at: string }>();
@@ -156,7 +167,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "apply_config": {
         const config = await store.getConfig(args["id_or_slug"] as string);
-        const result = await applyConfig(config, { dryRun: args["dry_run"] as boolean });
+        const dryRun = args["dry_run"] as boolean | undefined;
+        const result = await applyConfig(config, {
+          dryRun,
+          ...(await storeApplyOptions(store, dryRun)),
+        });
         return ok(args["verbose"] ? result : summarizeApplyResult(result));
       }
       case "sync_directory": {
@@ -190,7 +205,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (!profile) return err("No matching machine-aware profile found");
         const configs = await store.getProfileConfigs(profile.id);
         const vars = resolveProfileVariables(profile, machine);
-        const results = await applyConfigs(configs, { dryRun: args["dry_run"] as boolean, vars });
+        const dryRun = args["dry_run"] as boolean | undefined;
+        const results = await applyConfigs(configs, {
+          dryRun,
+          vars,
+          ...(await storeApplyOptions(store, dryRun)),
+        });
         return ok({
           profile: summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }),
           machine: {

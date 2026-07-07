@@ -51,6 +51,9 @@ export interface ApplyOptions {
   db?: ReturnType<typeof getDatabase>;
   vars?: ProfileVariables;
   outputAgent?: Config["agent"];
+  contextConfigs?: Config[];
+  recordLocalSnapshots?: boolean;
+  updateSyncedAt?: false | ((configId: string) => void | Promise<void>);
 }
 
 async function writeConfigResult(
@@ -78,7 +81,7 @@ async function writeConfigResult(
       mkdirSync(dir, { recursive: true });
     }
 
-    if (previousContent !== null && changed) {
+    if (previousContent !== null && changed && opts.recordLocalSnapshots !== false) {
       const db = opts.db || getDatabase();
       createSnapshot(config.id, previousContent, config.version, db);
     }
@@ -121,8 +124,9 @@ export async function applyConfig(
     );
   }
 
-  const db = opts.db || getDatabase();
-  const contextConfigs = selectedOutputs.length > 0 || config.target_path ? listConfigs(undefined, db) : [config];
+  const needsContext = selectedOutputs.length > 0 || config.target_path;
+  const db = opts.db ?? (needsContext && !opts.contextConfigs ? getDatabase() : undefined);
+  const contextConfigs = opts.contextConfigs ?? (needsContext ? listConfigs(undefined, db!) : [config]);
   if (isGeneratedOutputTarget(config, contextConfigs)) {
     throw new ConfigApplyError(
       `Config "${config.name}" targets a generated output path. Apply the canonical source config instead.`
@@ -149,7 +153,12 @@ export async function applyConfig(
   }
 
   if (!opts.dryRun) {
-    updateConfig(config.id, { synced_at: now() }, db);
+    if (typeof opts.updateSyncedAt === "function") {
+      await opts.updateSyncedAt(config.id);
+    } else if (opts.updateSyncedAt !== false) {
+      const updateDb = db ?? opts.db ?? getDatabase();
+      updateConfig(config.id, { synced_at: now() }, updateDb);
+    }
   }
 
   return result;
