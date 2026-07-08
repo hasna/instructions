@@ -179,6 +179,26 @@ function ensureFeedbackTable(db: Database): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+  // Older databases created the feedback table before these columns existed.
+  // CREATE TABLE IF NOT EXISTS won't backfill them, so insertFeedback would fail
+  // with "table feedback has no column named category". Add any missing column
+  // idempotently so both fresh and legacy on-disk stores accept the same insert.
+  const existing = new Set(
+    db
+      .query<{ name: string }, []>("PRAGMA table_info(feedback)")
+      .all()
+      .map((r) => r.name),
+  );
+  const required: Array<[string, string]> = [
+    ["email", "TEXT"],
+    ["category", "TEXT DEFAULT 'general'"],
+    ["version", "TEXT"],
+    ["machine_id", "TEXT"],
+    ["created_at", "TEXT"],
+  ];
+  for (const [name, def] of required) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE feedback ADD COLUMN ${name} ${def}`);
+  }
 }
 
 export interface FeedbackInput {

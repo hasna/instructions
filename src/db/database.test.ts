@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getDatabase, resetDatabase, uuid, now, slugify } from "./database";
+import { Database } from "bun:sqlite";
+import { getDatabase, resetDatabase, insertFeedback, uuid, now, slugify } from "./database";
 
 let originalHome: string | undefined;
 let tempHome: string | null = null;
@@ -118,6 +119,35 @@ describe("database", () => {
     getDatabase();
 
     expect(readFileSync(join(home, ".hasna", "configs", "legacy.txt"), "utf8")).toBe("legacy");
+  });
+
+  test("feedback insert works on a fresh database", () => {
+    const db = getDatabase();
+    expect(() => insertFeedback({ message: "hi", category: "bug", version: "9.9.9" }, db)).not.toThrow();
+    const row = db.query<{ message: string; category: string }, []>(
+      "SELECT message, category FROM feedback LIMIT 1",
+    ).get();
+    expect(row?.message).toBe("hi");
+    expect(row?.category).toBe("bug");
+  });
+
+  test("ensureFeedbackTable backfills category on a legacy feedback table", () => {
+    const home = useTempHome();
+    const dbPath = join(home, "legacy.db");
+    // Simulate a pre-existing store whose feedback table predates the
+    // category/version columns (the exact shape that produced
+    // "table feedback has no column named category").
+    const legacy = new Database(dbPath);
+    legacy.exec("CREATE TABLE feedback (id TEXT PRIMARY KEY, message TEXT NOT NULL, email TEXT)");
+    legacy.close();
+
+    process.env["CONFIGS_DB_PATH"] = dbPath;
+    resetDatabase();
+    const db = getDatabase(dbPath);
+    const columns = db.query<{ name: string }, []>("PRAGMA table_info(feedback)").all().map((r) => r.name);
+    expect(columns).toContain("category");
+    expect(columns).toContain("version");
+    expect(() => insertFeedback({ message: "legacy ok", category: "feature" }, db)).not.toThrow();
   });
 
   test("does not copy legacy data over an existing canonical directory", () => {
