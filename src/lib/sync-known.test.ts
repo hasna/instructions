@@ -1,3 +1,4 @@
+import { LocalConfigStore } from "../data/config-store";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, mkdirSync, existsSync, rmSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -76,7 +77,7 @@ describe("KNOWN_CONFIGS", () => {
 describe("syncKnown", () => {
   test("dry-run does not write to DB", async () => {
     const db = getDatabase();
-    const result = await syncKnown({ db, dryRun: true });
+    const result = await syncKnown({ store: new LocalConfigStore(db), dryRun: true });
     // Should report found files but not write them
     expect(listConfigs(undefined, db).length).toBe(0);
     expect(result.added + result.unchanged + result.skipped.length).toBeGreaterThan(0);
@@ -84,7 +85,7 @@ describe("syncKnown", () => {
 
   test("filters by agent", async () => {
     const db = getDatabase();
-    const result = await syncKnown({ db, agent: "git", dryRun: true });
+    const result = await syncKnown({ store: new LocalConfigStore(db), agent: "git", dryRun: true });
     // Should only report git configs
     expect(result.skipped.every((s) => !s.includes(".claude/"))).toBe(true);
   });
@@ -97,7 +98,7 @@ describe("syncKnown", () => {
       mkdirSync(join(tmpDir, ".cursor", "rules"), { recursive: true });
       writeFileSync(join(tmpDir, ".cursor", "rules", "security.mdc"), "---\nalwaysApply: true\n---\n# Security");
 
-      const result = await syncKnown({ db, agent: "cursor" });
+      const result = await syncKnown({ store: new LocalConfigStore(db), agent: "cursor" });
       const configs = listConfigs({ agent: "cursor" }, db);
 
       expect(result.added).toBe(1);
@@ -120,7 +121,7 @@ describe("syncKnown", () => {
       writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nShared.");
       writeFileSync(join(tmpDir, ".claude", "rules", "security.md"), "# Security");
 
-      const result = await syncKnown({ db, agent: "claude" });
+      const result = await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
       const config = getConfig("claude-claude-md", db);
 
       expect(result.added).toBe(2);
@@ -153,7 +154,7 @@ describe("syncKnown", () => {
       outputs: [],
     }, db);
 
-    const result = await syncKnown({ db, agent: "claude" });
+    const result = await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
     const config = getConfig("claude-claude-md", db);
 
     expect(result.updated).toBe(1);
@@ -167,7 +168,7 @@ describe("syncProject", () => {
     const projDir = join(tmpDir, "test-project");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, "CLAUDE.md"), "# Test Project\n\nHello.");
-    const result = await syncProject({ db, projectDir: projDir });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.added).toBe(1);
     const configs = listConfigs(undefined, db);
     expect(configs.length).toBe(1);
@@ -179,7 +180,7 @@ describe("syncProject", () => {
     const projDir = join(tmpDir, "mcp-project");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, ".mcp.json"), '{"mcpServers":{}}');
-    const result = await syncProject({ db, projectDir: projDir });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.added).toBe(1);
   });
 
@@ -188,7 +189,7 @@ describe("syncProject", () => {
     const projDir = join(tmpDir, "rules-project");
     mkdirSync(join(projDir, ".claude", "rules"), { recursive: true });
     writeFileSync(join(projDir, ".claude", "rules", "test.md"), "# Test Rule");
-    const result = await syncProject({ db, projectDir: projDir });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.added).toBe(1);
   });
 
@@ -197,14 +198,14 @@ describe("syncProject", () => {
     const projDir = join(tmpDir, "dry-project");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, "CLAUDE.md"), "# Dry");
-    await syncProject({ db, projectDir: projDir, dryRun: true });
+    await syncProject({ store: new LocalConfigStore(db), projectDir: projDir, dryRun: true });
     // dry-run should not persist anything to DB
     expect(listConfigs(undefined, db).length).toBe(0);
   });
 
   test("skips empty project dir", async () => {
     const db = getDatabase();
-    const result = await syncProject({ db, projectDir: join(tmpDir, "empty") });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: join(tmpDir, "empty") });
     expect(result.added).toBe(0);
   });
 
@@ -217,7 +218,7 @@ describe("syncProject", () => {
       join(projDir, "AGENTS.md"),
       `workspace=${machine.workspace_root}\ncommand=${machine.bun_bin_dir}/configs-mcp\nbun=${machine.bun_path}`
     );
-    const result = await syncProject({ db, projectDir: projDir });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.added).toBe(1);
     const configs = listConfigs(undefined, db);
     expect(configs[0]!.content).toContain("{{WORKSPACE_ROOT}}");
@@ -243,7 +244,7 @@ describe("syncToDisk", () => {
     const target = join(tmpDir, "sync-to-disk.txt");
     createConfig({ name: "ToDisk", category: "tools", content: "written by syncToDisk", target_path: target }, db);
     const { syncToDisk } = await import("./sync");
-    const result = await syncToDisk({ db });
+    const result = await syncToDisk({ store: new LocalConfigStore(db) });
     expect(existsSync(target)).toBe(true);
     expect(readFileSync(target, "utf-8")).toBe("written by syncToDisk");
   });
@@ -255,7 +256,7 @@ describe("syncToDisk", () => {
     createConfig({ name: "Claude", category: "agent", agent: "claude", content: "claude", target_path: target1 }, db);
     createConfig({ name: "Codex", category: "agent", agent: "codex", content: "codex", target_path: target2 }, db);
     const { syncToDisk } = await import("./sync");
-    const result = await syncToDisk({ db, agent: "claude" });
+    const result = await syncToDisk({ store: new LocalConfigStore(db), agent: "claude" });
     expect(existsSync(target1)).toBe(true);
     expect(existsSync(target2)).toBe(false);
   });
@@ -265,7 +266,7 @@ describe("syncToDisk", () => {
     const target = join(tmpDir, "no-write.txt");
     createConfig({ name: "NoWrite", category: "tools", content: "nope", target_path: target }, db);
     const { syncToDisk } = await import("./sync");
-    await syncToDisk({ db, dryRun: true });
+    await syncToDisk({ store: new LocalConfigStore(db), dryRun: true });
     expect(existsSync(target)).toBe(false);
   });
 
@@ -273,7 +274,7 @@ describe("syncToDisk", () => {
     const db = getDatabase();
     createConfig({ name: "NoPath", category: "workspace", content: "ref", kind: "reference" }, db);
     const { syncToDisk } = await import("./sync");
-    const result = await syncToDisk({ db });
+    const result = await syncToDisk({ store: new LocalConfigStore(db) });
     expect(result.skipped.length).toBe(0);
     expect(result.updated).toBe(0);
   });
@@ -286,10 +287,10 @@ describe("syncToDisk", () => {
     writeFileSync(join(tmpDir, ".claude", "rules", "security.md"), "# Security\n\nRule");
 
     const { syncToDisk } = await import("./sync");
-    await syncKnown({ db, agent: "claude" });
-    await syncToDisk({ db });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
+    await syncToDisk({ store: new LocalConfigStore(db) });
 
-    await syncKnown({ db });
+    await syncKnown({ store: new LocalConfigStore(db) });
     expect(listConfigs({ agent: "codex" }, db).some((config) => config.target_path === "~/.codex/AGENTS.md")).toBe(false);
 
     createConfig({
@@ -310,8 +311,8 @@ describe("syncToDisk", () => {
     }, db);
 
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
-    await syncKnown({ db, agent: "claude" });
-    await syncToDisk({ db });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
+    await syncToDisk({ store: new LocalConfigStore(db) });
 
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
     expect(readFileSync(join(tmpDir, ".codewith", "CODEWITH.md"), "utf-8")).toContain("Version 2");
@@ -324,13 +325,13 @@ describe("syncToDisk", () => {
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 1");
 
     const { syncToDisk } = await import("./sync");
-    await syncKnown({ db, agent: "claude" });
-    await syncToDisk({ db, agent: "codex" });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
+    await syncToDisk({ store: new LocalConfigStore(db), agent: "codex" });
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 1");
 
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
-    await syncKnown({ db, agent: "claude" });
-    const result = await syncToDisk({ db, agent: "codex" });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
+    const result = await syncToDisk({ store: new LocalConfigStore(db), agent: "codex" });
 
     expect(result.updated).toBe(1);
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
@@ -344,8 +345,8 @@ describe("syncToDisk", () => {
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 1");
 
     const { syncToDisk } = await import("./sync");
-    await syncKnown({ db, agent: "claude" });
-    await syncToDisk({ db });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
+    await syncToDisk({ store: new LocalConfigStore(db) });
 
     createConfig({
       name: "zz-stale-codex-generated-absolute",
@@ -357,8 +358,8 @@ describe("syncToDisk", () => {
     }, db);
 
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
-    await syncKnown({ db, agent: "claude" });
-    await syncToDisk({ db });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
+    await syncToDisk({ store: new LocalConfigStore(db) });
 
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("absolute stale");
@@ -373,8 +374,8 @@ describe("syncToDisk", () => {
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 1");
 
     const { syncToDisk } = await import("./sync");
-    await syncKnown({ db, agent: "claude" });
-    await syncToDisk({ db });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
+    await syncToDisk({ store: new LocalConfigStore(db) });
 
     createConfig({
       name: "zz-stale-codex-generated-symlink",
@@ -386,8 +387,8 @@ describe("syncToDisk", () => {
     }, db);
 
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
-    await syncKnown({ db, agent: "claude" });
-    await syncToDisk({ db });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
+    await syncToDisk({ store: new LocalConfigStore(db) });
 
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("symlink stale");
@@ -400,7 +401,7 @@ describe("syncToDisk", () => {
     symlinkSync(tmpDir, linkHome, "dir");
     mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nGenerated");
-    await syncKnown({ db, agent: "claude" });
+    await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
 
     createConfig({
       name: "zz-stale-codex-generated-symlink-before-dir",
@@ -412,7 +413,7 @@ describe("syncToDisk", () => {
     }, db);
 
     const { syncToDisk } = await import("./sync");
-    await syncToDisk({ db });
+    await syncToDisk({ store: new LocalConfigStore(db) });
 
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Generated");
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("symlink stale");
@@ -425,10 +426,10 @@ describe("syncProject — update + unchanged paths", () => {
     const projDir = join(tmpDir, "update-proj");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, "CLAUDE.md"), "# Version 1");
-    await syncProject({ db, projectDir: projDir });
+    await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     // Change content
     writeFileSync(join(projDir, "CLAUDE.md"), "# Version 2 — updated");
-    const result = await syncProject({ db, projectDir: projDir });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.updated).toBe(1);
   });
 
@@ -437,8 +438,8 @@ describe("syncProject — update + unchanged paths", () => {
     const projDir = join(tmpDir, "unchanged-proj");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, "CLAUDE.md"), "# Same content");
-    await syncProject({ db, projectDir: projDir });
-    const result = await syncProject({ db, projectDir: projDir });
+    await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.unchanged).toBeGreaterThanOrEqual(1);
     expect(result.added).toBe(0);
     expect(result.updated).toBe(0);
@@ -449,9 +450,9 @@ describe("syncProject — update + unchanged paths", () => {
     const projDir = join(tmpDir, "rules-update-proj");
     mkdirSync(join(projDir, ".claude", "rules"), { recursive: true });
     writeFileSync(join(projDir, ".claude", "rules", "test.md"), "# Rule v1");
-    await syncProject({ db, projectDir: projDir });
+    await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     writeFileSync(join(projDir, ".claude", "rules", "test.md"), "# Rule v2 — changed");
-    const result = await syncProject({ db, projectDir: projDir });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.updated).toBe(1);
   });
 
@@ -460,8 +461,8 @@ describe("syncProject — update + unchanged paths", () => {
     const projDir = join(tmpDir, "rules-same-proj");
     mkdirSync(join(projDir, ".claude", "rules"), { recursive: true });
     writeFileSync(join(projDir, ".claude", "rules", "same.md"), "# Same rule");
-    await syncProject({ db, projectDir: projDir });
-    const result = await syncProject({ db, projectDir: projDir });
+    await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.unchanged).toBeGreaterThanOrEqual(1);
   });
 });

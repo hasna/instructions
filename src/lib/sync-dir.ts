@@ -4,8 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { homedir } from "node:os";
 import type { SyncResult } from "../types/index.js";
-import { getDatabase } from "../db/database.js";
-import { createConfig, listConfigs, updateConfig } from "../db/configs.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { applyConfig, expandPath } from "./apply.js";
 import { detectAgent, detectCategory, detectFormat } from "./sync.js";
 
@@ -13,13 +12,13 @@ const SKIP = [".db", ".db-shm", ".db-wal", ".log", ".lock", ".DS_Store", "node_m
 function shouldSkip(p: string) { return SKIP.some((s) => p.includes(s)); }
 
 export interface SyncFromDirOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   dryRun?: boolean;
   recursive?: boolean;
 }
 
 export async function syncFromDir(dir: string, opts: SyncFromDirOptions = {}): Promise<SyncResult> {
-  const d = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const absDir = expandPath(dir);
   if (!existsSync(absDir)) return { added: 0, updated: 0, unchanged: 0, skipped: [`Not found: ${absDir}`] };
 
@@ -29,7 +28,7 @@ export async function syncFromDir(dir: string, opts: SyncFromDirOptions = {}): P
 
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
   const home = homedir();
-  const allConfigs = listConfigs(undefined, d);
+  const allConfigs = await store.listConfigs();
 
   for (const file of files) {
     if (shouldSkip(file)) { result.skipped.push(file); continue; }
@@ -39,10 +38,10 @@ export async function syncFromDir(dir: string, opts: SyncFromDirOptions = {}): P
       const targetPath = file.replace(home, "~");
       const existing = allConfigs.find((c) => c.target_path === targetPath);
       if (!existing) {
-        if (!opts.dryRun) createConfig({ name: relative(absDir, file), category: detectCategory(file), agent: detectAgent(file), target_path: targetPath, format: detectFormat(file), content }, d);
+        if (!opts.dryRun) await store.createConfig({ name: relative(absDir, file), category: detectCategory(file), agent: detectAgent(file), target_path: targetPath, format: detectFormat(file), content });
         result.added++;
       } else if (existing.content !== content) {
-        if (!opts.dryRun) updateConfig(existing.id, { content }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { content });
         result.updated++;
       } else { result.unchanged++; }
     } catch { result.skipped.push(file); }
@@ -50,17 +49,17 @@ export async function syncFromDir(dir: string, opts: SyncFromDirOptions = {}): P
   return result;
 }
 
-export async function syncToDir(dir: string, opts: { db?: ReturnType<typeof getDatabase>; dryRun?: boolean } = {}): Promise<SyncResult> {
-  const d = opts.db || getDatabase();
+export async function syncToDir(dir: string, opts: { store?: ConfigStore; dryRun?: boolean } = {}): Promise<SyncResult> {
+  const store = opts.store ?? resolveConfigStore();
   const home = homedir();
   const absDir = expandPath(dir);
   const normalized = dir.startsWith("~/") ? dir : absDir.replace(home, "~");
-  const configs = listConfigs(undefined, d).filter((c) => c.target_path && (c.target_path.startsWith(normalized) || c.target_path.startsWith(absDir)));
+  const configs = (await store.listConfigs()).filter((c) => c.target_path && (c.target_path.startsWith(normalized) || c.target_path.startsWith(absDir)));
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
   for (const config of configs) {
     if (config.kind === "reference") continue;
     try {
-      const r = await applyConfig(config, { dryRun: opts.dryRun, db: d });
+      const r = await applyConfig(config, { dryRun: opts.dryRun, store });
       r.changed ? result.updated++ : result.unchanged++;
     } catch { result.skipped.push(config.target_path || config.id); }
   }

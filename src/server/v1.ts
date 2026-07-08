@@ -84,14 +84,30 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
         }
         return errorResponse(405, `method ${method} not allowed on /v1/configs`);
       }
-      // /v1/configs/:id/snapshots
+      // /v1/configs/:id/snapshots  (and /snapshots/:version, /snapshots/prune)
       if (action === "snapshots") {
+        const sub = segments[4] ? decodeURIComponent(segments[4]) : undefined;
+        if (sub === "prune") {
+          if (method !== "POST") return errorResponse(405, `method ${method} not allowed on /v1/configs/:id/snapshots/prune`);
+          const body = await readJson<{ keep?: number }>(req);
+          const pruned = await store.pruneSnapshots(client, id, body?.keep ?? 10);
+          return json({ pruned });
+        }
+        if (sub !== undefined) {
+          if (method !== "GET") return errorResponse(405, `method ${method} not allowed on /v1/configs/:id/snapshots/:version`);
+          const snapshot = await store.getSnapshotByVersion(client, id, Number(sub));
+          if (!snapshot) return errorResponse(404, `snapshot version not found: ${sub}`);
+          return json({ snapshot });
+        }
         if (method === "GET") {
           const snapshots = await store.listSnapshots(client, id);
           return json({ snapshots, count: snapshots.length });
         }
         if (method === "POST") {
-          const snapshot = await store.createSnapshot(client, id);
+          const body = await readJson<{ content?: string; version?: number }>(req);
+          const snapshot = body && typeof body.content === "string" && typeof body.version === "number"
+            ? await store.createSnapshotContent(client, id, body.content, body.version)
+            : await store.createSnapshot(client, id);
           return json({ snapshot }, 201);
         }
         return errorResponse(405, `method ${method} not allowed on /v1/configs/:id/snapshots`);
@@ -133,6 +149,33 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
         }
         return errorResponse(405, `method ${method} not allowed on /v1/profiles`);
       }
+      // /v1/profiles/resolve?hostname=&os=&arch=
+      if (id === "resolve") {
+        if (method !== "GET") return errorResponse(405, `method ${method} not allowed on /v1/profiles/resolve`);
+        const profile = await store.resolveProfileForMachine(client, {
+          hostname: url.searchParams.get("hostname") ?? undefined,
+          os: url.searchParams.get("os") ?? undefined,
+          arch: url.searchParams.get("arch") ?? undefined,
+        });
+        if (!profile) return errorResponse(404, "no matching machine-aware profile");
+        return json({ profile });
+      }
+      // /v1/profiles/:id/configs  and  /v1/profiles/:id/configs/:configId
+      if (action === "configs") {
+        const configId = segments[4] ? decodeURIComponent(segments[4]) : undefined;
+        if (method === "POST" && !configId) {
+          const body = await readJson<{ config_id?: string }>(req);
+          if (!body?.config_id) return errorResponse(400, "config_id is required");
+          await store.addConfigToProfile(client, id, body.config_id);
+          return json({ added: true });
+        }
+        if (method === "DELETE" && configId) {
+          await store.removeConfigFromProfile(client, id, configId);
+          return json({ removed: true });
+        }
+        return errorResponse(405, `method ${method} not allowed on /v1/profiles/:id/configs`);
+      }
+      if (action) return errorResponse(404, `unknown profile action: ${action}`);
       if (method === "GET") {
         const profile = await store.getProfile(client, id);
         const configs = await store.getProfileConfigs(client, id);
@@ -154,6 +197,54 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
     // ── /v1/stats ──
     if (resource === "stats" && method === "GET") {
       return json(await store.getConfigStats(client));
+    }
+
+    // ── /v1/snapshots/:id ──
+    if (resource === "snapshots") {
+      if (!id) return errorResponse(404, "snapshot id required");
+      if (method !== "GET") return errorResponse(405, `method ${method} not allowed on /v1/snapshots/:id`);
+      const snapshot = await store.getSnapshotById(client, id);
+      if (!snapshot) return errorResponse(404, `snapshot not found: ${id}`);
+      return json({ snapshot });
+    }
+
+    // ── /v1/machines ──
+    if (resource === "machines") {
+      if (id === "applied") {
+        if (method !== "POST") return errorResponse(405, `method ${method} not allowed on /v1/machines/applied`);
+        const body = await readJson<{ hostname?: string }>(req);
+        if (!body?.hostname) return errorResponse(400, "hostname is required");
+        await store.updateMachineApplied(client, body.hostname);
+        return json({ updated: true });
+      }
+      if (!id) {
+        if (method === "GET") {
+          const machines = await store.listMachines(client);
+          return json({ machines, count: machines.length });
+        }
+        if (method === "POST") {
+          const body = await readJson<{ hostname?: string; os?: string | null; arch?: string | null }>(req);
+          if (!body?.hostname) return errorResponse(400, "hostname is required");
+          const machine = await store.registerMachine(client, body.hostname, body.os ?? null, body.arch ?? null);
+          return json({ machine }, 201);
+        }
+        return errorResponse(405, `method ${method} not allowed on /v1/machines`);
+      }
+      return errorResponse(404, `unknown machines route`);
+    }
+
+    // ── /v1/feedback ──
+    if (resource === "feedback" && !id) {
+      if (method !== "POST") return errorResponse(405, `method ${method} not allowed on /v1/feedback`);
+      const body = await readJson<{ message?: string; email?: string; category?: string; version?: string }>(req);
+      if (!body?.message) return errorResponse(400, "message is required");
+      await store.insertFeedback(client, {
+        message: body.message,
+        email: body.email ?? null,
+        category: body.category ?? null,
+        version: body.version ?? null,
+      });
+      return json({ ok: true }, 201);
     }
 
     return errorResponse(404, `unknown /v1 resource: ${resource ?? "(root)"}`);

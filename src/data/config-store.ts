@@ -1,33 +1,52 @@
-// Async config/profile data store with a local (SQLite) and a cloud (HTTP /v1)
-// implementation, selected at runtime.
+// Single Store abstraction for the instructions app.
 //
 // LOCKED architecture (client -> AWS API only): when HASNA_INSTRUCTIONS_API_URL
-// and HASNA_INSTRUCTIONS_API_KEY are both set (self_hosted mode), ALL config and
-// profile reads/writes route to https://<host>/v1 with a bearer key — no local
-// SQLite, no DSN on the client. With the env unset, the local SQLite store is
-// used and the local database is never touched. Setting only one var throws
-// (no silent local drift).
+// and HASNA_INSTRUCTIONS_API_KEY are both set the app runs in `api` transport
+// (self_hosted OR cloud — the client code is identical; only URL/key differ and
+// the self_hosted/cloud distinction is enforced server-side by tenancy). In api
+// mode ALL config/profile/snapshot/machine reads and writes route to
+// `https://<host>/v1` with a bearer key — no local SQLite, no DSN on the client.
+// With the env unset the app uses the local SQLite store (LocalConfigStore),
+// which stays fully first-class. Setting exactly one var throws (no silent
+// local drift).
+//
+// EVERY CLI command, MCP tool, and SDK method routes through this interface.
+// No consumer may import `../db/*` or call `fetch` directly.
 import { randomUUID } from "node:crypto";
+import type { Database } from "bun:sqlite";
 import {
   createConfig as dbCreateConfig,
   deleteConfig as dbDeleteConfig,
   getConfig as dbGetConfig,
+  getConfigById as dbGetConfigById,
   getConfigStats as dbGetConfigStats,
   listConfigs as dbListConfigs,
   updateConfig as dbUpdateConfig,
 } from "../db/configs.js";
 import {
+  addConfigToProfile as dbAddConfigToProfile,
   createProfile as dbCreateProfile,
   deleteProfile as dbDeleteProfile,
   getProfile as dbGetProfile,
   getProfileConfigs as dbGetProfileConfigs,
   listProfiles as dbListProfiles,
+  removeConfigFromProfile as dbRemoveConfigFromProfile,
+  resolveProfileForMachine as dbResolveProfileForMachine,
   updateProfile as dbUpdateProfile,
 } from "../db/profiles.js";
 import {
   createSnapshot as dbCreateSnapshot,
+  getSnapshot as dbGetSnapshot,
+  getSnapshotByVersion as dbGetSnapshotByVersion,
   listSnapshots as dbListSnapshots,
+  pruneSnapshots as dbPruneSnapshots,
 } from "../db/snapshots.js";
+import {
+  listMachines as dbListMachines,
+  registerMachine as dbRegisterMachine,
+  updateMachineApplied as dbUpdateMachineApplied,
+} from "../db/machines.js";
+import { insertFeedback as dbInsertFeedback, resetLocalDatabase as dbResetLocalDatabase, type FeedbackInput } from "../db/database.js";
 import { ConfigNotFoundError, ProfileNotFoundError } from "../types/index.js";
 import type {
   Config,
@@ -35,6 +54,8 @@ import type {
   ConfigSnapshot,
   CreateConfigInput,
   CreateProfileInput,
+  Machine,
+  MachineContext,
   Profile,
   UpdateConfigInput,
   UpdateProfileInput,
@@ -58,7 +79,7 @@ const API_KEY_ENV = "HASNA_INSTRUCTIONS_API_KEY";
 
 /**
  * Resolve cloud config from the environment.
- * - both vars set   -> config (self_hosted / cloud-http)
+ * - both vars set   -> config (api transport: self_hosted / cloud)
  * - neither set     -> null (local SQLite)
  * - exactly one set -> throws (no silent local drift)
  */
@@ -68,7 +89,7 @@ export function resolveCloudConfig(env: NodeJS.ProcessEnv = process.env): CloudC
   if (!apiUrl && !apiKey) return null;
   if (!apiUrl || !apiKey) {
     throw new Error(
-      `Cloud (self_hosted) mode requires BOTH ${API_URL_ENV} and ${API_KEY_ENV}; only ` +
+      `API mode requires BOTH ${API_URL_ENV} and ${API_KEY_ENV}; only ` +
         `${apiUrl ? API_URL_ENV : API_KEY_ENV} is set. Set both to use the cloud API, ` +
         `or unset both to use the local store.`,
     );
@@ -76,80 +97,154 @@ export function resolveCloudConfig(env: NodeJS.ProcessEnv = process.env): CloudC
   return { apiUrl, apiKey };
 }
 
-/** True when self_hosted cloud mode is active. */
+/** True when api (self_hosted/cloud) mode is active. */
 export function isCloudMode(env: NodeJS.ProcessEnv = process.env): boolean {
   return resolveCloudConfig(env) !== null;
 }
 
+/**
+ * The single Store contract. Two transports implement it: LocalConfigStore
+ * (on-box SQLite) and CloudConfigStore (HTTP /v1 + bearer key).
+ */
 export interface ConfigStore {
-  readonly mode: "local" | "cloud";
+  readonly mode: "local" | "api";
+  // Configs
   listConfigs(filter?: ConfigFilter): Promise<Config[]>;
   getConfig(idOrSlug: string): Promise<Config>;
+  getConfigById(id: string): Promise<Config>;
   createConfig(input: CreateConfigInput): Promise<Config>;
   updateConfig(idOrSlug: string, input: UpdateConfigInput): Promise<Config>;
   deleteConfig(idOrSlug: string): Promise<void>;
   getConfigStats(): Promise<Record<string, number>>;
+  // Snapshots
+  listSnapshots(configId: string): Promise<ConfigSnapshot[]>;
+  getSnapshot(id: string): Promise<ConfigSnapshot | null>;
+  getSnapshotByVersion(configId: string, version: number): Promise<ConfigSnapshot | null>;
+  createSnapshot(configId: string, content: string, version: number): Promise<ConfigSnapshot>;
+  pruneSnapshots(configId: string, keep?: number): Promise<number>;
+  // Profiles
   listProfiles(): Promise<Profile[]>;
   getProfile(idOrSlug: string): Promise<Profile>;
   getProfileConfigs(idOrSlug: string): Promise<Config[]>;
   createProfile(input: CreateProfileInput): Promise<Profile>;
   updateProfile(idOrSlug: string, input: UpdateProfileInput): Promise<Profile>;
   deleteProfile(idOrSlug: string): Promise<void>;
-  listSnapshots(idOrSlug: string): Promise<ConfigSnapshot[]>;
-  createSnapshot(idOrSlug: string): Promise<ConfigSnapshot>;
+  addConfigToProfile(profileIdOrSlug: string, configId: string): Promise<void>;
+  removeConfigFromProfile(profileIdOrSlug: string, configId: string): Promise<void>;
+  resolveProfileForMachine(machine?: MachineContext): Promise<Profile | null>;
+  // Machines
+  registerMachine(hostname?: string, os?: string, arch?: string): Promise<Machine>;
+  updateMachineApplied(hostname?: string): Promise<void>;
+  listMachines(): Promise<Machine[]>;
+  // Feedback
+  sendFeedback(input: FeedbackInput): Promise<void>;
+  // Lifecycle
+  /**
+   * Destroy all data in this store (used by `init --force`). Local: wipes the
+   * on-disk SQLite database. Api: forbidden — you cannot wipe the shared cloud
+   * store from a client, so the CloudConfigStore throws.
+   */
+  reset(): Promise<void>;
 }
 
-/** Local SQLite-backed store (wraps the synchronous db layer). */
+/**
+ * Local SQLite-backed store (wraps the synchronous db layer). Accepts an
+ * explicit `Database` handle for isolated use (tests); otherwise uses the
+ * process-wide singleton via the db layer's default.
+ */
 export class LocalConfigStore implements ConfigStore {
   readonly mode = "local" as const;
+  constructor(private readonly db?: Database) {}
+
+  // Configs
   async listConfigs(filter?: ConfigFilter): Promise<Config[]> {
-    return dbListConfigs(filter);
+    return dbListConfigs(filter, this.db);
   }
   async getConfig(idOrSlug: string): Promise<Config> {
-    return dbGetConfig(idOrSlug);
+    return dbGetConfig(idOrSlug, this.db);
+  }
+  async getConfigById(id: string): Promise<Config> {
+    return dbGetConfigById(id, this.db);
   }
   async createConfig(input: CreateConfigInput): Promise<Config> {
-    return dbCreateConfig(input);
+    return dbCreateConfig(input, this.db);
   }
   async updateConfig(idOrSlug: string, input: UpdateConfigInput): Promise<Config> {
-    return dbUpdateConfig(idOrSlug, input);
+    return dbUpdateConfig(idOrSlug, input, this.db);
   }
   async deleteConfig(idOrSlug: string): Promise<void> {
-    dbDeleteConfig(idOrSlug);
+    dbDeleteConfig(idOrSlug, this.db);
   }
   async getConfigStats(): Promise<Record<string, number>> {
-    return dbGetConfigStats();
+    return dbGetConfigStats(this.db);
   }
+  // Snapshots
+  async listSnapshots(configId: string): Promise<ConfigSnapshot[]> {
+    return dbListSnapshots(configId, this.db);
+  }
+  async getSnapshot(id: string): Promise<ConfigSnapshot | null> {
+    return dbGetSnapshot(id, this.db);
+  }
+  async getSnapshotByVersion(configId: string, version: number): Promise<ConfigSnapshot | null> {
+    return dbGetSnapshotByVersion(configId, version, this.db);
+  }
+  async createSnapshot(configId: string, content: string, version: number): Promise<ConfigSnapshot> {
+    return dbCreateSnapshot(configId, content, version, this.db);
+  }
+  async pruneSnapshots(configId: string, keep = 10): Promise<number> {
+    return dbPruneSnapshots(configId, keep, this.db);
+  }
+  // Profiles
   async listProfiles(): Promise<Profile[]> {
-    return dbListProfiles();
+    return dbListProfiles(this.db);
   }
   async getProfile(idOrSlug: string): Promise<Profile> {
-    return dbGetProfile(idOrSlug);
+    return dbGetProfile(idOrSlug, this.db);
   }
   async getProfileConfigs(idOrSlug: string): Promise<Config[]> {
-    return dbGetProfileConfigs(idOrSlug);
+    return dbGetProfileConfigs(idOrSlug, this.db);
   }
   async createProfile(input: CreateProfileInput): Promise<Profile> {
-    return dbCreateProfile(input);
+    return dbCreateProfile(input, this.db);
   }
   async updateProfile(idOrSlug: string, input: UpdateProfileInput): Promise<Profile> {
-    return dbUpdateProfile(idOrSlug, input);
+    return dbUpdateProfile(idOrSlug, input, this.db);
   }
   async deleteProfile(idOrSlug: string): Promise<void> {
-    dbDeleteProfile(idOrSlug);
+    dbDeleteProfile(idOrSlug, this.db);
   }
-  async listSnapshots(idOrSlug: string): Promise<ConfigSnapshot[]> {
-    return dbListSnapshots(idOrSlug);
+  async addConfigToProfile(profileIdOrSlug: string, configId: string): Promise<void> {
+    dbAddConfigToProfile(profileIdOrSlug, configId, this.db);
   }
-  async createSnapshot(idOrSlug: string): Promise<ConfigSnapshot> {
-    const config = dbGetConfig(idOrSlug);
-    return dbCreateSnapshot(config.id, config.content, config.version);
+  async removeConfigFromProfile(profileIdOrSlug: string, configId: string): Promise<void> {
+    dbRemoveConfigFromProfile(profileIdOrSlug, configId, this.db);
+  }
+  async resolveProfileForMachine(machine?: MachineContext): Promise<Profile | null> {
+    return machine
+      ? dbResolveProfileForMachine(machine, this.db)
+      : dbResolveProfileForMachine(undefined, this.db);
+  }
+  // Machines
+  async registerMachine(hostname?: string, os?: string, arch?: string): Promise<Machine> {
+    return dbRegisterMachine(hostname, os, arch, this.db);
+  }
+  async updateMachineApplied(hostname?: string): Promise<void> {
+    dbUpdateMachineApplied(hostname, this.db);
+  }
+  async listMachines(): Promise<Machine[]> {
+    return dbListMachines(this.db);
+  }
+  async sendFeedback(input: FeedbackInput): Promise<void> {
+    dbInsertFeedback(input, this.db);
+  }
+  async reset(): Promise<void> {
+    dbResetLocalDatabase();
   }
 }
 
-/** Cloud store: routes every operation to the `/v1` HTTP API. */
+/** Cloud store: routes every operation to the `/v1` HTTP API with a bearer key. */
 export class CloudConfigStore implements ConfigStore {
-  readonly mode = "cloud" as const;
+  readonly mode = "api" as const;
   private readonly base: string;
   private readonly apiKey: string;
   private readonly timeoutMs: number;
@@ -204,6 +299,7 @@ export class CloudConfigStore implements ConfigStore {
     }
   }
 
+  // Configs
   async listConfigs(filter: ConfigFilter = {}): Promise<Config[]> {
     const params = new URLSearchParams();
     if (filter.category) params.set("category", filter.category);
@@ -216,7 +312,6 @@ export class CloudConfigStore implements ConfigStore {
       `/configs${qs ? `?${qs}` : ""}`,
     );
     let configs = data?.configs ?? [];
-    // Filters not supported by the API query are applied client-side.
     if (filter.tags && filter.tags.length > 0) {
       configs = configs.filter((c) => filter.tags!.every((t) => c.tags.includes(t)));
     }
@@ -235,6 +330,10 @@ export class CloudConfigStore implements ConfigStore {
     );
     if (status === 404 || !data?.config) throw new ConfigNotFoundError(idOrSlug);
     return data.config;
+  }
+
+  async getConfigById(id: string): Promise<Config> {
+    return this.getConfig(id);
   }
 
   async createConfig(input: CreateConfigInput): Promise<Config> {
@@ -268,6 +367,57 @@ export class CloudConfigStore implements ConfigStore {
     return data ?? { total: 0 };
   }
 
+  // Snapshots
+  async listSnapshots(configId: string): Promise<ConfigSnapshot[]> {
+    const { data } = await this.request<{ snapshots: ConfigSnapshot[] }>(
+      "GET",
+      `/configs/${encodeURIComponent(configId)}/snapshots`,
+    );
+    return data?.snapshots ?? [];
+  }
+
+  async getSnapshot(id: string): Promise<ConfigSnapshot | null> {
+    const { status, data } = await this.request<{ snapshot: ConfigSnapshot }>(
+      "GET",
+      `/snapshots/${encodeURIComponent(id)}`,
+      undefined,
+      { allow404: true },
+    );
+    if (status === 404 || !data?.snapshot) return null;
+    return data.snapshot;
+  }
+
+  async getSnapshotByVersion(configId: string, version: number): Promise<ConfigSnapshot | null> {
+    const { status, data } = await this.request<{ snapshot: ConfigSnapshot }>(
+      "GET",
+      `/configs/${encodeURIComponent(configId)}/snapshots/${version}`,
+      undefined,
+      { allow404: true },
+    );
+    if (status === 404 || !data?.snapshot) return null;
+    return data.snapshot;
+  }
+
+  async createSnapshot(configId: string, content: string, version: number): Promise<ConfigSnapshot> {
+    const { data } = await this.request<{ snapshot: ConfigSnapshot }>(
+      "POST",
+      `/configs/${encodeURIComponent(configId)}/snapshots`,
+      { content, version },
+      { idempotent: true },
+    );
+    return (data as { snapshot: ConfigSnapshot }).snapshot;
+  }
+
+  async pruneSnapshots(configId: string, keep = 10): Promise<number> {
+    const { data } = await this.request<{ pruned: number }>(
+      "POST",
+      `/configs/${encodeURIComponent(configId)}/snapshots/prune`,
+      { keep },
+    );
+    return data?.pruned ?? 0;
+  }
+
+  // Profiles
   async listProfiles(): Promise<Profile[]> {
     const { data } = await this.request<{ profiles: Profile[] }>("GET", "/profiles");
     return data?.profiles ?? [];
@@ -322,26 +472,78 @@ export class CloudConfigStore implements ConfigStore {
     if (status === 404) throw new ProfileNotFoundError(idOrSlug);
   }
 
-  async listSnapshots(idOrSlug: string): Promise<ConfigSnapshot[]> {
-    const { data } = await this.request<{ snapshots: ConfigSnapshot[] }>(
-      "GET",
-      `/configs/${encodeURIComponent(idOrSlug)}/snapshots`,
-    );
-    return data?.snapshots ?? [];
-  }
-
-  async createSnapshot(idOrSlug: string): Promise<ConfigSnapshot> {
-    const { data } = await this.request<{ snapshot: ConfigSnapshot }>(
+  async addConfigToProfile(profileIdOrSlug: string, configId: string): Promise<void> {
+    await this.request<{ added: boolean }>(
       "POST",
-      `/configs/${encodeURIComponent(idOrSlug)}/snapshots`,
-      {},
+      `/profiles/${encodeURIComponent(profileIdOrSlug)}/configs`,
+      { config_id: configId },
       { idempotent: true },
     );
-    return (data as { snapshot: ConfigSnapshot }).snapshot;
+  }
+
+  async removeConfigFromProfile(profileIdOrSlug: string, configId: string): Promise<void> {
+    await this.request<{ removed: boolean }>(
+      "DELETE",
+      `/profiles/${encodeURIComponent(profileIdOrSlug)}/configs/${encodeURIComponent(configId)}`,
+      undefined,
+      { allow404: true },
+    );
+  }
+
+  async resolveProfileForMachine(machine?: MachineContext): Promise<Profile | null> {
+    const params = new URLSearchParams();
+    if (machine?.hostname) params.set("hostname", machine.hostname);
+    if (machine?.os) params.set("os", machine.os);
+    if (machine?.arch) params.set("arch", machine.arch);
+    const qs = params.toString();
+    const { status, data } = await this.request<{ profile: Profile | null }>(
+      "GET",
+      `/profiles/resolve${qs ? `?${qs}` : ""}`,
+      undefined,
+      { allow404: true },
+    );
+    if (status === 404 || !data?.profile) return null;
+    return data.profile;
+  }
+
+  // Machines
+  async registerMachine(hostname?: string, os?: string, arch?: string): Promise<Machine> {
+    const { data } = await this.request<{ machine: Machine }>(
+      "POST",
+      "/machines",
+      { hostname, os, arch },
+      { idempotent: true },
+    );
+    return (data as { machine: Machine }).machine;
+  }
+
+  async updateMachineApplied(hostname?: string): Promise<void> {
+    await this.request<{ updated: boolean }>("POST", "/machines/applied", { hostname });
+  }
+
+  async listMachines(): Promise<Machine[]> {
+    const { data } = await this.request<{ machines: Machine[] }>("GET", "/machines");
+    return data?.machines ?? [];
+  }
+
+  async sendFeedback(input: FeedbackInput): Promise<void> {
+    await this.request<{ ok: boolean }>("POST", "/feedback", {
+      message: input.message,
+      email: input.email ?? undefined,
+      category: input.category ?? undefined,
+      version: input.version ?? undefined,
+    });
+  }
+
+  async reset(): Promise<void> {
+    throw new Error(
+      "`init --force` cannot wipe the shared cloud store from a client. " +
+        "Unset HASNA_INSTRUCTIONS_API_URL / HASNA_INSTRUCTIONS_API_KEY to reset the local store instead.",
+    );
   }
 }
 
-/** Resolve the active store: cloud when self_hosted env is set, else local. */
+/** Resolve the active store: api transport when the env is set, else local. */
 export function resolveConfigStore(env: NodeJS.ProcessEnv = process.env): ConfigStore {
   const cloud = resolveCloudConfig(env);
   return cloud ? new CloudConfigStore(cloud) : new LocalConfigStore();

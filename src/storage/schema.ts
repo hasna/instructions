@@ -64,5 +64,13 @@ export function instructionsSchemaSql(): string[] {
        last_applied_at TIMESTAMPTZ,
        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
      )`,
+    `CREATE TABLE IF NOT EXISTS feedback (
+       id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+       message TEXT NOT NULL,
+       email TEXT,
+       category TEXT DEFAULT 'general',
+       version TEXT,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+     )`,
   ];
 }

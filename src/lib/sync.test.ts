@@ -1,3 +1,4 @@
+import { LocalConfigStore } from "../data/config-store";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -49,7 +50,7 @@ describe("syncFromDir", () => {
   test("adds new files from disk", async () => {
     writeFileSync(join(tmpDir, "test.md"), "# Hello");
     const db = getDatabase();
-    const result = await syncFromDir(tmpDir, { db, recursive: false });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     expect(result.added).toBe(1);
     expect(listConfigs(undefined, db).length).toBe(1);
   });
@@ -57,8 +58,8 @@ describe("syncFromDir", () => {
   test("unchanged files are not updated", async () => {
     const db = getDatabase();
     writeFileSync(join(tmpDir, "same.txt"), "same");
-    await syncFromDir(tmpDir, { db, recursive: false });
-    const result2 = await syncFromDir(tmpDir, { db, recursive: false });
+    await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
+    const result2 = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     expect(result2.unchanged).toBe(1);
     expect(result2.updated).toBe(0);
   });
@@ -67,23 +68,23 @@ describe("syncFromDir", () => {
     const db = getDatabase();
     const file = join(tmpDir, "change.txt");
     writeFileSync(file, "v1");
-    await syncFromDir(tmpDir, { db, recursive: false });
+    await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     writeFileSync(file, "v2");
-    const result = await syncFromDir(tmpDir, { db, recursive: false });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     expect(result.updated).toBe(1);
   });
 
   test("dry-run does not write to DB", async () => {
     const db = getDatabase();
     writeFileSync(join(tmpDir, "new.md"), "content");
-    const result = await syncFromDir(tmpDir, { db, dryRun: true, recursive: false });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), dryRun: true, recursive: false });
     expect(result.added).toBe(1);
     expect(listConfigs(undefined, db).length).toBe(0);
   });
 
   test("returns skipped for missing dir", async () => {
     const db = getDatabase();
-    const result = await syncFromDir("/nonexistent/path", { db });
+    const result = await syncFromDir("/nonexistent/path", { store: new LocalConfigStore(db) });
     expect(result.skipped.length).toBeGreaterThan(0);
   });
 });
@@ -93,25 +94,25 @@ describe("diffConfig", () => {
     writeFileSync(join(tmpDir, "same.txt"), "content");
     const db = getDatabase();
     const c = createConfig({ name: "same", category: "tools", content: "content", target_path: join(tmpDir, "same.txt") }, db);
-    expect(diffConfig(c)).toBe("(no diff — identical)");
+    expect(await diffConfig(c)).toBe("(no diff — identical)");
   });
 
   test("returns diff for different content", async () => {
     writeFileSync(join(tmpDir, "diff.txt"), "disk content");
     const db = getDatabase();
     const c = createConfig({ name: "diff", category: "tools", content: "stored content", target_path: join(tmpDir, "diff.txt") }, db);
-    const diff = diffConfig(c);
+    const diff = await diffConfig(c);
     expect(diff).toContain("-stored content");
     expect(diff).toContain("+disk content");
   });
 
-  test("returns file not found for missing path", () => {
+  test("returns file not found for missing path", async () => {
     const db = getDatabase();
     const c = createConfig({ name: "missing", category: "tools", content: "x", target_path: join(tmpDir, "nope.txt") }, db);
-    expect(diffConfig(c)).toContain("not found on disk");
+    expect(await diffConfig(c)).toContain("not found on disk");
   });
 
-  test("diff includes transformed output paths", () => {
+  test("diff includes transformed output paths", async () => {
     const db = getDatabase();
     const primary = join(tmpDir, "CLAUDE.md");
     const output = join(tmpDir, "AGENTS.md");
@@ -128,7 +129,7 @@ describe("diffConfig", () => {
       ],
     }, db);
 
-    const diff = diffConfig(c, { db });
+    const diff = await diffConfig(c, { store: new LocalConfigStore(db) });
 
     expect(diff).toContain(`+++ disk (${output})`);
     expect(diff).toContain("-# Claude");

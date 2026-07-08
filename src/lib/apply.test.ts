@@ -1,3 +1,4 @@
+import { LocalConfigStore } from "../data/config-store";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -26,7 +27,7 @@ describe("applyConfig", () => {
     const db = getDatabase();
     const target = join(tmpDir, "test.md");
     const c = createConfig({ name: "T", category: "rules", content: "hello", target_path: target }, db);
-    await applyConfig(c, { db });
+    await applyConfig(c, { store: new LocalConfigStore(db) });
     expect(readFileSync(target, "utf-8")).toBe("hello");
   });
 
@@ -34,7 +35,7 @@ describe("applyConfig", () => {
     const db = getDatabase();
     const target = join(tmpDir, "dry.md");
     const c = createConfig({ name: "T", category: "rules", content: "hello", target_path: target }, db);
-    const result = await applyConfig(c, { dryRun: true, db });
+    const result = await applyConfig(c, { dryRun: true, store: new LocalConfigStore(db) });
     expect(existsSync(target)).toBe(false);
     expect(result.dry_run).toBe(true);
   });
@@ -43,7 +44,7 @@ describe("applyConfig", () => {
     const db = getDatabase();
     const target = join(tmpDir, "deep", "nested", "file.txt");
     const c = createConfig({ name: "T", category: "tools", content: "data", target_path: target }, db);
-    await applyConfig(c, { db });
+    await applyConfig(c, { store: new LocalConfigStore(db) });
     expect(existsSync(target)).toBe(true);
   });
 
@@ -52,7 +53,7 @@ describe("applyConfig", () => {
     const target = join(tmpDir, "same.txt");
     writeFileSync(target, "same");
     const c = createConfig({ name: "T", category: "tools", content: "same", target_path: target }, db);
-    const result = await applyConfig(c, { db });
+    const result = await applyConfig(c, { store: new LocalConfigStore(db) });
     expect(result.changed).toBe(false);
   });
 
@@ -61,7 +62,7 @@ describe("applyConfig", () => {
     const target = join(tmpDir, "existing.txt");
     writeFileSync(target, "old content");
     const c = createConfig({ name: "T", category: "tools", content: "new content", target_path: target }, db);
-    const result = await applyConfig(c, { db });
+    const result = await applyConfig(c, { store: new LocalConfigStore(db) });
     expect(result.previous_content).toBe("old content");
     expect(result.new_content).toBe("new content");
   });
@@ -69,7 +70,7 @@ describe("applyConfig", () => {
   test("throws for reference kind", async () => {
     const db = getDatabase();
     const c = createConfig({ name: "Ref", category: "workspace", content: "doc", kind: "reference" }, db);
-    expect(applyConfig(c, { db })).rejects.toThrow("reference");
+    expect(applyConfig(c, { store: new LocalConfigStore(db) })).rejects.toThrow("reference");
   });
 
   test("renders machine-aware variables in content and target path", async () => {
@@ -93,7 +94,7 @@ describe("applyConfig", () => {
       target_path: join(tmpDir, "{{HOSTNAME}}.txt"),
       is_template: true,
     }, db);
-    const result = await applyConfig(c, { db, vars });
+    const result = await applyConfig(c, { store: new LocalConfigStore(db), vars });
     expect(result.path).toBe(join(tmpDir, "macos-node-a.txt"));
     expect(readFileSync(result.path, "utf-8")).toBe(`workspace=${tmpDir}/Workspace`);
   });
@@ -139,7 +140,7 @@ describe("applyConfig", () => {
       ],
     }, db);
 
-    const result = await applyConfig(c, { db });
+    const result = await applyConfig(c, { store: new LocalConfigStore(db) });
 
     expect(result.outputs?.length).toBe(5);
     expect(readFileSync(claudeTarget, "utf-8")).toContain("Claude-specific local detail");
@@ -177,8 +178,8 @@ describe("applyConfig", () => {
       format: "markdown",
     }, db);
 
-    await applyConfig(canonical, { db });
-    await expect(applyConfig(stale, { db })).rejects.toThrow("generated output");
+    await applyConfig(canonical, { store: new LocalConfigStore(db) });
+    await expect(applyConfig(stale, { store: new LocalConfigStore(db) })).rejects.toThrow("generated output");
 
     expect(readFileSync(codexTarget, "utf-8")).toContain("Generated");
     expect(readFileSync(codexTarget, "utf-8")).not.toContain("# stale");
@@ -207,8 +208,8 @@ describe("applyConfig", () => {
       format: "markdown",
     }, db);
 
-    await applyConfig(canonical, { db });
-    await expect(applyConfig(stale, { db })).rejects.toThrow("generated output");
+    await applyConfig(canonical, { store: new LocalConfigStore(db) });
+    await expect(applyConfig(stale, { store: new LocalConfigStore(db) })).rejects.toThrow("generated output");
 
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Generated");
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("absolute stale");
@@ -239,8 +240,8 @@ describe("applyConfig", () => {
       format: "markdown",
     }, db);
 
-    await applyConfig(canonical, { db });
-    await expect(applyConfig(stale, { db })).rejects.toThrow("generated output");
+    await applyConfig(canonical, { store: new LocalConfigStore(db) });
+    await expect(applyConfig(stale, { store: new LocalConfigStore(db) })).rejects.toThrow("generated output");
 
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Generated");
     expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("symlink stale");
@@ -271,7 +272,7 @@ describe("applyConfig", () => {
       format: "markdown",
     }, db);
 
-    await expect(applyConfig(stale, { db })).rejects.toThrow("generated output");
+    await expect(applyConfig(stale, { store: new LocalConfigStore(db) })).rejects.toThrow("generated output");
     expect(existsSync(join(tmpDir, ".codex", "AGENTS.md"))).toBe(false);
   });
 });

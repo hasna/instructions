@@ -1,3 +1,4 @@
+import { LocalConfigStore } from "./data/config-store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,7 +25,7 @@ afterEach(() => {
 });
 
 describe("getConfigsStatus", () => {
-  test("reports metadata-only counts without config values, paths, or hostnames", () => {
+  test("reports metadata-only counts without config values, paths, or hostnames", async () => {
     const db = getDatabase();
     const privateTarget = join(tempDir, "private-host.internal", "agent.conf");
     mkdirSync(join(tempDir, "private-host.internal"), { recursive: true });
@@ -52,7 +53,7 @@ describe("getConfigsStatus", () => {
     addConfigToProfile(profile.id, config.id, db);
     registerMachine("private-host.internal", "Linux", "x64", db);
 
-    const status = getConfigsStatus(db);
+    const status = await getConfigsStatus(new LocalConfigStore(db));
     const serialized = JSON.stringify(status);
 
     expect(status).toMatchObject({

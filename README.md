@@ -134,21 +134,20 @@ and `API_KEY_SIGNING_SECRET` are also accepted). Client apps use
 `InstructionsV1Client` is generated from the serve OpenAPI document
 (`bun run generate:sdk`).
 
-## Storage Sync (local CLI)
+## Storage Modes
 
-The local CLI supports optional remote storage sync through a package-local
-Postgres connection:
+Every CLI command, MCP tool, and SDK method routes through a single `ConfigStore`
+abstraction with two transports:
 
-```bash
-export HASNA_INSTRUCTIONS_DATABASE_URL=postgres://...
-instructions storage status
-instructions storage push
-instructions storage pull
-instructions storage sync
-```
+- **local** — on-box SQLite (`LocalConfigStore`), fully first-class. Used when no
+  API env vars are set.
+- **api** (self_hosted / cloud) — HTTP `/v1` + bearer key (`CloudConfigStore`).
+  Activated by setting **both** `HASNA_INSTRUCTIONS_API_URL` and
+  `HASNA_INSTRUCTIONS_API_KEY`. Identical client code; only the URL/key differ,
+  and the self_hosted/cloud distinction is enforced server-side by tenancy.
 
-The MCP server also exposes `storage_status`, `storage_push`, `storage_pull`, and
-`storage_sync`.
+Clients never hold a database DSN. The raw Postgres connection is a server-only
+concern (`instructions-serve`).
 
 ## Data Directory
 

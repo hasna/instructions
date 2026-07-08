@@ -2,14 +2,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExportManifest } from "../types/index.js";
-import { getDatabase } from "../db/database.js";
-import { createConfig, getConfig, updateConfig } from "../db/configs.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 
 export type ImportConflict = "skip" | "overwrite" | "version";
 
 export interface ImportOptions {
   conflict?: ImportConflict;
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
 }
 
 export interface ImportResult {
@@ -23,7 +22,7 @@ export async function importConfigs(
   bundlePath: string,
   opts: ImportOptions = {}
 ): Promise<ImportResult> {
-  const d = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const conflict = opts.conflict ?? "skip";
   const absPath = resolve(bundlePath);
   const tmpDir = join(tmpdir(), `configs-import-${Date.now()}`);
@@ -56,18 +55,18 @@ export async function importConfigs(
         const content = existsSync(contentFile) ? readFileSync(contentFile, "utf-8") : "";
 
         // Check if exists by slug
-        let existing: Awaited<ReturnType<typeof getConfig>> | null = null;
-        try { existing = getConfig(meta.slug, d); } catch { /* not found */ }
+        let existing: Awaited<ReturnType<typeof store.getConfig>> | null = null;
+        try { existing = await store.getConfig(meta.slug); } catch { /* not found */ }
 
         if (existing) {
           if (conflict === "skip") {
             result.skipped++;
           } else if (conflict === "overwrite" || conflict === "version") {
-            updateConfig(existing.id, { content, description: meta.description ?? undefined, tags: meta.tags, outputs: meta.outputs }, d);
+            await store.updateConfig(existing.id, { content, description: meta.description ?? undefined, tags: meta.tags, outputs: meta.outputs });
             result.updated++;
           }
         } else {
-          createConfig({
+          await store.createConfig({
             name: meta.name,
             kind: meta.kind,
             category: meta.category,
@@ -79,7 +78,7 @@ export async function importConfigs(
             description: meta.description ?? undefined,
             tags: meta.tags,
             is_template: meta.is_template,
-          }, d);
+          });
           result.created++;
         }
       } catch (err) {

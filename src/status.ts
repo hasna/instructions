@@ -1,9 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { Database } from "bun:sqlite";
-import { getDatabase } from "./db/database.js";
-import { getConfigStats, listConfigs } from "./db/configs.js";
-import { listProfiles } from "./db/profiles.js";
-import { listMachines } from "./db/machines.js";
+import { resolveConfigStore, type ConfigStore } from "./data/config-store.js";
+import type { Config } from "./types/index.js";
 import { expandPath } from "./lib/apply.js";
 import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
 
@@ -85,23 +82,16 @@ function countBy<T>(items: T[], getValue: (item: T) => string | null | undefined
   return counts;
 }
 
-function tableCount(db: Database, table: string): number {
-  try {
-    const row = db.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM ${table}`).get();
-    return Number(row?.count ?? 0);
-  } catch {
-    return 0;
-  }
-}
-
-export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusContract {
+export async function getConfigsStatus(
+  store: ConfigStore = resolveConfigStore(),
+): Promise<ConfigsStatusContract> {
   let databaseReachable = true;
-  let configs: ReturnType<typeof listConfigs> = [];
+  let configs: Config[] = [];
   let categoryStats: Record<string, number> = { total: 0 };
 
   try {
-    configs = listConfigs(undefined, db);
-    categoryStats = getConfigStats(db);
+    configs = await store.listConfigs();
+    categoryStats = await store.getConfigStats();
   } catch {
     databaseReachable = false;
   }
@@ -130,10 +120,25 @@ export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusCon
     }
   }
 
-  const profiles = databaseReachable ? listProfiles(db).length : 0;
-  const machines = databaseReachable ? listMachines(db).length : 0;
-  const profileLinks = databaseReachable ? tableCount(db, "profile_configs") : 0;
-  const snapshots = databaseReachable ? tableCount(db, "config_snapshots") : 0;
+  let profiles = 0;
+  let machines = 0;
+  let profileLinks = 0;
+  let snapshots = 0;
+  if (databaseReachable) {
+    try {
+      const profileList = await store.listProfiles();
+      profiles = profileList.length;
+      machines = (await store.listMachines()).length;
+      for (const profile of profileList) {
+        profileLinks += (await store.getProfileConfigs(profile.id)).length;
+      }
+      for (const config of configs) {
+        snapshots += (await store.listSnapshots(config.id)).length;
+      }
+    } catch {
+      databaseReachable = false;
+    }
+  }
   const byCategory = Object.fromEntries(Object.entries(categoryStats).filter(([key]) => key !== "total"));
 
   const status: ContractStatus =

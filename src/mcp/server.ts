@@ -2,13 +2,9 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { getStorageStatus, storagePull, storagePush, storageSync } from "../db/storage-sync.js";
-import { createConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
-import { applyConfig } from "../lib/apply.js";
+import { resolveConfigStore } from "../data/config-store.js";
+import { applyConfig, applyConfigs } from "../lib/apply.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
-import { getProfile, listProfiles, getProfileConfigs, resolveProfileForMachine } from "../db/profiles.js";
-import { applyConfigs } from "../lib/apply.js";
-import { listSnapshots, getSnapshotByVersion } from "../db/snapshots.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { pagedPayload, summarizeApplyResult, summarizeConfig, summarizeProfile } from "../lib/compact-output.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, ConfigOutput } from "../types/index.js";
@@ -67,10 +63,6 @@ const ALL_LEAN_TOOLS = [
   { name: "set_focus", description: "Set active project context.", inputSchema: { type: "object", properties: { agent_id: { type: "string" }, project_id: { type: "string" } }, required: ["agent_id"] } },
   { name: "list_agents", description: "List all registered agents.", inputSchema: { type: "object", properties: {} } },
   { name: "send_feedback", description: "Send feedback about this service", inputSchema: { type: "object", properties: { message: { type: "string" }, email: { type: "string" }, category: { type: "string", enum: ["bug", "feature", "general"] } }, required: ["message"] } },
-  { name: "storage_status", description: "Show storage sync configuration and local sync history.", inputSchema: { type: "object", properties: {} } },
-  { name: "storage_push", description: "Push local configs data to storage PostgreSQL.", inputSchema: { type: "object", properties: { tables: { type: "array", items: { type: "string" } } } } },
-  { name: "storage_pull", description: "Pull configs data from storage PostgreSQL to local SQLite.", inputSchema: { type: "object", properties: { tables: { type: "array", items: { type: "string" } } } } },
-  { name: "storage_sync", description: "Bidirectional configs sync: pull then push.", inputSchema: { type: "object", properties: { tables: { type: "array", items: { type: "string" } } } } },
 ];
 
 function ok(data: unknown) {
@@ -96,10 +88,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: LEAN_TOOL
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args = {} } = req.params;
+  const store = resolveConfigStore();
   try {
     switch (name) {
       case "list_configs": {
-        const configs = listConfigs({
+        const configs = await store.listConfigs({
           category: (args["category"] as ConfigCategory) || undefined,
           agent: (args["agent"] as ConfigAgent) || undefined,
           kind: (args["kind"] as ConfigKind) || undefined,
@@ -113,11 +106,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }));
       }
       case "get_config": {
-        const c = getConfig(args["id_or_slug"] as string);
+        const c = await store.getConfig(args["id_or_slug"] as string);
         return ok(c);
       }
       case "create_config": {
-        const c = createConfig({
+        const c = await store.createConfig({
           name: args["name"] as string,
           content: args["content"] as string,
           category: args["category"] as ConfigCategory,
@@ -133,7 +126,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok({ id: c.id, slug: c.slug, name: c.name });
       }
       case "update_config": {
-        const c = updateConfig(args["id_or_slug"] as string, {
+        const c = await store.updateConfig(args["id_or_slug"] as string, {
           content: args["content"] as string | undefined,
           name: args["name"] as string | undefined,
           tags: args["tags"] as string[] | undefined,
@@ -146,25 +139,24 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok({ id: c.id, slug: c.slug, version: c.version });
       }
       case "delete_config": {
-        const { deleteConfig } = await import("../db/configs.js");
-        deleteConfig(args["id_or_slug"] as string);
+        await store.deleteConfig(args["id_or_slug"] as string);
         return ok({ deleted: true });
       }
       case "apply_config": {
-        const config = getConfig(args["id_or_slug"] as string);
-        const result = await applyConfig(config, { dryRun: args["dry_run"] as boolean });
+        const config = await store.getConfig(args["id_or_slug"] as string);
+        const result = await applyConfig(config, { dryRun: args["dry_run"] as boolean, store });
         return ok(args["verbose"] ? result : summarizeApplyResult(result));
       }
       case "sync_directory": {
         const dir = args["dir"] as string;
         const direction = (args["direction"] as string) || "from_disk";
         const result = direction === "to_disk"
-          ? await syncToDir(dir)
-          : await syncFromDir(dir);
+          ? await syncToDir(dir, { store })
+          : await syncFromDir(dir, { store });
         return ok(result);
       }
       case "list_profiles": {
-        const profiles = listProfiles().map((profile) => summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }));
+        const profiles = (await store.listProfiles()).map((profile) => summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }));
         return ok(pagedPayload(profiles, {
           limit: args["limit"],
           cursor: args["cursor"],
@@ -179,12 +171,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         });
         if (!args["auto"] && !args["id_or_slug"]) return err("id_or_slug is required unless auto=true");
         const profile = args["auto"]
-          ? resolveProfileForMachine(machine)
-          : getProfile(args["id_or_slug"] as string);
+          ? await store.resolveProfileForMachine(machine)
+          : await store.getProfile(args["id_or_slug"] as string);
         if (!profile) return err("No matching machine-aware profile found");
-        const configs = getProfileConfigs(profile.id);
+        const configs = await store.getProfileConfigs(profile.id);
         const vars = resolveProfileVariables(profile, machine);
-        const results = await applyConfigs(configs, { dryRun: args["dry_run"] as boolean, vars });
+        const results = await applyConfigs(configs, { dryRun: args["dry_run"] as boolean, vars, store });
         return ok({
           profile: summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }),
           machine: {
@@ -199,17 +191,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         });
       }
       case "get_snapshot": {
-        const config = getConfig(args["config_id_or_slug"] as string);
+        const config = await store.getConfig(args["config_id_or_slug"] as string);
         if (args["version"]) {
-          const snap = getSnapshotByVersion(config.id, args["version"] as number);
+          const snap = await store.getSnapshotByVersion(config.id, args["version"] as number);
           return snap ? ok(snap) : err("Snapshot not found");
         }
-        const snaps = listSnapshots(config.id);
+        const snaps = await store.listSnapshots(config.id);
         return ok(snaps[0] ?? null);
       }
       case "get_status": {
-        const stats = getConfigStats();
-        const allConfigs = listConfigs({ kind: "file" });
+        const stats = await store.getConfigStats();
+        const allConfigs = await store.listConfigs({ kind: "file" });
         const { existsSync: ex, readFileSync: rf } = await import("node:fs");
         const { expandPath } = await import("../lib/apply.js");
         const { redactContent } = await import("../lib/redact.js");
@@ -238,6 +230,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "sync_known": {
         const { syncKnown } = await import("../lib/sync.js");
         const result = await syncKnown({
+          store,
           agent: (args["agent"] as ConfigAgent) || undefined,
           category: (args["category"] as ConfigCategory) || undefined,
         });
@@ -246,12 +239,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "sync_project": {
         const { syncProject } = await import("../lib/sync.js");
         const dir = (args["project_dir"] as string) || process.cwd();
-        const result = await syncProject({ projectDir: dir });
+        const result = await syncProject({ store, projectDir: dir });
         return ok(result);
       }
       case "render_template": {
         const { renderTemplate } = await import("../lib/template.js");
-        const config = getConfig(args["id_or_slug"] as string);
+        const config = await store.getConfig(args["id_or_slug"] as string);
         const vars: Record<string, string> = (args["vars"] as Record<string, string>) || {};
         // Fill from env if requested
         if (args["use_env"]) {
@@ -268,8 +261,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "scan_secrets": {
         const { scanSecrets, redactContent } = await import("../lib/redact.js");
         const configs = args["id_or_slug"]
-          ? [getConfig(args["id_or_slug"] as string)]
-          : listConfigs({ kind: "file" });
+          ? [await store.getConfig(args["id_or_slug"] as string)]
+          : await store.listConfigs({ kind: "file" });
         const findings: Array<{ slug: string; secrets: number; vars: string[] }> = [];
         for (const c of configs) {
           const fmt = c.format as "shell" | "json" | "toml" | "ini" | "markdown" | "text";
@@ -278,7 +271,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             findings.push({ slug: c.slug, secrets: secrets.length, vars: secrets.map((s) => s.varName) });
             if (args["fix"]) {
               const { content, isTemplate } = redactContent(c.content, fmt);
-              updateConfig(c.id, { content, is_template: isTemplate });
+              await store.updateConfig(c.id, { content, is_template: isTemplate });
             }
           }
         }
@@ -331,29 +324,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok([..._cfgAgents.values()]);
       }
       case "send_feedback": {
-        const { getDatabase } = await import("../db/database.js");
-        const db = getDatabase();
         const pkg = require("../../package.json");
-        db.run(
-          "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
-          [args["message"] as string, (args["email"] as string) || null, (args["category"] as string) || "general", pkg.version]
-        );
+        await store.sendFeedback({
+          message: args["message"] as string,
+          email: (args["email"] as string) || null,
+          category: (args["category"] as string) || "general",
+          version: pkg.version,
+        });
         return ok({ message: "Feedback saved. Thank you!" });
-      }
-      case "storage_status": {
-        return ok(getStorageStatus());
-      }
-      case "storage_push": {
-        const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
-        return ok(await storagePush(tables ? { tables } : undefined));
-      }
-      case "storage_pull": {
-        const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
-        return ok(await storagePull(tables ? { tables } : undefined));
-      }
-      case "storage_sync": {
-        const tables = Array.isArray(args["tables"]) ? args["tables"] as string[] : undefined;
-        return ok(await storageSync(tables ? { tables } : undefined));
       }
       default:
         return err(`Unknown tool: ${name}`);

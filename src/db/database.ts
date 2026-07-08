@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { cpSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -133,6 +133,22 @@ export function resetDatabase(): void {
   _db = null;
 }
 
+/**
+ * Destroy the on-disk local database: close the handle and delete the db file
+ * plus its WAL/SHM sidecars. Used by `init --force`. Resolves the path from the
+ * db module (honoring HASNA_CONFIGS_DB_PATH / CONFIGS_DB_PATH); a no-op for the
+ * in-memory (`:memory:`) database. Local-only — the CloudConfigStore never calls
+ * this (destroying the shared cloud store from a client is forbidden).
+ */
+export function resetLocalDatabase(): void {
+  resetDatabase();
+  const dbPath = getDbPath();
+  if (dbPath === ":memory:") return;
+  for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(p)) rmSync(p);
+  }
+}
+
 function applyMigrations(db: Database): void {
   let currentVersion = 0;
   try {
@@ -163,6 +179,21 @@ function ensureFeedbackTable(db: Database): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+}
+
+export interface FeedbackInput {
+  message: string;
+  email?: string | null;
+  category?: string | null;
+  version?: string | null;
+}
+
+export function insertFeedback(input: FeedbackInput, db?: Database): void {
+  const d = db || getDatabase();
+  d.run(
+    "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
+    [input.message, input.email ?? null, input.category ?? "general", input.version ?? null],
+  );
 }
 
 function migrateDotfile(): void {

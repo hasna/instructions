@@ -70,14 +70,3 @@ export async function startMcpHttpServer(
   });
   return { port: httpServer.port!, stop: () => httpServer.stop() };
 }
-
-export function mountMcpHttpRoutes(app: {
-  get: (path: string, handler: (c: { json: (body: unknown) => Response; req: { raw: Request } }) => Response | Promise<Response>) => void;
-  all: (path: string, handler: (c: { req: { raw: Request } }) => Response | Promise<Response>) => void;
-}): void {
-  app.get("/health", (c) => c.json(healthPayload()));
-  app.all("/mcp", async (c) => {
-    const response = await handleMcpHttpRequest(c.req.raw);
-    return response ?? Response.json({ error: "Not found" }, { status: 404 });
-  });
-}

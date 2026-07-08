@@ -3,9 +3,7 @@ import { basename, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { ApplyResult, Config, ConfigOutput } from "../types/index.js";
 import { ConfigApplyError } from "../types/index.js";
-import { getDatabase, now } from "../db/database.js";
-import { listConfigs, updateConfig } from "../db/configs.js";
-import { createSnapshot } from "../db/snapshots.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import type { ProfileVariables } from "../types/index.js";
 import { renderMachineAwareContent } from "./machine.js";
 import { applyTransform } from "./transforms.js";
@@ -48,7 +46,7 @@ export function normalizeTargetPath(p: string): string {
 export interface ApplyOptions {
   dryRun?: boolean;
   force?: boolean;
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   vars?: ProfileVariables;
   outputAgent?: Config["agent"];
 }
@@ -79,8 +77,8 @@ async function writeConfigResult(
     }
 
     if (previousContent !== null && changed) {
-      const db = opts.db || getDatabase();
-      createSnapshot(config.id, previousContent, config.version, db);
+      const store = opts.store ?? resolveConfigStore();
+      await store.createSnapshot(config.id, previousContent, config.version);
     }
 
     writeFileSync(path, renderedContent, "utf-8");
@@ -121,8 +119,8 @@ export async function applyConfig(
     );
   }
 
-  const db = opts.db || getDatabase();
-  const contextConfigs = selectedOutputs.length > 0 || config.target_path ? listConfigs(undefined, db) : [config];
+  const store = opts.store ?? resolveConfigStore();
+  const contextConfigs = selectedOutputs.length > 0 || config.target_path ? await store.listConfigs() : [config];
   if (isGeneratedOutputTarget(config, contextConfigs)) {
     throw new ConfigApplyError(
       `Config "${config.name}" targets a generated output path. Apply the canonical source config instead.`
@@ -149,7 +147,7 @@ export async function applyConfig(
   }
 
   if (!opts.dryRun) {
-    updateConfig(config.id, { synced_at: now() }, db);
+    await store.updateConfig(config.id, { synced_at: new Date().toISOString() });
   }
 
   return result;

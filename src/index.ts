@@ -1,44 +1,21 @@
 // Types
 export * from "./types/index.js";
 
-// DB — configs
-export { createConfig, getConfig, getConfigById, listConfigs, updateConfig, deleteConfig, getConfigStats } from "./db/configs.js";
-
-// DB — snapshots
-export { createSnapshot, listSnapshots, getSnapshot, getSnapshotByVersion, pruneSnapshots } from "./db/snapshots.js";
-
-// DB — profiles
-export { createProfile, getProfile, listProfiles, updateProfile, deleteProfile, addConfigToProfile, removeConfigFromProfile, getProfileConfigs, profileHasSelectors, profileMatchesMachine, resolveProfileForMachine } from "./db/profiles.js";
-
-// DB — machines
-export { registerMachine, updateMachineApplied, listMachines, currentHostname, currentOs, currentArch } from "./db/machines.js";
-
-// DB — database utilities
-export { getDatabase, resetDatabase, uuid, now, slugify } from "./db/database.js";
+// Store — the single data abstraction (LocalStore + ApiStore). Every SDK data
+// operation routes through this interface; no raw sqlite/fetch is exposed.
 export {
-  CONFIGS_STORAGE_ENV,
-  CONFIGS_STORAGE_FALLBACK_ENV,
-  CONFIGS_STORAGE_MODE_ENV,
-  CONFIGS_STORAGE_MODE_FALLBACK_ENV,
-  CONFIGS_STORAGE_TABLES,
-  STORAGE_DATABASE_ENV,
-  STORAGE_MODE_ENV,
-  STORAGE_TABLES,
-  getStorageDatabaseEnvName,
-  getStorageDatabaseUrl,
-  getStorageMode,
-  getStoragePg,
-  getStorageStatus,
-  getStorageSyncMetaAll,
-  getSyncMetaAll,
-  resolveTables,
-  runStorageMigrations,
-  storagePull,
-  storagePush,
-  storageSync,
-} from "./db/storage-sync.js";
-export type { StorageMode, StorageStatus, SyncMeta, SyncResult } from "./db/storage-sync.js";
-export * from "./db/remote-storage.js";
+  CloudConfigStore,
+  CloudHttpError,
+  LocalConfigStore,
+  isCloudMode,
+  resolveCloudConfig,
+  resolveConfigStore,
+} from "./data/config-store.js";
+export type { CloudConfig, ConfigStore } from "./data/config-store.js";
+
+// Machine + slug helpers (pure)
+export { currentHostname, currentOs, currentArch } from "./db/machines.js";
+export { uuid, now, slugify } from "./db/database.js";
 
 // Status contract
 export { getConfigsStatus } from "./status.js";

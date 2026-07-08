@@ -1,8 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, SyncResult } from "../types/index.js";
-import { getDatabase } from "../db/database.js";
-import { createConfig, listConfigs, updateConfig } from "../db/configs.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { applyConfig, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
 import { redactContent } from "./redact.js";
 import { detectMachineContext, templateizeMachineContent } from "./machine.js";
@@ -156,17 +155,17 @@ export const PROJECT_CONFIG_FILES = [
 ];
 
 export interface SyncProjectOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   dryRun?: boolean;
   projectDir: string;
 }
 
 export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult> {
-  const d = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const absDir = expandPath(opts.projectDir);
   const projectName = absDir.split("/").pop() || "project";
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
-  const allConfigs = listConfigs(undefined, d);
+  const allConfigs = await store.listConfigs();
   const machine = detectMachineContext();
 
   // Sync project config files
@@ -186,10 +185,10 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
       const existing = allConfigs.find((c) => c.target_path === targetPath || c.slug === slug);
 
       if (!existing) {
-        if (!opts.dryRun) createConfig({ name, category: pf.category, agent: pf.agent, format: pf.format, content, target_path: targetPath, is_template: isTemplate }, d);
+        if (!opts.dryRun) await store.createConfig({ name, category: pf.category, agent: pf.agent, format: pf.format, content, target_path: targetPath, is_template: isTemplate });
         result.added++;
       } else if (existing.content !== content) {
-        if (!opts.dryRun) updateConfig(existing.id, { content, is_template: isTemplate }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { content, is_template: isTemplate });
         result.updated++;
       } else {
         result.unchanged++;
@@ -213,10 +212,10 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       const existing = allConfigs.find((c) => c.target_path === targetPath || c.slug === slug);
       if (!existing) {
-        if (!opts.dryRun) createConfig({ name, category: "rules", agent: "claude", format: "markdown", content, target_path: targetPath, is_template: isTemplate }, d);
+        if (!opts.dryRun) await store.createConfig({ name, category: "rules", agent: "claude", format: "markdown", content, target_path: targetPath, is_template: isTemplate });
         result.added++;
       } else if (existing.content !== content) {
-        if (!opts.dryRun) updateConfig(existing.id, { content, is_template: isTemplate }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { content, is_template: isTemplate });
         result.updated++;
       } else { result.unchanged++; }
     }
@@ -226,14 +225,14 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
 }
 
 export interface SyncKnownOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   dryRun?: boolean;
   agent?: ConfigAgent;
   category?: ConfigCategory;
 }
 
 export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult> {
-  const d = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
   const home = getConfigHome();
   const machine = detectMachineContext();
@@ -242,7 +241,7 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
   if (opts.agent) targets = targets.filter((k) => k.agent === opts.agent);
   if (opts.category) targets = targets.filter((k) => k.category === opts.category);
 
-  const allConfigs = listConfigs(undefined, d);
+  const allConfigs = await store.listConfigs();
   const existingOutputOwners = outputOwnerIdsByTarget(allConfigs);
 
   for (const known of targets) {
@@ -269,13 +268,13 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
         const existing = allConfigs.find((c) => c.target_path === targetPath || c.slug === slug);
         const outputs = known.agent === "claude" ? claudeRuleOutputs(f) : known.outputs;
         if (!existing) {
-          if (!opts.dryRun) createConfig({ name, category: known.category, agent: known.agent, format: "markdown", content, target_path: targetPath, is_template: isTemplate, outputs }, d);
+          if (!opts.dryRun) await store.createConfig({ name, category: known.category, agent: known.agent, format: "markdown", content, target_path: targetPath, is_template: isTemplate, outputs });
           result.added++;
         } else if (existing.content !== content) {
-          if (!opts.dryRun) updateConfig(existing.id, { content, is_template: isTemplate, outputs }, d);
+          if (!opts.dryRun) await store.updateConfig(existing.id, { content, is_template: isTemplate, outputs });
           result.updated++;
         } else if (!outputsEqual(existing.outputs, outputs)) {
-          if (!opts.dryRun) updateConfig(existing.id, { outputs }, d);
+          if (!opts.dryRun) await store.updateConfig(existing.id, { outputs });
           result.updated++;
         } else {
           result.unchanged++;
@@ -305,7 +304,7 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
 
       if (!existing) {
         if (!opts.dryRun) {
-          createConfig({
+          await store.createConfig({
             name: known.name,
             category: known.category,
             agent: known.agent,
@@ -316,14 +315,14 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
             description: known.description,
             is_template: isTemplate,
             outputs: known.outputs,
-          }, d);
+          });
         }
         result.added++;
       } else if (existing.content !== content) {
-        if (!opts.dryRun) updateConfig(existing.id, { content, is_template: isTemplate, outputs: known.outputs }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { content, is_template: isTemplate, outputs: known.outputs });
         result.updated++;
       } else if (!outputsEqual(existing.outputs, known.outputs)) {
-        if (!opts.dryRun) updateConfig(existing.id, { outputs: known.outputs }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { outputs: known.outputs });
         result.updated++;
       } else {
         result.unchanged++;
@@ -337,17 +336,17 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
 
 // ── Apply configs back to disk ────────────────────────────────────────────────
 export interface SyncToDiskOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   dryRun?: boolean;
   agent?: ConfigAgent;
   category?: ConfigCategory;
 }
 
 export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResult> {
-  const d = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
 
-  const allFileConfigs = listConfigs({ kind: "file", ...opts.category ? { category: opts.category } : {} }, d);
+  const allFileConfigs = await store.listConfigs({ kind: "file", ...opts.category ? { category: opts.category } : {} });
   const outputOwners = outputOwnerIdsByTarget(allFileConfigs);
   let configs = allFileConfigs.filter((config) => {
     return !isGeneratedOutputTarget(config, outputOwners);
@@ -359,7 +358,7 @@ export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResu
   for (const config of configs) {
     if (!config.target_path && config.outputs.length === 0) continue;
     try {
-      const r = await applyConfig(config, { dryRun: opts.dryRun, db: d, outputAgent: opts.agent });
+      const r = await applyConfig(config, { dryRun: opts.dryRun, store, outputAgent: opts.agent });
       r.changed ? result.updated++ : result.unchanged++;
     } catch {
       result.skipped.push(config.target_path ?? config.id);
@@ -370,7 +369,7 @@ export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResu
 
 // ── Diff a config against disk ────────────────────────────────────────────────
 export interface DiffConfigOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
 }
 
 function buildDiff(expectedContent: string, targetPath: string): string {
@@ -395,13 +394,13 @@ function buildDiff(expectedContent: string, targetPath: string): string {
   return lines.join("\n");
 }
 
-export function diffConfig(config: Config, opts: DiffConfigOptions = {}): string {
+export async function diffConfig(config: Config, opts: DiffConfigOptions = {}): Promise<string> {
   if (!config.target_path && config.outputs.length === 0) return "(reference — no target path)";
 
   const diffs: string[] = [];
-  const db = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const contextConfigs = config.outputs.length > 0 || config.target_path
-    ? listConfigs(undefined, db)
+    ? await store.listConfigs()
     : [config];
 
   if (isGeneratedOutputTarget(config, outputOwnerIdsByTarget(contextConfigs))) {

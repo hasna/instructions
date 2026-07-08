@@ -1,3 +1,4 @@
+import { LocalConfigStore } from "../data/config-store";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -28,7 +29,7 @@ describe("export + import roundtrip", () => {
     createConfig({ name: "test-tools", category: "tools", content: "data", agent: "npm" }, db);
 
     const outPath = join(tmpDir, "test-export.tar.gz");
-    const exportResult = await exportConfigs(outPath, { db });
+    const exportResult = await exportConfigs(outPath, { store: new LocalConfigStore(db) });
     expect(exportResult.count).toBe(2);
     expect(existsSync(outPath)).toBe(true);
 
@@ -36,7 +37,7 @@ describe("export + import roundtrip", () => {
     resetDatabase();
     process.env["CONFIGS_DB_PATH"] = ":memory:";
     const db2 = getDatabase();
-    const importResult = await importConfigs(outPath, { db: db2 });
+    const importResult = await importConfigs(outPath, { store: new LocalConfigStore(db2) });
     expect(importResult.created).toBe(2);
     expect(importResult.errors.length).toBe(0);
 
@@ -49,9 +50,9 @@ describe("export + import roundtrip", () => {
     createConfig({ name: "existing", category: "rules", content: "original" }, db);
 
     const outPath = join(tmpDir, "conflict-test.tar.gz");
-    await exportConfigs(outPath, { db });
+    await exportConfigs(outPath, { store: new LocalConfigStore(db) });
 
-    const importResult = await importConfigs(outPath, { db, conflict: "skip" });
+    const importResult = await importConfigs(outPath, { store: new LocalConfigStore(db), conflict: "skip" });
     expect(importResult.skipped).toBe(1);
     expect(importResult.created).toBe(0);
   });
@@ -61,14 +62,14 @@ describe("export + import roundtrip", () => {
     const c = createConfig({ name: "overwrite-me", category: "rules", content: "v1" }, db);
 
     const outPath = join(tmpDir, "overwrite-test.tar.gz");
-    await exportConfigs(outPath, { db });
+    await exportConfigs(outPath, { store: new LocalConfigStore(db) });
 
     // Modify the config
     const { updateConfig } = await import("../db/configs");
     updateConfig(c.id, { content: "v2-modified" }, db);
 
     // Import with overwrite — should restore to v1
-    const importResult = await importConfigs(outPath, { db, conflict: "overwrite" });
+    const importResult = await importConfigs(outPath, { store: new LocalConfigStore(db), conflict: "overwrite" });
     expect(importResult.updated).toBe(1);
   });
 });
