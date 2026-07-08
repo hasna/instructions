@@ -529,9 +529,9 @@ program
     const store = resolveConfigStore();
     const dbPath = isCloudMode()
       ? `${process.env["HASNA_INSTRUCTIONS_API_URL"]}/v1 (self_hosted)`
-      : process.env["CONFIGS_DB_PATH"] || join(homedir(), ".hasna", "configs", "configs.db");
+      : process.env["HASNA_INSTRUCTIONS_DB_PATH"] || join(homedir(), ".hasna", "instructions", "instructions.db");
     const stats = await store.getConfigStats();
-    console.log(chalk.bold("@hasna/configs") + chalk.dim(" v" + pkg.version));
+    console.log(chalk.bold("@hasna/instructions") + chalk.dim(" v" + pkg.version));
     console.log(chalk.cyan(isCloudMode() ? "API:" : "DB:") + " " + dbPath);
     console.log(chalk.cyan("Total configs:") + " " + (stats["total"] || 0));
     console.log();
@@ -1042,7 +1042,7 @@ mcpCmd.command("install")
   .option("--codex", "install into Codex")
   .option("--gemini", "install into Gemini")
   .option("--all", "install into all agents")
-  .option("--profile <level>", "set CONFIGS_PROFILE (minimal|standard|full)", "standard")
+  .option("--profile <level>", "set INSTRUCTIONS_PROFILE (minimal|standard|full)", "standard")
   .action(async (opts) => {
     const targets = opts.all ? ["claude", "codex", "gemini"] : [
       ...(opts.claude ? ["claude"] : []),
@@ -1059,7 +1059,7 @@ mcpCmd.command("install")
         const mcpBinary = `${vars["BUN_BIN_DIR"]}/configs-mcp`;
         if (target === "claude") {
           const cmd = opts.profile && opts.profile !== "full"
-            ? ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", "env", `CONFIGS_PROFILE=${opts.profile}`, mcpBinary]
+            ? ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", "env", `INSTRUCTIONS_PROFILE=${opts.profile}`, mcpBinary]
             : ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", mcpBinary];
           const proc = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit" });
           await proc.exited;
@@ -1124,7 +1124,7 @@ program
       await store.reset();
       console.log(chalk.dim("Reset local store."));
     }
-    console.log(chalk.bold("@hasna/configs — initializing\n"));
+    console.log(chalk.bold("@hasna/instructions — initializing\n"));
 
     // Sync known configs
     const result = await syncKnown({ store });
@@ -1164,7 +1164,7 @@ program
     }
     const location = isCloudMode()
       ? `${process.env["HASNA_INSTRUCTIONS_API_URL"]}/v1 (self_hosted)`
-      : process.env["CONFIGS_DB_PATH"] || join(homedir(), ".hasna", "configs", "configs.db");
+      : process.env["HASNA_INSTRUCTIONS_DB_PATH"] || join(homedir(), ".hasna", "instructions", "instructions.db");
     console.log(chalk.dim(`\n${isCloudMode() ? "API" : "DB"}: ${location}`));
   });
 
@@ -1181,7 +1181,7 @@ program
       return;
     }
 
-    console.log(chalk.bold("@hasna/configs") + chalk.dim(` v${pkg.version}`));
+    console.log(chalk.bold("@hasna/instructions") + chalk.dim(` v${pkg.version}`));
     console.log(chalk.cyan("Database:") + ` ${status.env.database.kind} (${status.env.database.active ?? "default"})`);
     console.log(chalk.cyan("Total:") + ` ${status.counts.configs.total} configs\n`);
     console.log(chalk.cyan("Drifted:") + ` ${status.health.driftedTargets === 0 ? chalk.green("0") : chalk.yellow(String(status.health.driftedTargets))} (stored differs from disk)`);
@@ -1199,7 +1199,7 @@ program
   .description("Export configs to a timestamped backup file")
   .action(async () => {
     const { mkdirSync: mk } = await import("node:fs");
-    const backupDir = join(homedir(), ".hasna", "configs", "backups");
+    const backupDir = join(homedir(), ".hasna", "instructions", "backups");
     mk(backupDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "-").slice(0, 19);
     const outPath = join(backupDir, `configs-${ts}.tar.gz`);
@@ -1366,7 +1366,7 @@ program
     const { statSync: st } = await import("node:fs");
     const { expandPath } = await import("../lib/apply.js");
 
-    console.log(chalk.bold("@hasna/configs watch") + chalk.dim(` — polling every ${interval}ms`));
+    console.log(chalk.bold("@hasna/instructions watch") + chalk.dim(` — polling every ${interval}ms`));
     console.log(chalk.dim("Watching known config files for changes…\n"));
 
     // Build file → mtime map
@@ -1545,7 +1545,7 @@ program
       { name: "@hasna/brains", bin: "brains", mcp: "brains-mcp" },
     ];
 
-    console.log(chalk.bold("@hasna/configs bootstrap") + chalk.dim(` — installing ${packages.length} ecosystem packages\n`));
+    console.log(chalk.bold("@hasna/instructions bootstrap") + chalk.dim(` — installing ${packages.length} ecosystem packages\n`));
 
     // 1. Install global packages
     console.log(chalk.cyan("Installing CLI tools:"));
@@ -1613,7 +1613,7 @@ program
   .option("--check", "only check, don't install")
   .action(async (opts) => {
     try {
-      const proc = Bun.spawn(["npm", "view", "@hasna/configs", "version"], { stdout: "pipe", stderr: "pipe" });
+      const proc = Bun.spawn(["npm", "view", "@hasna/instructions", "version"], { stdout: "pipe", stderr: "pipe" });
       const latest = (await new Response(proc.stdout).text()).trim();
       await proc.exited;
       if (latest === pkg.version) {
@@ -1622,7 +1622,7 @@ program
         console.log(`Current: ${chalk.dim(pkg.version)} → Latest: ${chalk.green(latest)}`);
         if (!opts.check) {
           console.log(chalk.dim("Installing..."));
-          const install = Bun.spawn(["bun", "install", "-g", `@hasna/configs@${latest}`], { stdout: "inherit", stderr: "inherit" });
+          const install = Bun.spawn(["bun", "install", "-g", `@hasna/instructions@${latest}`], { stdout: "inherit", stderr: "inherit" });
           await install.exited;
           console.log(chalk.green("✓") + ` Updated to ${latest}`);
         }

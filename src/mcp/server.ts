@@ -29,14 +29,14 @@ const TOOL_DOCS: Record<string, string> = {
   describe_tools: "Get full descriptions for tools. Params: names? (array). Returns tool docs.",
 };
 
-// ── Agent profiles — CONFIGS_PROFILE env var controls which tools are exposed ─
+// ── Agent profiles — INSTRUCTIONS_PROFILE env var controls which tools are exposed ─
 const PROFILES: Record<string, string[]> = {
   minimal: ["get_status", "get_config", "sync_known"],
   standard: ["list_configs", "get_config", "create_config", "update_config", "apply_config", "sync_known", "get_status", "render_template", "scan_secrets", "list_profiles", "apply_profile", "search_tools", "describe_tools"],
   full: [], // empty = all tools
 };
 
-const activeProfile = process.env["CONFIGS_PROFILE"] || "full";
+const activeProfile = process.env["INSTRUCTIONS_PROFILE"] || "full";
 const profileFilter = PROFILES[activeProfile];
 
 // ── Lean stubs (minimal schema, no descriptions) ─────────────────────────────
@@ -224,7 +224,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           drifted,
           drifted_configs: driftedSlugs.slice(0, 5),
           missing,
-          db_path: process.env["CONFIGS_DB_PATH"] || "~/.hasna/configs/configs.db",
+          db_path: process.env["HASNA_INSTRUCTIONS_DB_PATH"] || "~/.hasna/instructions/instructions.db",
         });
       }
       case "sync_known": {

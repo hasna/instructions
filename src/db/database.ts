@@ -1,20 +1,16 @@
 import { Database } from "bun:sqlite";
-import { cpSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 function getDbPath(): string {
-  if (process.env["HASNA_CONFIGS_DB_PATH"]) {
-    return process.env["HASNA_CONFIGS_DB_PATH"];
+  if (process.env["HASNA_INSTRUCTIONS_DB_PATH"]) {
+    return process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   }
-  if (process.env["CONFIGS_DB_PATH"]) {
-    return process.env["CONFIGS_DB_PATH"]; // backward compat
-  }
-  migrateDotfile();
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-  const dir = join(home, ".hasna", "configs");
+  const dir = join(home, ".hasna", "instructions");
   mkdirSync(dir, { recursive: true });
-  return join(dir, "configs.db");
+  return join(dir, "instructions.db");
 }
 
 export function uuid(): string {
@@ -136,7 +132,7 @@ export function resetDatabase(): void {
 /**
  * Destroy the on-disk local database: close the handle and delete the db file
  * plus its WAL/SHM sidecars. Used by `init --force`. Resolves the path from the
- * db module (honoring HASNA_CONFIGS_DB_PATH / CONFIGS_DB_PATH); a no-op for the
+ * db module (honoring HASNA_INSTRUCTIONS_DB_PATH); a no-op for the
  * in-memory (`:memory:`) database. Local-only — the CloudConfigStore never calls
  * this (destroying the shared cloud store from a client is forbidden).
  */
@@ -214,23 +210,4 @@ export function insertFeedback(input: FeedbackInput, db?: Database): void {
     "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
     [input.message, input.email ?? null, input.category ?? "general", input.version ?? null],
   );
-}
-
-function migrateDotfile(): void {
-  const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-  const oldDirs = [join(home, ".open-configs"), join(home, ".configs")];
-  const newDir = join(home, ".hasna", "configs");
-  if (existsSync(newDir)) return;
-
-  for (const oldDir of oldDirs) {
-    if (!existsSync(oldDir)) continue;
-    try {
-      if (!statSync(oldDir).isDirectory()) continue;
-      mkdirSync(join(home, ".hasna"), { recursive: true });
-      cpSync(oldDir, newDir, { recursive: true, force: false });
-      return;
-    } catch {
-      // Ignore legacy directories that cannot be copied.
-    }
-  }
 }

@@ -35,7 +35,7 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 }
 
 const PORT = Number(
-  process.env["PORT"] ?? process.env["INSTRUCTIONS_PORT"] ?? process.env["CONFIGS_PORT"] ?? 3457,
+  process.env["PORT"] ?? process.env["INSTRUCTIONS_PORT"] ?? 3457,
 );
 
 const app = new Hono();
@@ -141,6 +141,6 @@ if (dashDir) {
   });
 }
 
-const HOST = process.env["HOST"] ?? process.env["INSTRUCTIONS_HOST"] ?? process.env["CONFIGS_HOST"] ?? "localhost";
+const HOST = process.env["HOST"] ?? process.env["INSTRUCTIONS_HOST"] ?? "localhost";
 console.log(`instructions-serve listening on http://${HOST}:${PORT} (mode: ${serviceMode()})${dashDir ? " (dashboard: /)" : " (no dashboard)"}`);
 export default { port: PORT, hostname: HOST, fetch: app.fetch };

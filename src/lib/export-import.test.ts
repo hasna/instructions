@@ -12,14 +12,14 @@ let tmpDir: string;
 
 beforeEach(() => {
   resetDatabase();
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   tmpDir = join(tmpdir(), `configs-export-test-${Date.now()}`);
   mkdirSync(tmpDir, { recursive: true });
 });
 
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
 });
 
 describe("export + import roundtrip", () => {
@@ -35,7 +35,7 @@ describe("export + import roundtrip", () => {
 
     // Import into fresh DB
     resetDatabase();
-    process.env["CONFIGS_DB_PATH"] = ":memory:";
+    process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
     const db2 = getDatabase();
     const importResult = await importConfigs(outPath, { store: new LocalConfigStore(db2) });
     expect(importResult.created).toBe(2);

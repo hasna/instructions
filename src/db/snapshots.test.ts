@@ -8,7 +8,7 @@ let db: Database;
 
 beforeEach(() => {
   resetDatabase();
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   db = getDatabase();
 });
 

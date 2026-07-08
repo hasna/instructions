@@ -7,7 +7,7 @@ import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
 const PACKAGE_NAME = "@hasna/instructions";
 const PACKAGE_VERSION = "0.3.0";
 
-type ActiveDbEnv = "HASNA_CONFIGS_DB_PATH" | "CONFIGS_DB_PATH" | null;
+type ActiveDbEnv = "HASNA_INSTRUCTIONS_DB_PATH" | null;
 type DatabaseKind = "memory" | "file";
 type ContractStatus = "ok" | "warn";
 
@@ -20,8 +20,7 @@ export interface ConfigsStatusContract {
   };
   env: {
     database: {
-      primary: "HASNA_CONFIGS_DB_PATH";
-      fallback: "CONFIGS_DB_PATH";
+      primary: "HASNA_INSTRUCTIONS_DB_PATH";
       active: ActiveDbEnv;
       kind: DatabaseKind;
     };
@@ -62,13 +61,12 @@ export interface ConfigsStatusContract {
 }
 
 function activeDatabaseEnv(): ActiveDbEnv {
-  if (process.env["HASNA_CONFIGS_DB_PATH"]) return "HASNA_CONFIGS_DB_PATH";
-  if (process.env["CONFIGS_DB_PATH"]) return "CONFIGS_DB_PATH";
+  if (process.env["HASNA_INSTRUCTIONS_DB_PATH"]) return "HASNA_INSTRUCTIONS_DB_PATH";
   return null;
 }
 
 function configuredDatabaseKind(): DatabaseKind {
-  const value = process.env["HASNA_CONFIGS_DB_PATH"] ?? process.env["CONFIGS_DB_PATH"] ?? "";
+  const value = process.env["HASNA_INSTRUCTIONS_DB_PATH"] ?? "";
   return value === ":memory:" || value.startsWith("file::memory:") ? "memory" : "file";
 }
 
@@ -158,8 +156,7 @@ export async function getConfigsStatus(
     },
     env: {
       database: {
-        primary: "HASNA_CONFIGS_DB_PATH",
-        fallback: "CONFIGS_DB_PATH",
+        primary: "HASNA_INSTRUCTIONS_DB_PATH",
         active: activeDatabaseEnv(),
         kind: configuredDatabaseKind(),
       },

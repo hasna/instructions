@@ -12,14 +12,14 @@ let tmpDir: string;
 
 beforeEach(() => {
   resetDatabase();
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   tmpDir = join(tmpdir(), `configs-test-${Date.now()}`);
   mkdirSync(tmpDir, { recursive: true });
 });
 
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
 });
 
 describe("applyConfig", () => {

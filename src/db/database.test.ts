@@ -11,15 +11,15 @@ let tempHome: string | null = null;
 beforeEach(() => {
   resetDatabase();
   originalHome = process.env["HOME"];
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
 });
 
 afterEach(() => {
   resetDatabase();
   if (originalHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = originalHome;
-  delete process.env["HASNA_CONFIGS_DB_PATH"];
-  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   if (tempHome) rmSync(tempHome, { recursive: true, force: true });
   tempHome = null;
 });
@@ -27,8 +27,8 @@ afterEach(() => {
 function useTempHome(): string {
   tempHome = mkdtempSync(join(tmpdir(), "configs-home-"));
   process.env["HOME"] = tempHome;
-  delete process.env["CONFIGS_DB_PATH"];
-  delete process.env["HASNA_CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   return tempHome;
 }
 
@@ -47,7 +47,7 @@ describe("database", () => {
   test("resetDatabase clears singleton", () => {
     const db1 = getDatabase();
     resetDatabase();
-    process.env["CONFIGS_DB_PATH"] = ":memory:";
+    process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
     const db2 = getDatabase();
     expect(db1).not.toBe(db2);
   });
@@ -99,28 +99,6 @@ describe("database", () => {
     expect(configColumns).toContain("outputs");
   });
 
-  test("migrates legacy ~/.open-configs into ~/.hasna/configs", () => {
-    const home = useTempHome();
-    mkdirSync(join(home, ".open-configs", "nested"), { recursive: true });
-    writeFileSync(join(home, ".open-configs", "config.json"), "{\"ok\":true}");
-    writeFileSync(join(home, ".open-configs", "nested", "profile.txt"), "profile");
-
-    getDatabase();
-
-    expect(readFileSync(join(home, ".hasna", "configs", "config.json"), "utf8")).toBe("{\"ok\":true}");
-    expect(readFileSync(join(home, ".hasna", "configs", "nested", "profile.txt"), "utf8")).toBe("profile");
-  });
-
-  test("migrates legacy ~/.configs when ~/.open-configs is absent", () => {
-    const home = useTempHome();
-    mkdirSync(join(home, ".configs"), { recursive: true });
-    writeFileSync(join(home, ".configs", "legacy.txt"), "legacy");
-
-    getDatabase();
-
-    expect(readFileSync(join(home, ".hasna", "configs", "legacy.txt"), "utf8")).toBe("legacy");
-  });
-
   test("feedback insert works on a fresh database", () => {
     const db = getDatabase();
     expect(() => insertFeedback({ message: "hi", category: "bug", version: "9.9.9" }, db)).not.toThrow();
@@ -141,25 +119,12 @@ describe("database", () => {
     legacy.exec("CREATE TABLE feedback (id TEXT PRIMARY KEY, message TEXT NOT NULL, email TEXT)");
     legacy.close();
 
-    process.env["CONFIGS_DB_PATH"] = dbPath;
+    process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
     resetDatabase();
     const db = getDatabase(dbPath);
     const columns = db.query<{ name: string }, []>("PRAGMA table_info(feedback)").all().map((r) => r.name);
     expect(columns).toContain("category");
     expect(columns).toContain("version");
     expect(() => insertFeedback({ message: "legacy ok", category: "feature" }, db)).not.toThrow();
-  });
-
-  test("does not copy legacy data over an existing canonical directory", () => {
-    const home = useTempHome();
-    mkdirSync(join(home, ".open-configs"), { recursive: true });
-    mkdirSync(join(home, ".hasna", "configs"), { recursive: true });
-    writeFileSync(join(home, ".open-configs", "legacy.txt"), "legacy");
-    writeFileSync(join(home, ".hasna", "configs", "current.txt"), "current");
-
-    getDatabase();
-
-    expect(readFileSync(join(home, ".hasna", "configs", "current.txt"), "utf8")).toBe("current");
-    expect(existsSync(join(home, ".hasna", "configs", "legacy.txt"))).toBe(false);
   });
 });

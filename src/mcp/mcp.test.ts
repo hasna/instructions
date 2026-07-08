@@ -6,7 +6,7 @@ import { createProfile, addConfigToProfile } from "../db/profiles";
 // Test MCP tool logic directly by re-implementing the dispatch
 beforeEach(() => {
   resetDatabase();
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   getDatabase();
 });
 
@@ -127,7 +127,7 @@ describe("MCP tool logic — new tools", () => {
     expect(total).toBe(0);
   });
 
-  test("CONFIGS_PROFILE filters tools correctly", () => {
+  test("INSTRUCTIONS_PROFILE filters tools correctly", () => {
     // Simulate profile filtering logic
     const ALL_TOOLS = [
       { name: "get_status" }, { name: "get_config" }, { name: "sync_known" },
