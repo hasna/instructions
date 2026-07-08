@@ -1,6 +1,6 @@
 {
   "name": "@hasna/instructions",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "AI coding agent instruction & configuration manager — store, version, apply, and share all your AI coding configs. CLI + MCP + HTTP API (instructions-serve) + generated SDK + Dashboard.",
   "type": "module",
   "main": "dist/index.js",
