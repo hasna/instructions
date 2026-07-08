@@ -263,12 +263,12 @@ program
       tags: opts.tag ? [opts.tag] : undefined,
       search: opts.search,
     });
-    if (configs.length === 0) {
-      console.log(chalk.dim("No configs found."));
-      return;
-    }
     if (fmt === "json") {
       printJson(configs);
+      return;
+    }
+    if (configs.length === 0) {
+      console.log(chalk.dim("No configs found."));
       return;
     }
     const page = paginate(configs, { limit: opts.limit, cursor: opts.cursor });
@@ -563,8 +563,8 @@ profileCmd.command("list").description("List all profiles")
   const fmt = opts.json ? "json" : opts.verbose ? "table" : opts.brief ? "compact" : opts.format;
   const store = resolveConfigStore();
   const profiles = await store.listProfiles();
-  if (profiles.length === 0) { console.log(chalk.dim("No profiles.")); return; }
   if (fmt === "json") { printJson(profiles); return; }
+  if (profiles.length === 0) { console.log(chalk.dim("No profiles.")); return; }
   const page = paginate(profiles, { limit: opts.limit, cursor: opts.cursor });
   if (fmt === "compact") console.log(`${pad("slug", 28)} ${pad("configs", 8)} ${pad("match", 36)} vars`);
   for (const p of page.items) {
