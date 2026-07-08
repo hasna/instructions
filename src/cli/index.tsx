@@ -2,7 +2,7 @@
 import { registerEventsCommands } from "@hasna/events/commander";
 import { program } from "commander";
 import chalk from "chalk";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { applyConfig, applyConfigs, expandPath } from "../lib/apply.js";
@@ -24,6 +24,41 @@ import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Pro
 
 import { createRequire } from "node:module";
 const pkg = createRequire(import.meta.url)("../../package.json") as { version: string };
+
+// Blocking, complete write to stdout (fd 1). Fixes the pipe-truncation bug:
+// console.log/process.stdout.write to a pipe is asynchronous in Bun/Node, so a
+// large payload (e.g. `instructions list --json | jq`) that exceeds the 64KB
+// pipe buffer is silently dropped when the process exits before the buffer
+// drains. writeSync loops until every byte is delivered, retrying on EAGAIN
+// (pipe full) and giving up cleanly on EPIPE (consumer closed).
+const EAGAIN_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+function writeStdout(text: string): void {
+  const buf = Buffer.from(text, "utf8");
+  let offset = 0;
+  while (offset < buf.length) {
+    try {
+      offset += writeSync(1, buf, offset);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EAGAIN") {
+        Atomics.wait(EAGAIN_SLEEP, 0, 0, 1); // wait ~1ms for the consumer to drain
+        continue;
+      }
+      if (code === "EPIPE") return; // downstream closed the pipe; stop writing
+      throw e;
+    }
+  }
+}
+
+/** Print a line to stdout with a guaranteed-complete blocking write. */
+function printLine(text = ""): void {
+  writeStdout(`${text}\n`);
+}
+
+/** Pretty-print a JSON value to stdout with a guaranteed-complete write. */
+function printJson(value: unknown): void {
+  printLine(JSON.stringify(value, null, 2));
+}
 
 function fmtConfig(c: Config, format: string) {
   if (format === "json") return JSON.stringify(c, null, 2);
@@ -233,7 +268,7 @@ program
       return;
     }
     if (fmt === "json") {
-      console.log(JSON.stringify(configs, null, 2));
+      printJson(configs);
       return;
     }
     const page = paginate(configs, { limit: opts.limit, cursor: opts.cursor });
@@ -257,13 +292,13 @@ program
   .action(async (id, opts) => {
     try {
       const c = await resolveConfigStore().getConfig(id);
-      if (opts.format === "json") { console.log(JSON.stringify(c, null, 2)); return; }
-      if (opts.format === "content") { console.log(c.content); return; }
+      if (opts.format === "json") { printJson(c); return; }
+      if (opts.format === "content") { printLine(c.content); return; }
       console.log(fmtConfig(c, "table"));
       console.log();
       console.log(chalk.bold("Content:"));
       console.log(chalk.dim("─".repeat(60)));
-      console.log(c.content);
+      printLine(c.content);
     } catch (e) {
       console.error(chalk.red(e instanceof Error ? e.message : String(e)));
       process.exit(1);
@@ -319,7 +354,7 @@ program
       const store = resolveConfigStore();
       const config = await store.getConfig(id);
       await store.deleteConfig(config.id);
-      if (opts.json) { console.log(JSON.stringify({ deleted: true, id: config.id, slug: config.slug }, null, 2)); return; }
+      if (opts.json) { printJson({ deleted: true, id: config.id, slug: config.slug }); return; }
       console.log(chalk.green("✓") + ` Deleted: ${chalk.bold(config.name)} ${chalk.dim(`(${config.slug})`)}`);
     } catch (e) {
       console.error(chalk.red(e instanceof Error ? e.message : String(e)));
@@ -529,7 +564,7 @@ profileCmd.command("list").description("List all profiles")
   const store = resolveConfigStore();
   const profiles = await store.listProfiles();
   if (profiles.length === 0) { console.log(chalk.dim("No profiles.")); return; }
-  if (fmt === "json") { console.log(JSON.stringify(profiles, null, 2)); return; }
+  if (fmt === "json") { printJson(profiles); return; }
   const page = paginate(profiles, { limit: opts.limit, cursor: opts.cursor });
   if (fmt === "compact") console.log(`${pad("slug", 28)} ${pad("configs", 8)} ${pad("match", 36)} vars`);
   for (const p of page.items) {
@@ -698,7 +733,7 @@ sessionCmd.command("plan")
         sources,
       });
       if (opts.json) {
-        console.log(JSON.stringify(planJsonForOutput(plan), null, 2));
+        printJson(planJsonForOutput(plan));
         return;
       }
       console.log(chalk.bold(`${plan.tool} session render plan`) + chalk.dim(` (${plan.adapter.mode})`));
@@ -757,7 +792,7 @@ sessionCmd.command("apply")
       });
       const result = applySessionRender(plan, { dryRun: opts.dryRun, force: opts.force });
       if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
+        printJson(result);
         if (result.conflicts.length > 0) process.exitCode = 1;
         return;
       }
@@ -810,7 +845,7 @@ snapshotCmd.command("list <config>").description("List snapshots for a config")
 snapshotCmd.command("show <id>").description("Show a snapshot's content").action(async (id) => {
   const snap = await resolveConfigStore().getSnapshot(id);
   if (!snap) { console.error(chalk.red("Snapshot not found: " + id)); process.exit(1); }
-  console.log(snap.content);
+  printLine(snap.content);
 });
 
 snapshotCmd.command("restore <config> <snapshot-id>").description("Restore a config to a snapshot version").action(async (configId, snapId) => {
@@ -978,7 +1013,7 @@ program
     const omitted = Math.max(0, result.findings.length - visible.length);
 
     if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
+      printJson(result);
     } else if (result.findings.length === 0) {
       console.log(chalk.green("✓") + ` Package-manager scan clean (${result.scannedFiles} file(s)).`);
     } else {
@@ -1142,7 +1177,7 @@ program
     const status = await getConfigsStatus(resolveConfigStore());
 
     if (opts.json) {
-      console.log(JSON.stringify(status, null, 2));
+      printJson(status);
       return;
     }
 
