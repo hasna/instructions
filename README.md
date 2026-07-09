@@ -157,7 +157,12 @@ Local data is stored in `~/.hasna/configs/` (unchanged, for fleet continuity).
 
 `instructions session plan` and `instructions session apply` render
 OpenIdentities and instruction sources into provider-native files for Claude,
-Codex, Cursor, OpenCode, and Codewith.
+Codex, Cursor, OpenCode, Codewith, aicopilot, and Google Antigravity.
+The old Google agent target is removed; Antigravity is the only Google coding
+agent render target. Antigravity workspace rules are rendered to
+`.agents/rules/*.md`; its current global rules and MCP files use Google's
+legacy-named `~/.gemini/GEMINI.md` and `~/.gemini/config/mcp_config.json`
+paths but remain owned by the `antigravity` target.
 
 ```bash
 instructions session plan \
@@ -173,12 +178,19 @@ instructions session apply \
   --identity-export ./instructions.json
 ```
 
-Accepted source layers are `global`, `provider`/`tool`, `account`,
-`identity`/`agent`, `project`, and `local`. Empty renders fail closed unless
-`--allow-empty-sources` is passed. Apply writes generated manifests with file
-hashes, checks previous manifests for drift, refuses unmanaged file conflicts
-unless `--force` is passed, removes stale managed mirrors only when safe, and
-writes local snapshots before mutating managed files.
+Accepted source layers are `global`, `provider`/`tool`, `account`, `machine`,
+`division`, `workspace`, `project`/`repo`, `path`, `identity`/`agent`,
+`session`, and `local`. Empty renders fail closed unless `--allow-empty-sources`
+is passed. Apply writes generated manifests with file hashes, checks previous
+manifests for drift, refuses unmanaged file conflicts unless `--force` is
+passed, removes stale managed mirrors only when safe, and writes local snapshots
+before mutating managed files.
+
+`instructions init` and `bun run seed` also seed
+`global-agent-rules-standard`, the managed global/system prompt source for
+session renaming, task-scoped worktrees, PR-first landing, protected-branch
+push safety, autonomous repair, Hasna CLI source-of-truth usage, conversation
+surface routing, and unbudgeted Codewith goals unless a user asks for budgets.
 
 ## Machine-aware Profiles
 

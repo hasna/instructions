@@ -19,11 +19,11 @@ export type ConfigCategory = (typeof CONFIG_CATEGORIES)[number];
 export const CONFIG_AGENTS = [
   "claude",
   "codex",
-  "gemini",
   "opencode",
   "cursor",
   "codewith",
   "aicopilot",
+  "antigravity",
   "zsh",
   "git",
   "npm",

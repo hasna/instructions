@@ -65,7 +65,7 @@ keeps the token value in the runtime environment or secret manager.
 | Category | What's stored |
 |----------|--------------|
 | `agent` | settings.json, keybindings.json, config.toml |
-| `rules` | CLAUDE.md, AGENTS.md, GEMINI.md, rules/*.md |
+| `rules` | CLAUDE.md, AGENTS.md, AICOPILOT.md, .agents/rules/*.md, rules/*.md |
 | `mcp` | ~/.claude.json (MCP server entries) |
 | `shell` | .zshrc |
 | `git` | .gitconfig |

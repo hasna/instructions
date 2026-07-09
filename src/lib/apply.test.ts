@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig } from "../db/configs";
-import { applyConfig } from "./apply";
+import { applyConfig, applyConfigs } from "./apply";
+import { ANTIGRAVITY_RULE_FILE_CHAR_LIMIT } from "./session-render";
 import { detectMachineContext, resolveProfileVariables } from "./machine";
+import type { ConfigAgent } from "../types";
 
 let tmpDir: string;
 
@@ -20,6 +22,7 @@ beforeEach(() => {
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+  delete process.env["CONFIGS_HOME"];
 });
 
 describe("applyConfig", () => {
@@ -153,6 +156,55 @@ describe("applyConfig", () => {
     const cursor = readFileSync(cursorTarget, "utf-8");
     expect(cursor).toContain("alwaysApply: true");
     expect(cursor).toContain("Shared system guidance.");
+  });
+
+  test("refuses oversized Antigravity generated global rules", async () => {
+    const db = getDatabase();
+    const antigravityTarget = join(tmpDir, ".gemini", "GEMINI.md");
+    const c = createConfig({
+      name: "Claude Prompt",
+      category: "rules",
+      agent: "claude",
+      content: "x".repeat(ANTIGRAVITY_RULE_FILE_CHAR_LIMIT + 1),
+      target_path: join(tmpDir, ".claude", "CLAUDE.md"),
+      format: "markdown",
+      outputs: [
+        { agent: "antigravity", target_path: antigravityTarget, transform: "codex-flat" },
+      ],
+    }, db);
+
+    await expect(applyConfig(c, { store: new LocalConfigStore(db) })).rejects.toThrow("Antigravity limits rule files");
+    expect(existsSync(antigravityTarget)).toBe(false);
+  });
+
+  test("bulk apply skips retired Gemini rows", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const geminiTarget = join(tmpDir, ".gemini", "GEMINI.md");
+    const antigravityTarget = join(tmpDir, ".gemini", "ANTIGRAVITY.md");
+    const stale = createConfig({
+      name: "Stale Gemini Global Rules",
+      category: "rules",
+      agent: "gemini" as ConfigAgent,
+      content: "retired gemini content",
+      target_path: "~/.gemini/GEMINI.md",
+      format: "markdown",
+    }, db);
+    const active = createConfig({
+      name: "Active Antigravity Rules",
+      category: "rules",
+      agent: "antigravity",
+      content: "active antigravity content",
+      target_path: "~/.gemini/ANTIGRAVITY.md",
+      format: "markdown",
+    }, db);
+
+    const results = await applyConfigs([stale, active], { store: new LocalConfigStore(db) });
+
+    expect(results.length).toBe(1);
+    expect(results[0]?.config_id).toBe(active.id);
+    expect(existsSync(geminiTarget)).toBe(false);
+    expect(readFileSync(antigravityTarget, "utf-8")).toBe("active antigravity content");
   });
 
   test("refuses to apply stale rows targeting generated fan-out outputs", async () => {

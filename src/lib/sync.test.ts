@@ -1,12 +1,13 @@
 import { LocalConfigStore } from "../data/config-store";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig, listConfigs } from "../db/configs";
-import { diffConfig, detectCategory, detectAgent, detectFormat } from "./sync";
+import { diffConfig, detectCategory, detectAgent, detectFormat, syncToDisk } from "./sync";
 import { syncFromDir } from "./sync-dir";
+import type { ConfigAgent } from "../types";
 
 let tmpDir: string;
 
@@ -20,11 +21,13 @@ beforeEach(() => {
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+  delete process.env["CONFIGS_HOME"];
 });
 
 describe("detectCategory", () => {
   test("detects rules for claude.md", () => expect(detectCategory("/home/user/.claude/CLAUDE.md")).toBe("rules"));
   test("detects rules for rules dir", () => expect(detectCategory("/home/user/.claude/rules/git.md")).toBe("rules"));
+  test("detects rules for Antigravity rule files whose names contain mcp", () => expect(detectCategory("/home/user/repo/.agents/rules/mcp.md")).toBe("rules"));
   test("detects agent for .claude dir", () => expect(detectCategory("/home/user/.claude/settings.json")).toBe("agent"));
   test("detects shell for .zshrc", () => expect(detectCategory("/home/user/.zshrc")).toBe("shell"));
   test("detects git for .gitconfig", () => expect(detectCategory("/home/user/.gitconfig")).toBe("git"));
@@ -134,5 +137,42 @@ describe("diffConfig", () => {
     expect(diff).toContain(`+++ disk (${output})`);
     expect(diff).toContain("-# Claude");
     expect(diff).toContain("+# stale");
+  });
+});
+
+describe("syncToDisk", () => {
+  test("skips stale retired Gemini rows and still applies active Antigravity rows", async () => {
+    const db = getDatabase();
+    const store = new LocalConfigStore(db);
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const antigravityTarget = join(tmpDir, ".gemini", "GEMINI.md");
+
+    createConfig({
+      name: "Stale Gemini Global Rules",
+      category: "rules",
+      agent: "gemini" as ConfigAgent,
+      target_path: "~/.gemini/GEMINI.md",
+      format: "markdown",
+      content: "retired gemini content",
+    }, db);
+
+    const retiredOnlyResult = await syncToDisk({ store });
+    expect(retiredOnlyResult.skipped.length).toBe(1);
+    expect(retiredOnlyResult.skipped[0]).toContain("deprecated agent: gemini");
+    expect(existsSync(antigravityTarget)).toBe(false);
+
+    createConfig({
+      name: "Active Antigravity Global Rules",
+      category: "rules",
+      agent: "antigravity",
+      target_path: "~/.gemini/GEMINI.md",
+      format: "markdown",
+      content: "active antigravity content",
+    }, db);
+
+    const result = await syncToDisk({ store });
+    expect(result.updated).toBe(1);
+    expect(result.skipped.length).toBe(1);
+    expect(readFileSync(antigravityTarget, "utf-8")).toBe("active antigravity content");
   });
 });

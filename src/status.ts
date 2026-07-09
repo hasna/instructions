@@ -2,10 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolveConfigStore, type ConfigStore } from "./data/config-store.js";
 import type { Config } from "./types/index.js";
 import { expandPath } from "./lib/apply.js";
+import { isRetiredOrUnsupportedConfigAgent } from "./lib/config-agents.js";
+import { getPackageVersion } from "./lib/package-version.js";
 import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
 
 const PACKAGE_NAME = "@hasna/instructions";
-const PACKAGE_VERSION = "0.3.0";
+const PACKAGE_VERSION = getPackageVersion();
 
 type ActiveDbEnv = "HASNA_INSTRUCTIONS_DB_PATH" | null;
 type DatabaseKind = "memory" | "file";
@@ -31,6 +33,7 @@ export interface ConfigsStatusContract {
       file: number;
       reference: number;
       templates: number;
+      retiredAgentRows: number;
     };
     byCategory: Record<string, number>;
     byAgent: Record<string, number>;
@@ -47,9 +50,11 @@ export interface ConfigsStatusContract {
     driftedTargets: number;
     missingTargets: number;
     unredactedSecretFindings: number;
+    retiredAgentRows: number;
     hasDrift: boolean;
     hasMissingTargets: boolean;
     hasUnredactedSecrets: boolean;
+    hasRetiredAgentRows: boolean;
   };
   safety: {
     includesConfigValues: false;
@@ -95,6 +100,7 @@ export async function getConfigsStatus(
   }
 
   const fileConfigs = configs.filter((config) => config.kind === "file");
+  const retiredAgentRows = configs.filter((config) => isRetiredOrUnsupportedConfigAgent(config.agent)).length;
   let driftedTargets = 0;
   let missingTargets = 0;
   let unredactedSecretFindings = 0;
@@ -102,6 +108,7 @@ export async function getConfigsStatus(
 
   for (const config of fileConfigs) {
     unredactedSecretFindings += scanSecrets(config.content, config.format as RedactFormat).length;
+    if (isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
     if (!config.target_path) continue;
 
     knownTargets += 1;
@@ -143,7 +150,8 @@ export async function getConfigsStatus(
     databaseReachable &&
     driftedTargets === 0 &&
     missingTargets === 0 &&
-    unredactedSecretFindings === 0
+    unredactedSecretFindings === 0 &&
+    retiredAgentRows === 0
       ? "ok"
       : "warn";
 
@@ -167,6 +175,7 @@ export async function getConfigsStatus(
         file: fileConfigs.length,
         reference: configs.filter((config) => config.kind === "reference").length,
         templates: configs.filter((config) => config.is_template).length,
+        retiredAgentRows,
       },
       byCategory,
       byAgent: countBy(configs, (config) => config.agent),
@@ -183,9 +192,11 @@ export async function getConfigsStatus(
       driftedTargets,
       missingTargets,
       unredactedSecretFindings,
+      retiredAgentRows,
       hasDrift: driftedTargets > 0,
       hasMissingTargets: missingTargets > 0,
       hasUnredactedSecrets: unredactedSecretFindings > 0,
+      hasRetiredAgentRows: retiredAgentRows > 0,
     },
     safety: {
       includesConfigValues: false,

@@ -14,9 +14,10 @@ import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { applySessionRender } from "../lib/session-apply.js";
-import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
+import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
+import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
 import { getConfigsStatus } from "../status.js";
 import { resolveConfigStore, isCloudMode, type ConfigStore } from "../data/config-store.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
@@ -102,11 +103,13 @@ function collectOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
-const SESSION_SOURCE_LAYERS = new Set<SessionInstructionLayer>(["global", "tool", "account", "agent", "project", "local"]);
+const SESSION_SOURCE_LAYERS = new Set<SessionInstructionLayer>(SESSION_INSTRUCTION_LAYERS);
+const SESSION_SOURCE_LAYER_HELP = "global|provider|tool|account|machine|division|workspace|project|repo|path|identity|agent|session|local";
 
 function parseSessionLayer(value: string): SessionInstructionLayer {
   if (value === "provider") return "tool";
   if (value === "identity") return "agent";
+  if (value === "project") return "repo";
   if (SESSION_SOURCE_LAYERS.has(value as SessionInstructionLayer)) return value as SessionInstructionLayer;
   throw new Error(`Invalid source layer "${value}"`);
 }
@@ -141,7 +144,7 @@ function parseLayeredReference(value: string): { layer?: SessionInstructionLayer
   const idx = trimmed.indexOf(":");
   if (idx > 0) {
     const candidate = trimmed.slice(0, idx);
-    if (candidate === "provider" || candidate === "identity" || SESSION_SOURCE_LAYERS.has(candidate as SessionInstructionLayer)) {
+    if (candidate === "provider" || candidate === "identity" || candidate === "project" || SESSION_SOURCE_LAYERS.has(candidate as SessionInstructionLayer)) {
       const id = trimmed.slice(idx + 1).trim();
       if (!id) throw new Error(`Invalid layered reference "${value}"`);
       return { layer: parseSessionLayer(candidate), id };
@@ -422,8 +425,8 @@ program
 // ── sync ─────────────────────────────────────────────────────────────────────
 program
   .command("sync")
-  .description("Sync known AI coding configs from disk into DB (claude, codex, opencode, cursor, codewith, aicopilot, gemini, zsh, git, npm)")
-  .option("-a, --agent <agent>", "only sync configs for this agent (claude|codex|opencode|cursor|codewith|aicopilot|gemini|zsh|git|npm)")
+  .description("Sync known AI coding configs from disk into DB (claude, codex, opencode, cursor, codewith, aicopilot, antigravity, zsh, git, npm)")
+  .option("-a, --agent <agent>", "only sync configs for this agent (claude|codex|opencode|cursor|codewith|aicopilot|antigravity|zsh|git|npm)")
   .option("-c, --category <cat>", "only sync configs in this category")
   .option("-p, --project [dir]", "sync project-scoped configs (CLAUDE.md, .mcp.json, etc.) from a project dir")
   .option("--all", "with --project: scan all subdirs for projects to sync")
@@ -452,18 +455,29 @@ program
     if (opts.project) {
       const dir = typeof opts.project === "string" ? opts.project : process.cwd();
 
-      // --project --all: find all project dirs with CLAUDE.md and sync each
+      // --project --all: find all project dirs with active agent config markers and sync each
       if (opts.all) {
-        const { readdirSync, statSync: st } = await import("node:fs");
+        const { readdirSync } = await import("node:fs");
         const absDir = expandPath(dir);
         const entries = readdirSync(absDir, { withFileTypes: true });
         let totalAdded = 0, totalUpdated = 0, totalUnchanged = 0, projects = 0;
         for (const entry of entries) {
           if (!entry.isDirectory()) continue;
           const projDir = join(absDir, entry.name);
-          // Only sync dirs that have CLAUDE.md, .mcp.json, or .claude/
-          const hasClaude = existsSync(join(projDir, "CLAUDE.md")) || existsSync(join(projDir, ".mcp.json")) || existsSync(join(projDir, ".claude"));
-          if (!hasClaude) continue;
+          const hasAgentConfig = [
+            "CLAUDE.md",
+            ".mcp.json",
+            ".claude",
+            "AGENTS.md",
+            ".codex",
+            ".opencode",
+            ".codewith",
+            "AICOPILOT.md",
+            ".aicopilot",
+            ".cursor",
+            ".agents",
+          ].some((marker) => existsSync(join(projDir, marker)));
+          if (!hasAgentConfig) continue;
           const result = await syncProject({ projectDir: projDir, dryRun: opts.dryRun, store });
           if (result.added + result.updated > 0) {
             console.log(`  ${chalk.green("✓")} ${entry.name}: +${result.added} updated:${result.updated}`);
@@ -709,7 +723,7 @@ sessionCmd.command("plan")
   .option("--target-home <path>", "override generated profile-scoped target home")
   .option("--project-root <path>", "repository root for project-scoped adapters such as Cursor")
   .option("--session-id <id>", "session id to include in the manifest")
-  .option("--source <layer:id=path>", "instruction source file; layers: global|provider|tool|account|identity|agent|project|local", collectOption, [])
+  .option("--source <layer:id=path>", `instruction source file; layers: ${SESSION_SOURCE_LAYER_HELP}`, collectOption, [])
   .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
   .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
@@ -765,7 +779,7 @@ sessionCmd.command("apply")
   .option("--target-home <path>", "override generated profile-scoped target home")
   .option("--project-root <path>", "repository root for project-scoped adapters such as Cursor")
   .option("--session-id <id>", "session id to include in the manifest")
-  .option("--source <layer:id=path>", "instruction source file; layers: global|provider|tool|account|identity|agent|project|local", collectOption, [])
+  .option("--source <layer:id=path>", `instruction source file; layers: ${SESSION_SOURCE_LAYER_HELP}`, collectOption, [])
   .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
   .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
@@ -1040,17 +1054,17 @@ mcpCmd.command("install")
   .description("Install configs MCP server into an agent")
   .option("--claude", "install into Claude Code")
   .option("--codex", "install into Codex")
-  .option("--gemini", "install into Gemini")
+  .option("--antigravity", "install into Google Antigravity")
   .option("--all", "install into all agents")
   .option("--profile <level>", "set INSTRUCTIONS_PROFILE (minimal|standard|full)", "standard")
   .action(async (opts) => {
-    const targets = opts.all ? ["claude", "codex", "gemini"] : [
+    const targets = opts.all ? ["claude", "codex", "antigravity"] : [
       ...(opts.claude ? ["claude"] : []),
       ...(opts.codex ? ["codex"] : []),
-      ...(opts.gemini ? ["gemini"] : []),
+      ...(opts.antigravity ? ["antigravity"] : []),
     ];
     if (targets.length === 0) {
-      console.log(chalk.dim("Specify --claude, --codex, --gemini, or --all"));
+      console.log(chalk.dim("Specify --claude, --codex, --antigravity, or --all"));
       return;
     }
     for (const target of targets) {
@@ -1078,19 +1092,24 @@ mcpCmd.command("install")
           }
           appendFileSync(configPath, block);
           console.log(chalk.green("✓") + " Installed into Codex");
-        } else if (target === "gemini") {
-          const { readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
-          const { join: j } = await import("node:path");
-          const configPath = j(homedir(), ".gemini", "settings.json");
+        } else if (target === "antigravity") {
+          const { mkdirSync: md, readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
+          const { dirname: dn, join: j } = await import("node:path");
+          const configPath = j(homedir(), ".gemini", "config", "mcp_config.json");
           let settings: Record<string, unknown> = {};
           if (ex(configPath)) {
             try { settings = JSON.parse(rf(configPath, "utf-8")); } catch { /* empty */ }
           }
           const mcpServers = (settings["mcpServers"] ?? {}) as Record<string, unknown>;
-          mcpServers["configs"] = { command: mcpBinary, args: [] };
+          mcpServers["configs"] = {
+            command: mcpBinary,
+            args: [],
+            ...(opts.profile && opts.profile !== "full" ? { env: { INSTRUCTIONS_PROFILE: opts.profile } } : {}),
+          };
           settings["mcpServers"] = mcpServers;
+          md(dn(configPath), { recursive: true });
           wf(configPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
-          console.log(chalk.green("✓") + " Installed into Gemini");
+          console.log(chalk.green("✓") + " Installed into Antigravity");
         }
       } catch (e) {
         console.error(chalk.red(`✗ Failed to install into ${target}: ${e instanceof Error ? e.message : String(e)}`));
@@ -1143,6 +1162,7 @@ program
         await store.createConfig({ name: ref.name, category: ref.category, agent: "global", format: "markdown", content: ref.content, kind: "reference", description: ref.desc });
       }
     }
+    await ensureGlobalAgentRulesStandardConfig(store);
     await ensureProjectDashboardStandardConfig(store);
 
     // Create default profile
@@ -1187,6 +1207,7 @@ program
     console.log(chalk.cyan("Drifted:") + ` ${status.health.driftedTargets === 0 ? chalk.green("0") : chalk.yellow(String(status.health.driftedTargets))} (stored differs from disk)`);
     console.log(chalk.cyan("Missing:") + ` ${status.health.missingTargets === 0 ? chalk.green("0") : chalk.yellow(String(status.health.missingTargets))} (file not on disk)`);
     console.log(chalk.cyan("Secrets:") + ` ${status.health.unredactedSecretFindings === 0 ? chalk.green("0 ✓") : chalk.red(String(status.health.unredactedSecretFindings) + " ⚠")} unredacted`);
+    console.log(chalk.cyan("Retired agents:") + ` ${status.health.retiredAgentRows === 0 ? chalk.green("0") : chalk.yellow(String(status.health.retiredAgentRows))} row(s)`);
     console.log(chalk.cyan("Templates:") + ` ${status.counts.configs.templates} (with {{VAR}} placeholders)`);
   });
 

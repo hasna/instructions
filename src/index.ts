@@ -32,6 +32,8 @@ export type { ApplyOptions } from "./lib/apply.js";
 export {
   CODEWITH_NATIVE_IMPORTS_ENV,
   RAW_STORE_ROOT_ENV,
+  SESSION_INSTRUCTION_LAYERS,
+  SESSION_LAYER_RANK,
   SESSION_RENDER_MANAGED_MARKER,
   SESSION_RENDER_SCHEMA,
   SESSION_RENDER_TOOLS,
@@ -93,6 +95,11 @@ export {
   PROJECT_DASHBOARD_STANDARD_SLUG,
   ensureProjectDashboardStandardConfig,
 } from "./lib/project-dashboard-standard.js";
+export {
+  GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+  GLOBAL_AGENT_RULES_STANDARD_SLUG,
+  ensureGlobalAgentRulesStandardConfig,
+} from "./lib/global-agent-rules-standard.js";
 
 // Lib — sync
 export { syncKnown, syncToDisk, syncProject, diffConfig, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS, PROJECT_CONFIG_FILES } from "./lib/sync.js";

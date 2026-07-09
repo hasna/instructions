@@ -5,7 +5,9 @@ import type { ApplyResult, Config, ConfigOutput } from "../types/index.js";
 import { ConfigApplyError } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import type { ProfileVariables } from "../types/index.js";
+import { isRetiredOrUnsupportedConfigAgent } from "./config-agents.js";
 import { renderMachineAwareContent } from "./machine.js";
+import { ANTIGRAVITY_RULE_FILE_CHAR_LIMIT } from "./session-render.js";
 import { applyTransform } from "./transforms.js";
 
 export function getConfigHome(): string {
@@ -64,6 +66,12 @@ async function writeConfigResult(
   const renderedContent = opts.vars
     ? renderMachineAwareContent(content, opts.vars)
     : content;
+  const targetAgent = meta.agent ?? config.agent;
+  if (isAntigravityRuleTarget(targetAgent, renderedTargetPath) && renderedContent.length > ANTIGRAVITY_RULE_FILE_CHAR_LIMIT) {
+    throw new ConfigApplyError(
+      `Antigravity rule file ${renderedTargetPath} is ${renderedContent.length} characters; split it before applying because Antigravity limits rule files to ${ANTIGRAVITY_RULE_FILE_CHAR_LIMIT} characters.`
+    );
+  }
   const path = expandPath(renderedTargetPath);
   const previousContent = existsSync(path)
     ? readFileSync(path, "utf-8")
@@ -95,6 +103,10 @@ async function writeConfigResult(
   };
 }
 
+function isAntigravityRuleTarget(agent: Config["agent"] | undefined, targetPath: string): boolean {
+  return agent === "antigravity" && /\.(md|mdc|markdown)$/i.test(targetPath);
+}
+
 function isGeneratedOutputTarget(config: Config, configs: Config[]): boolean {
   if (!config.target_path) return false;
   const targetPath = normalizeTargetPath(config.target_path);
@@ -108,9 +120,16 @@ export async function applyConfig(
   config: Config,
   opts: ApplyOptions = {}
 ): Promise<ApplyResult> {
+  if (opts.outputAgent && isRetiredOrUnsupportedConfigAgent(opts.outputAgent)) {
+    throw new ConfigApplyError(`Config output agent "${opts.outputAgent}" is retired or unsupported — cannot apply to disk.`);
+  }
+  if (isRetiredOrUnsupportedConfigAgent(config.agent)) {
+    throw new ConfigApplyError(`Config "${config.name}" uses retired or unsupported agent "${config.agent}" — cannot apply to disk.`);
+  }
+
   const selectedOutputs = opts.outputAgent
     ? config.outputs.filter((output) => output.agent === opts.outputAgent)
-    : config.outputs;
+    : config.outputs.filter((output) => !isRetiredOrUnsupportedConfigAgent(output.agent));
   const shouldApplyPrimary = !opts.outputAgent || config.agent === opts.outputAgent;
 
   if (config.kind === "reference" || ((!config.target_path || !shouldApplyPrimary) && selectedOutputs.length === 0)) {
@@ -173,6 +192,7 @@ export async function applyConfigs(
   const results: ApplyResult[] = [];
   for (const config of configs) {
     if (config.kind === "reference") continue;
+    if (isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
     results.push(await applyConfig(config, opts));
   }
   return results;

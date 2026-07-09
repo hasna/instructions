@@ -25,33 +25,57 @@ afterEach(() => {
 });
 
 describe("KNOWN_CONFIGS", () => {
-  test("has required configs (claude, codex, gemini, opencode, cursor, codewith, aicopilot, shell, git, tools)", () => {
+  test("has required configs (claude, codex, opencode, cursor, codewith, aicopilot, antigravity, shell, git, tools)", () => {
     const agents = new Set(KNOWN_CONFIGS.map((k) => k.agent));
     expect(agents.has("claude")).toBe(true);
     expect(agents.has("codex")).toBe(true);
-    expect(agents.has("gemini")).toBe(true);
     expect(agents.has("opencode")).toBe(true);
     expect(agents.has("cursor")).toBe(true);
     expect(agents.has("codewith")).toBe(true);
     expect(agents.has("aicopilot")).toBe(true);
+    expect(agents.has("antigravity")).toBe(true);
     expect(agents.has("zsh")).toBe(true);
     expect(agents.has("git")).toBe(true);
     expect(agents.has("npm")).toBe(true);
+    expect([...agents].sort()).toEqual([
+      "aicopilot",
+      "antigravity",
+      "claude",
+      "codewith",
+      "codex",
+      "cursor",
+      "git",
+      "global",
+      "npm",
+      "opencode",
+      "zsh",
+    ]);
   });
 
-  test("CONFIG_AGENTS includes all coding agents", () => {
-    expect(CONFIG_AGENTS).toContain("opencode");
-    expect(CONFIG_AGENTS).toContain("cursor");
-    expect(CONFIG_AGENTS).toContain("codewith");
-    expect(CONFIG_AGENTS).toContain("aicopilot");
+  test("CONFIG_AGENTS includes exactly the active config owners", () => {
+    expect([...CONFIG_AGENTS].sort()).toEqual([
+      "aicopilot",
+      "antigravity",
+      "claude",
+      "codewith",
+      "codex",
+      "cursor",
+      "git",
+      "global",
+      "npm",
+      "opencode",
+      "zsh",
+    ]);
   });
 
   test("registers new coding agent rule and MCP targets", () => {
     const paths = new Set(KNOWN_CONFIGS.map((k) => k.rulesDir ?? k.path));
     expect(paths.has("~/.config/opencode/AGENTS.md")).toBe(true);
     expect(paths.has("~/.config/opencode/opencode.json")).toBe(true);
-    expect(paths.has("~/.config/aicopilot/AGENTS.md")).toBe(true);
-    expect(paths.has("~/.config/aicopilot/opencode.json")).toBe(true);
+    expect(paths.has("~/.config/aicopilot/AICOPILOT.md")).toBe(true);
+    expect(paths.has("~/.config/aicopilot/aicopilot.json")).toBe(true);
+    expect(paths.has("~/.gemini/GEMINI.md")).toBe(true);
+    expect(paths.has("~/.gemini/config/mcp_config.json")).toBe(true);
     expect(paths.has("~/.codewith/CODEWITH.md")).toBe(true);
     expect(paths.has("~/.codewith/config.toml")).toBe(true);
     expect(paths.has("~/.cursor/rules")).toBe(true);
@@ -129,7 +153,8 @@ describe("syncKnown", () => {
         { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
         { agent: "codewith", target_path: "~/.codewith/CODEWITH.md", transform: "codex-flat" },
         { agent: "opencode", target_path: "~/.config/opencode/AGENTS.md", transform: "opencode-flat" },
-        { agent: "aicopilot", target_path: "~/.config/aicopilot/AGENTS.md", transform: "opencode-flat" },
+        { agent: "aicopilot", target_path: "~/.config/aicopilot/AICOPILOT.md", transform: "codex-flat" },
+        { agent: "antigravity", target_path: "~/.gemini/GEMINI.md", transform: "codex-flat" },
         { agent: "cursor", target_path: "~/.cursor/rules/claude.mdc", transform: "cursor-mdc" },
       ]);
     } finally {
@@ -158,7 +183,7 @@ describe("syncKnown", () => {
     const config = getConfig("claude-claude-md", db);
 
     expect(result.updated).toBe(1);
-    expect(config.outputs.map((output) => output.agent)).toEqual(["codex", "codewith", "opencode", "aicopilot", "cursor"]);
+    expect(config.outputs.map((output) => output.agent)).toEqual(["codex", "codewith", "opencode", "aicopilot", "antigravity", "cursor"]);
   });
 });
 
@@ -182,6 +207,19 @@ describe("syncProject", () => {
     writeFileSync(join(projDir, ".mcp.json"), '{"mcpServers":{}}');
     const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
     expect(result.added).toBe(1);
+  });
+
+  test("syncs Antigravity workspace MCP config from a project dir", async () => {
+    const db = getDatabase();
+    const projDir = join(tmpDir, "antigravity-mcp-project");
+    mkdirSync(join(projDir, ".agents"), { recursive: true });
+    writeFileSync(join(projDir, ".agents", "mcp_config.json"), '{"mcpServers":{}}');
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
+    const configs = listConfigs(undefined, db);
+    expect(result.added).toBe(1);
+    expect(configs[0]!.agent).toBe("antigravity");
+    expect(configs[0]!.category).toBe("mcp");
+    expect(configs[0]!.target_path).toBe(join(projDir, ".agents", "mcp_config.json"));
   });
 
   test("syncs project rules/*.md", async () => {
@@ -229,12 +267,14 @@ describe("syncProject", () => {
 });
 
 describe("PROJECT_CONFIG_FILES", () => {
-  test("includes CLAUDE.md, .mcp.json, AGENTS.md, GEMINI.md", () => {
+  test("includes active project config files only", () => {
     const files = PROJECT_CONFIG_FILES.map((f) => f.file);
     expect(files).toContain("CLAUDE.md");
     expect(files).toContain(".mcp.json");
     expect(files).toContain("AGENTS.md");
-    expect(files).toContain("GEMINI.md");
+    expect(files).toContain(".codewith/CODEWITH.md");
+    expect(files).toContain("AICOPILOT.md");
+    expect(files).toContain(".agents/mcp_config.json");
   });
 });
 

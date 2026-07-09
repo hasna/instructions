@@ -6,16 +6,18 @@
 import { getDatabase } from "../src/db/database";
 import { getConfigStats } from "../src/db/configs";
 import { syncKnown } from "../src/lib/sync";
-import { createConfig, getConfig } from "../src/db/configs";
+import { LocalConfigStore } from "../src/data/config-store";
 import { ensurePlatformProfiles } from "../src/lib/platform-profiles";
 import { ensureProjectDashboardStandardConfig } from "../src/lib/project-dashboard-standard";
+import { ensureGlobalAgentRulesStandardConfig } from "../src/lib/global-agent-rules-standard";
 
 const db = getDatabase();
+const store = new LocalConfigStore(db);
 
 console.log("\n@hasna/configs — seeding initial configurations\n");
 
-// Sync all known configs (CLAUDE.md, rules/*.md, settings.json, codex, gemini, zshrc, gitconfig, npmrc, etc.)
-const result = await syncKnown({ db });
+// Sync all known configs (CLAUDE.md, rules/*.md, settings.json, codex, antigravity, zshrc, gitconfig, npmrc, etc.)
+const result = await syncKnown({ store });
 console.log(`Synced known configs: +${result.added} updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
 if (result.skipped.length > 0) {
   console.log("  skipped (not found):", result.skipped.join(", "));
@@ -74,18 +76,21 @@ Format: export KEY_NAME="value"
 console.log("\nReference docs:");
 for (const ref of refs) {
   try {
-    getConfig(ref.slug, db);
+    await store.getConfig(ref.slug);
     console.log(`  = ${ref.slug}`);
   } catch {
-    const c = createConfig({ name: ref.name, category: ref.category, agent: "global", format: "markdown", content: ref.content, kind: "reference", description: ref.description }, db);
+    const c = await store.createConfig({ name: ref.name, category: ref.category, agent: "global", format: "markdown", content: ref.content, kind: "reference", description: ref.description });
     console.log(`  + ${c.slug} (reference)`);
   }
 }
 
-const projectDashboardStandard = ensureProjectDashboardStandardConfig(db);
+const globalAgentRulesStandard = await ensureGlobalAgentRulesStandardConfig(store);
+console.log(`  = ${globalAgentRulesStandard.slug}`);
+
+const projectDashboardStandard = await ensureProjectDashboardStandardConfig(store);
 console.log(`  = ${projectDashboardStandard.slug}`);
 
-const machineProfiles = ensurePlatformProfiles(db);
+const machineProfiles = await ensurePlatformProfiles(store);
 console.log(`\nMachine-aware profiles: ${machineProfiles.map((profile) => profile.slug).join(", ")}`);
 
 const stats = getConfigStats(db);
