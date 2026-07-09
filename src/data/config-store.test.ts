@@ -98,7 +98,7 @@ describe("resolveConfigStore", () => {
       HASNA_INSTRUCTIONS_API_KEY: "k",
     });
     expect(store).toBeInstanceOf(CloudConfigStore);
-    expect(store.mode).toBe("cloud");
+    expect(store.mode).toBe("api");
   });
 });
 

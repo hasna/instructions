@@ -7,7 +7,7 @@ export interface Config {
   slug: string;
   kind: "file" | "reference";
   category: "agent" | "rules" | "mcp" | "shell" | "secrets_schema" | "workspace" | "git" | "tools";
-  agent: "claude" | "codex" | "gemini" | "opencode" | "cursor" | "codewith" | "aicopilot" | "zsh" | "git" | "npm" | "global";
+  agent: "claude" | "codex" | "antigravity" | "opencode" | "cursor" | "codewith" | "aicopilot" | "zsh" | "git" | "npm" | "global";
   target_path: string | null;
   outputs: ConfigOutput[];
   format: "text" | "json" | "toml" | "yaml" | "markdown" | "ini";

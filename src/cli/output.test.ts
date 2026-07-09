@@ -16,7 +16,7 @@ function runCli(args: string[], dbPath: string) {
     encoding: "utf8",
     env: {
       ...process.env,
-      CONFIGS_DB_PATH: dbPath,
+      HASNA_INSTRUCTIONS_DB_PATH: dbPath,
       NO_COLOR: "1",
       FORCE_COLOR: "0",
     },
@@ -27,7 +27,7 @@ function seedConfigs(count: number): { home: string; dbPath: string } {
   const home = mkdtempSync(join(tmpdir(), "open-configs-output-cli-"));
   tempDirs.push(home);
   const dbPath = join(home, "configs.db");
-  process.env["CONFIGS_DB_PATH"] = dbPath;
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
   resetDatabase();
   const db = getDatabase();
   for (let i = 1; i <= count; i++) {
@@ -45,13 +45,13 @@ function seedConfigs(count: number): { home: string; dbPath: string } {
     }, db);
   }
   resetDatabase();
-  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   return { home, dbPath };
 }
 
 afterEach(() => {
   resetDatabase();
-  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 

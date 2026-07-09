@@ -1,3 +1,4 @@
+import { LocalConfigStore } from "../data/config-store";
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { createConfig, getConfig } from "../db/configs";
@@ -15,13 +16,13 @@ let db: Database;
 
 beforeEach(() => {
   resetDatabase();
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   db = getDatabase();
 });
 
 describe("project dashboard standard", () => {
-  test("seeds the agent-managed project dashboard reference", () => {
-    const config = ensureProjectDashboardStandardConfig(db);
+  test("seeds the agent-managed project dashboard reference", async () => {
+    const config = await ensureProjectDashboardStandardConfig(new LocalConfigStore(db));
 
     expect(config.slug).toBe(PROJECT_DASHBOARD_STANDARD_SLUG);
     expect(config.kind).toBe("reference");
@@ -34,7 +35,7 @@ describe("project dashboard standard", () => {
     expect(config.content).not.toContain(`sk-${"proj"}-`);
   });
 
-  test("updates stale seeded content instead of creating a duplicate", () => {
+  test("updates stale seeded content instead of creating a duplicate", async () => {
     createConfig({
       name: "Agent Managed Project Dashboard Standard",
       category: "workspace",
@@ -44,7 +45,7 @@ describe("project dashboard standard", () => {
       content: "old content",
     }, db);
 
-    const config = ensureProjectDashboardStandardConfig(db);
+    const config = await ensureProjectDashboardStandardConfig(new LocalConfigStore(db));
     const stored = getConfig(PROJECT_DASHBOARD_STANDARD_SLUG, db);
 
     expect(config.id).toBe(stored.id);
@@ -52,9 +53,9 @@ describe("project dashboard standard", () => {
     expect(stored.version).toBe(2);
   });
 
-  test("platform profiles include dashboard variables and link the standard config", () => {
-    const standard = ensureProjectDashboardStandardConfig(db);
-    const profiles = ensurePlatformProfiles(db);
+  test("platform profiles include dashboard variables and link the standard config", async () => {
+    const standard = await ensureProjectDashboardStandardConfig(new LocalConfigStore(db));
+    const profiles = await ensurePlatformProfiles(new LocalConfigStore(db));
 
     for (const preset of PLATFORM_PROFILE_PRESETS) {
       expect(preset.variables).toMatchObject(PROJECT_DASHBOARD_PROFILE_VARIABLES);

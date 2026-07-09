@@ -2,13 +2,9 @@
 import { registerEventsCommands } from "@hasna/events/commander";
 import { program } from "commander";
 import chalk from "chalk";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { createConfig, deleteConfig, getConfig, getConfigStats, listConfigs, updateConfig } from "../db/configs.js";
-import { createProfile, deleteProfile, getProfile, getProfileConfigs, listProfiles, updateProfile, addConfigToProfile, removeConfigFromProfile, resolveProfileForMachine } from "../db/profiles.js";
-import { listSnapshots, getSnapshot } from "../db/snapshots.js";
-import { getDatabase, resetDatabase } from "../db/database.js";
 import { applyConfig, applyConfigs, expandPath } from "../lib/apply.js";
 import { diffConfig, syncKnown, syncToDisk, syncProject, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS } from "../lib/sync.js";
 import { syncFromDir } from "../lib/sync-dir.js";
@@ -18,19 +14,54 @@ import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { applySessionRender } from "../lib/session-apply.js";
-import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
+import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
+import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
 import { getConfigsStatus } from "../status.js";
-import { resolveConfigStore, isCloudMode } from "../data/config-store.js";
-import { registerStorageCommands } from "./storage.js";
+import { resolveConfigStore, isCloudMode, type ConfigStore } from "../data/config-store.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
-import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
+import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
 
 import { createRequire } from "node:module";
 const pkg = createRequire(import.meta.url)("../../package.json") as { version: string };
 
-function fmtConfig(c: ReturnType<typeof getConfig>, format: string) {
+// Blocking, complete write to stdout (fd 1). Fixes the pipe-truncation bug:
+// console.log/process.stdout.write to a pipe is asynchronous in Bun/Node, so a
+// large payload (e.g. `instructions list --json | jq`) that exceeds the 64KB
+// pipe buffer is silently dropped when the process exits before the buffer
+// drains. writeSync loops until every byte is delivered, retrying on EAGAIN
+// (pipe full) and giving up cleanly on EPIPE (consumer closed).
+const EAGAIN_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+function writeStdout(text: string): void {
+  const buf = Buffer.from(text, "utf8");
+  let offset = 0;
+  while (offset < buf.length) {
+    try {
+      offset += writeSync(1, buf, offset);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EAGAIN") {
+        Atomics.wait(EAGAIN_SLEEP, 0, 0, 1); // wait ~1ms for the consumer to drain
+        continue;
+      }
+      if (code === "EPIPE") return; // downstream closed the pipe; stop writing
+      throw e;
+    }
+  }
+}
+
+/** Print a line to stdout with a guaranteed-complete blocking write. */
+function printLine(text = ""): void {
+  writeStdout(`${text}\n`);
+}
+
+/** Pretty-print a JSON value to stdout with a guaranteed-complete write. */
+function printJson(value: unknown): void {
+  printLine(JSON.stringify(value, null, 2));
+}
+
+function fmtConfig(c: Config, format: string) {
   if (format === "json") return JSON.stringify(c, null, 2);
   if (format === "compact") return `${c.slug} [${c.category}/${c.agent}] ${c.kind === "reference" ? "(ref)" : truncateMiddle(c.target_path ?? "(no path)", 72)}`;
   // table
@@ -53,7 +84,7 @@ function pageFooter(command: string, page: { items: unknown[]; total: number; li
   console.log(chalk.dim(detailsHint));
 }
 
-function printConfigRows(configs: ReturnType<typeof listConfigs>): void {
+function printConfigRows(configs: Config[]): void {
   console.log(`${pad("slug", 32)} ${pad("type", 15)} ${pad("fmt", 8)} ${pad("path", 44)} out v`);
   for (const c of configs) {
     const type = `${c.category}/${c.agent}`;
@@ -72,11 +103,13 @@ function collectOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
-const SESSION_SOURCE_LAYERS = new Set<SessionInstructionLayer>(["global", "tool", "account", "agent", "project", "local"]);
+const SESSION_SOURCE_LAYERS = new Set<SessionInstructionLayer>(SESSION_INSTRUCTION_LAYERS);
+const SESSION_SOURCE_LAYER_HELP = "global|provider|tool|account|machine|division|workspace|project|repo|path|identity|agent|session|local";
 
 function parseSessionLayer(value: string): SessionInstructionLayer {
   if (value === "provider") return "tool";
   if (value === "identity") return "agent";
+  if (value === "project") return "repo";
   if (SESSION_SOURCE_LAYERS.has(value as SessionInstructionLayer)) return value as SessionInstructionLayer;
   throw new Error(`Invalid source layer "${value}"`);
 }
@@ -111,7 +144,7 @@ function parseLayeredReference(value: string): { layer?: SessionInstructionLayer
   const idx = trimmed.indexOf(":");
   if (idx > 0) {
     const candidate = trimmed.slice(0, idx);
-    if (candidate === "provider" || candidate === "identity" || SESSION_SOURCE_LAYERS.has(candidate as SessionInstructionLayer)) {
+    if (candidate === "provider" || candidate === "identity" || candidate === "project" || SESSION_SOURCE_LAYERS.has(candidate as SessionInstructionLayer)) {
       const id = trimmed.slice(idx + 1).trim();
       if (!id) throw new Error(`Invalid layered reference "${value}"`);
       return { layer: parseSessionLayer(candidate), id };
@@ -121,7 +154,7 @@ function parseLayeredReference(value: string): { layer?: SessionInstructionLayer
   return { id: trimmed };
 }
 
-function collectSessionSources(
+async function collectSessionSources(
   opts: {
     source?: string[];
     config?: string[];
@@ -129,13 +162,14 @@ function collectSessionSources(
     replaceSource?: string[];
   },
   tool: SessionRenderTool,
-): SessionInstructionSource[] {
+  store: ConfigStore,
+): Promise<SessionInstructionSource[]> {
   const replaceIds = new Set<string>(opts.replaceSource ?? []);
   const sources = (opts.source ?? []).map((value, index) => parseSessionSource(value, index, replaceIds));
 
   for (const value of opts.config ?? []) {
     const { layer, id } = parseLayeredReference(value);
-    sources.push(sourceFromConfig(getConfig(id), sources.length, layer));
+    sources.push(sourceFromConfig(await store.getConfig(id), sources.length, layer));
   }
 
   for (const value of opts.identityExport ?? []) {
@@ -198,9 +232,12 @@ function formatProfileVariables(profile: Pick<Profile, "variables">): string {
     .join(", ");
 }
 
-function getMachineProfileContext(opts: { hostname?: string; os?: string; arch?: string }) {
+async function getMachineProfileContext(
+  opts: { hostname?: string; os?: string; arch?: string },
+  store: ConfigStore,
+) {
   const machine = detectMachineContext({ hostname: opts.hostname, os: opts.os, arch: opts.arch });
-  const profile = resolveProfileForMachine(machine);
+  const profile = await store.resolveProfileForMachine(machine);
   return { machine, profile, vars: resolveProfileVariables(profile, machine) };
 }
 
@@ -229,12 +266,12 @@ program
       tags: opts.tag ? [opts.tag] : undefined,
       search: opts.search,
     });
-    if (configs.length === 0) {
-      console.log(chalk.dim("No configs found."));
+    if (fmt === "json") {
+      printJson(configs);
       return;
     }
-    if (fmt === "json") {
-      console.log(JSON.stringify(configs, null, 2));
+    if (configs.length === 0) {
+      console.log(chalk.dim("No configs found."));
       return;
     }
     const page = paginate(configs, { limit: opts.limit, cursor: opts.cursor });
@@ -258,13 +295,13 @@ program
   .action(async (id, opts) => {
     try {
       const c = await resolveConfigStore().getConfig(id);
-      if (opts.format === "json") { console.log(JSON.stringify(c, null, 2)); return; }
-      if (opts.format === "content") { console.log(c.content); return; }
+      if (opts.format === "json") { printJson(c); return; }
+      if (opts.format === "content") { printLine(c.content); return; }
       console.log(fmtConfig(c, "table"));
       console.log();
       console.log(chalk.bold("Content:"));
       console.log(chalk.dim("─".repeat(60)));
-      console.log(c.content);
+      printLine(c.content);
     } catch (e) {
       console.error(chalk.red(e instanceof Error ? e.message : String(e)));
       process.exit(1);
@@ -320,7 +357,7 @@ program
       const store = resolveConfigStore();
       const config = await store.getConfig(id);
       await store.deleteConfig(config.id);
-      if (opts.json) { console.log(JSON.stringify({ deleted: true, id: config.id, slug: config.slug }, null, 2)); return; }
+      if (opts.json) { printJson({ deleted: true, id: config.id, slug: config.slug }); return; }
       console.log(chalk.green("✓") + ` Deleted: ${chalk.bold(config.name)} ${chalk.dim(`(${config.slug})`)}`);
     } catch (e) {
       console.error(chalk.red(e instanceof Error ? e.message : String(e)));
@@ -336,8 +373,9 @@ program
   .option("--force", "overwrite even if unchanged")
   .action(async (id, opts) => {
     try {
-      const config = getConfig(id);
-      const result = await applyConfig(config, { dryRun: opts.dryRun });
+      const store = resolveConfigStore();
+      const config = await store.getConfig(id);
+      const result = await applyConfig(config, { dryRun: opts.dryRun, store });
       const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.changed ? chalk.green("✓") : chalk.dim("="));
       const change = result.changed ? "changed" : "unchanged";
       console.log(`${status} ${result.path} ${chalk.dim(`(${change})`)}`);
@@ -359,17 +397,18 @@ program
   .option("--all", "diff every known config against disk")
   .action(async (id, opts) => {
     try {
+      const store = resolveConfigStore();
       if (id) {
-        const config = getConfig(id);
-        console.log(diffConfig(config));
+        const config = await store.getConfig(id);
+        console.log(await diffConfig(config, { store }));
         return;
       }
       // --all or no id: diff all known file-type configs
-      const configs = listConfigs({ kind: "file" });
+      const configs = await store.listConfigs({ kind: "file" });
       let drifted = 0;
       for (const c of configs) {
         if (!c.target_path) continue;
-        const diff = diffConfig(c);
+        const diff = await diffConfig(c, { store });
         if (diff.includes("no diff") || diff.includes("not found")) continue;
         drifted++;
         console.log(chalk.bold(c.slug) + chalk.dim(` (${c.target_path})`));
@@ -386,8 +425,8 @@ program
 // ── sync ─────────────────────────────────────────────────────────────────────
 program
   .command("sync")
-  .description("Sync known AI coding configs from disk into DB (claude, codex, opencode, cursor, codewith, aicopilot, gemini, zsh, git, npm)")
-  .option("-a, --agent <agent>", "only sync configs for this agent (claude|codex|opencode|cursor|codewith|aicopilot|gemini|zsh|git|npm)")
+  .description("Sync known AI coding configs from disk into DB (claude, codex, opencode, cursor, codewith, aicopilot, antigravity, zsh, git, npm)")
+  .option("-a, --agent <agent>", "only sync configs for this agent (claude|codex|opencode|cursor|codewith|aicopilot|antigravity|zsh|git|npm)")
   .option("-c, --category <cat>", "only sync configs in this category")
   .option("-p, --project [dir]", "sync project-scoped configs (CLAUDE.md, .mcp.json, etc.) from a project dir")
   .option("--all", "with --project: scan all subdirs for projects to sync")
@@ -397,6 +436,7 @@ program
   .option("--limit <n>", `with --list, max rows (default ${DEFAULT_LIST_LIMIT})`)
   .option("--cursor <n>", "with --list, zero-based pagination cursor")
   .action(async (opts) => {
+    const store = resolveConfigStore();
     if (opts.list) {
       const targets = KNOWN_CONFIGS.filter((k) => {
         if (opts.agent && k.agent !== opts.agent) return false;
@@ -415,19 +455,30 @@ program
     if (opts.project) {
       const dir = typeof opts.project === "string" ? opts.project : process.cwd();
 
-      // --project --all: find all project dirs with CLAUDE.md and sync each
+      // --project --all: find all project dirs with active agent config markers and sync each
       if (opts.all) {
-        const { readdirSync, statSync: st } = await import("node:fs");
+        const { readdirSync } = await import("node:fs");
         const absDir = expandPath(dir);
         const entries = readdirSync(absDir, { withFileTypes: true });
         let totalAdded = 0, totalUpdated = 0, totalUnchanged = 0, projects = 0;
         for (const entry of entries) {
           if (!entry.isDirectory()) continue;
           const projDir = join(absDir, entry.name);
-          // Only sync dirs that have CLAUDE.md, .mcp.json, or .claude/
-          const hasClaude = existsSync(join(projDir, "CLAUDE.md")) || existsSync(join(projDir, ".mcp.json")) || existsSync(join(projDir, ".claude"));
-          if (!hasClaude) continue;
-          const result = await syncProject({ projectDir: projDir, dryRun: opts.dryRun });
+          const hasAgentConfig = [
+            "CLAUDE.md",
+            ".mcp.json",
+            ".claude",
+            "AGENTS.md",
+            ".codex",
+            ".opencode",
+            ".codewith",
+            "AICOPILOT.md",
+            ".aicopilot",
+            ".cursor",
+            ".agents",
+          ].some((marker) => existsSync(join(projDir, marker)));
+          if (!hasAgentConfig) continue;
+          const result = await syncProject({ projectDir: projDir, dryRun: opts.dryRun, store });
           if (result.added + result.updated > 0) {
             console.log(`  ${chalk.green("✓")} ${entry.name}: +${result.added} updated:${result.updated}`);
           }
@@ -437,15 +488,15 @@ program
         return;
       }
 
-      const result = await syncProject({ projectDir: dir, dryRun: opts.dryRun });
+      const result = await syncProject({ projectDir: dir, dryRun: opts.dryRun, store });
       console.log(chalk.green("✓") + ` Project sync: +${result.added} updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
       return;
     }
     if (opts.toDisk) {
-      const result = await syncToDisk({ dryRun: opts.dryRun, agent: opts.agent, category: opts.category });
+      const result = await syncToDisk({ dryRun: opts.dryRun, agent: opts.agent, category: opts.category, store });
       console.log(chalk.green("✓") + ` Written to disk: updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
     } else {
-      const result = await syncKnown({ dryRun: opts.dryRun, agent: opts.agent, category: opts.category });
+      const result = await syncKnown({ dryRun: opts.dryRun, agent: opts.agent, category: opts.category, store });
       console.log(chalk.green("✓") + ` Synced: +${result.added} updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
       if (result.skipped.length > 0) {
         console.log(chalk.dim("  skipped (not found): " + result.skipped.join(", ")));
@@ -462,6 +513,7 @@ program
   .action(async (opts) => {
     const result = await exportConfigs(opts.output, {
       filter: opts.category ? { category: opts.category as ConfigCategory } : undefined,
+      store: resolveConfigStore(),
     });
     console.log(chalk.green("✓") + ` Exported ${result.count} configs to ${result.path}`);
   });
@@ -474,6 +526,7 @@ program
   .action(async (file, opts) => {
     const result = await importConfigs(file, {
       conflict: opts.overwrite ? "overwrite" : "skip",
+      store: resolveConfigStore(),
     });
     console.log(chalk.green("✓") + ` Import complete: +${result.created} updated:${result.updated} skipped:${result.skipped}`);
     if (result.errors.length > 0) {
@@ -490,9 +543,9 @@ program
     const store = resolveConfigStore();
     const dbPath = isCloudMode()
       ? `${process.env["HASNA_INSTRUCTIONS_API_URL"]}/v1 (self_hosted)`
-      : process.env["CONFIGS_DB_PATH"] || join(homedir(), ".hasna", "configs", "configs.db");
+      : process.env["HASNA_INSTRUCTIONS_DB_PATH"] || join(homedir(), ".hasna", "instructions", "instructions.db");
     const stats = await store.getConfigStats();
-    console.log(chalk.bold("@hasna/configs") + chalk.dim(" v" + pkg.version));
+    console.log(chalk.bold("@hasna/instructions") + chalk.dim(" v" + pkg.version));
     console.log(chalk.cyan(isCloudMode() ? "API:" : "DB:") + " " + dbPath);
     console.log(chalk.cyan("Total configs:") + " " + (stats["total"] || 0));
     console.log();
@@ -524,8 +577,8 @@ profileCmd.command("list").description("List all profiles")
   const fmt = opts.json ? "json" : opts.verbose ? "table" : opts.brief ? "compact" : opts.format;
   const store = resolveConfigStore();
   const profiles = await store.listProfiles();
+  if (fmt === "json") { printJson(profiles); return; }
   if (profiles.length === 0) { console.log(chalk.dim("No profiles.")); return; }
-  if (fmt === "json") { console.log(JSON.stringify(profiles, null, 2)); return; }
   const page = paginate(profiles, { limit: opts.limit, cursor: opts.cursor });
   if (fmt === "compact") console.log(`${pad("slug", 28)} ${pad("configs", 8)} ${pad("match", 36)} vars`);
   for (const p of page.items) {
@@ -586,16 +639,18 @@ profileCmd.command("show <id>").description("Show profile and its configs")
 
 profileCmd.command("add <profile> <config>").description("Add a config to a profile").action(async (profile, config) => {
   try {
-    const c = getConfig(config);
-    addConfigToProfile(profile, c.id);
+    const store = resolveConfigStore();
+    const c = await store.getConfig(config);
+    await store.addConfigToProfile(profile, c.id);
     console.log(chalk.green("✓") + ` Added ${c.slug} to profile ${profile}`);
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });
 
 profileCmd.command("remove <profile> <config>").description("Remove a config from a profile").action(async (profile, config) => {
   try {
-    const c = getConfig(config);
-    removeConfigFromProfile(profile, c.id);
+    const store = resolveConfigStore();
+    const c = await store.getConfig(config);
+    await store.removeConfigFromProfile(profile, c.id);
     console.log(chalk.green("✓") + ` Removed ${c.slug} from profile ${profile}`);
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });
@@ -608,15 +663,16 @@ profileCmd.command("apply [id]").description("Apply all configs in a profile to 
   .option("--arch <arch>", "override detected arch for auto resolution")
   .action(async (id, opts) => {
     try {
-      const { machine, profile } = getMachineProfileContext(opts);
-      const selected = opts.auto ? profile : (id ? getProfile(id) : null);
+      const store = resolveConfigStore();
+      const { machine, profile } = await getMachineProfileContext(opts, store);
+      const selected = opts.auto ? profile : (id ? await store.getProfile(id) : null);
       if (!selected) {
         console.error(chalk.red(opts.auto ? "No matching machine-aware profile found." : "Provide a profile id or use --auto."));
         process.exit(1);
       }
-      const configs = getProfileConfigs(selected.id);
+      const configs = await store.getProfileConfigs(selected.id);
       const vars = resolveProfileVariables(selected, machine);
-      const results = await applyConfigs(configs, { dryRun: opts.dryRun, vars });
+      const results = await applyConfigs(configs, { dryRun: opts.dryRun, vars, store });
       let changed = 0;
       for (const r of results) {
         const status = opts.dryRun ? chalk.yellow("[dry-run]") : (r.changed ? chalk.green("✓") : chalk.dim("="));
@@ -632,7 +688,8 @@ profileCmd.command("resolve").description("Resolve the matching machine-aware pr
   .option("--os <os>", "override detected OS")
   .option("--arch <arch>", "override detected arch")
   .action(async (opts) => {
-    const { machine, profile, vars } = getMachineProfileContext(opts);
+    const store = resolveConfigStore();
+    const { machine, profile, vars } = await getMachineProfileContext(opts, store);
     if (!profile) {
       console.log(chalk.yellow(`No matching profile for ${machine.hostname} ${machine.os_family}/${machine.arch}`));
       process.exit(1);
@@ -666,7 +723,7 @@ sessionCmd.command("plan")
   .option("--target-home <path>", "override generated profile-scoped target home")
   .option("--project-root <path>", "repository root for project-scoped adapters such as Cursor")
   .option("--session-id <id>", "session id to include in the manifest")
-  .option("--source <layer:id=path>", "instruction source file; layers: global|provider|tool|account|identity|agent|project|local", collectOption, [])
+  .option("--source <layer:id=path>", `instruction source file; layers: ${SESSION_SOURCE_LAYER_HELP}`, collectOption, [])
   .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
   .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
@@ -679,7 +736,7 @@ sessionCmd.command("plan")
         console.error(chalk.red(`Unsupported tool: ${opts.tool}`));
         process.exit(1);
       }
-      const sources = collectSessionSources(opts, tool);
+      const sources = await collectSessionSources(opts, tool, resolveConfigStore());
       const plan = planSessionRender({
         tool,
         profile: opts.profile,
@@ -690,7 +747,7 @@ sessionCmd.command("plan")
         sources,
       });
       if (opts.json) {
-        console.log(JSON.stringify(planJsonForOutput(plan), null, 2));
+        printJson(planJsonForOutput(plan));
         return;
       }
       console.log(chalk.bold(`${plan.tool} session render plan`) + chalk.dim(` (${plan.adapter.mode})`));
@@ -722,7 +779,7 @@ sessionCmd.command("apply")
   .option("--target-home <path>", "override generated profile-scoped target home")
   .option("--project-root <path>", "repository root for project-scoped adapters such as Cursor")
   .option("--session-id <id>", "session id to include in the manifest")
-  .option("--source <layer:id=path>", "instruction source file; layers: global|provider|tool|account|identity|agent|project|local", collectOption, [])
+  .option("--source <layer:id=path>", `instruction source file; layers: ${SESSION_SOURCE_LAYER_HELP}`, collectOption, [])
   .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
   .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
@@ -737,7 +794,7 @@ sessionCmd.command("apply")
         console.error(chalk.red(`Unsupported tool: ${opts.tool}`));
         process.exit(1);
       }
-      const sources = collectSessionSources(opts, tool);
+      const sources = await collectSessionSources(opts, tool, resolveConfigStore());
       const plan = planSessionRender({
         tool,
         profile: opts.profile,
@@ -749,7 +806,7 @@ sessionCmd.command("apply")
       });
       const result = applySessionRender(plan, { dryRun: opts.dryRun, force: opts.force });
       if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
+        printJson(result);
         if (result.conflicts.length > 0) process.exitCode = 1;
         return;
       }
@@ -787,8 +844,9 @@ snapshotCmd.command("list <config>").description("List snapshots for a config")
   .option("--cursor <n>", "zero-based pagination cursor")
   .action(async (configId, opts) => {
   try {
-    const c = getConfig(configId);
-    const snaps = listSnapshots(c.id);
+    const store = resolveConfigStore();
+    const c = await store.getConfig(configId);
+    const snaps = await store.listSnapshots(c.id);
     if (snaps.length === 0) { console.log(chalk.dim("No snapshots.")); return; }
     const page = paginate(snaps, { limit: opts.limit, cursor: opts.cursor });
     for (const s of page.items) {
@@ -799,16 +857,17 @@ snapshotCmd.command("list <config>").description("List snapshots for a config")
 });
 
 snapshotCmd.command("show <id>").description("Show a snapshot's content").action(async (id) => {
-  const snap = getSnapshot(id);
+  const snap = await resolveConfigStore().getSnapshot(id);
   if (!snap) { console.error(chalk.red("Snapshot not found: " + id)); process.exit(1); }
-  console.log(snap.content);
+  printLine(snap.content);
 });
 
 snapshotCmd.command("restore <config> <snapshot-id>").description("Restore a config to a snapshot version").action(async (configId, snapId) => {
   try {
-    const snap = getSnapshot(snapId);
+    const store = resolveConfigStore();
+    const snap = await store.getSnapshot(snapId);
     if (!snap) { console.error(chalk.red("Snapshot not found: " + snapId)); process.exit(1); }
-    updateConfig(configId, { content: snap.content });
+    await store.updateConfig(configId, { content: snap.content });
     console.log(chalk.green("✓") + ` Restored ${configId} to snapshot v${snap.version}`);
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });
@@ -818,7 +877,7 @@ const templateCmd = program.command("template").description("Work with template 
 
 templateCmd.command("vars <id>").description("Show template variables").action(async (id) => {
   try {
-    const c = getConfig(id);
+    const c = await resolveConfigStore().getConfig(id);
     const vars = extractTemplateVars(c.content);
     if (vars.length === 0) { console.log(chalk.dim("No template variables found.")); return; }
     for (const v of vars) {
@@ -836,7 +895,7 @@ templateCmd.command("render <id>")
   .action(async (id, opts) => {
     try {
       const { renderTemplate } = await import("../lib/template.js");
-      const c = getConfig(id);
+      const c = await resolveConfigStore().getConfig(id);
       const vars: Record<string, string> = {};
 
       // Collect vars from --var KEY=VALUE
@@ -890,12 +949,13 @@ program
   .option("-c, --category <cat>", "scan only a specific category")
   .option("--limit <n>", `max findings to print (default ${DEFAULT_LIST_LIMIT})`)
   .action(async (id, opts) => {
+    const store = resolveConfigStore();
     let configs;
     if (id) {
-      configs = [getConfig(id)];
+      configs = [await store.getConfig(id)];
     } else if (opts.all) {
       // Scan full DB in batches to avoid OOM
-      configs = listConfigs(opts.category ? { kind: "file", category: opts.category as ConfigCategory } : { kind: "file" });
+      configs = await store.listConfigs(opts.category ? { kind: "file", category: opts.category as ConfigCategory } : { kind: "file" });
     } else {
       // Default: fetch only the ~30 known configs individually by slug (fast, no full table scan)
       const { KNOWN_CONFIGS } = await import("../lib/sync.js");
@@ -905,10 +965,10 @@ program
       ];
       const fetched = [];
       for (const slug of slugs) {
-        try { fetched.push(getConfig(slug)); } catch { /* not in DB yet */ }
+        try { fetched.push(await store.getConfig(slug)); } catch { /* not in DB yet */ }
       }
       // Also grab rules by category+agent (small set)
-      const rules = listConfigs({ category: "rules", agent: "claude" });
+      const rules = await store.listConfigs({ category: "rules", agent: "claude" });
       for (const r of rules) if (!fetched.find((c) => c.id === r.id)) fetched.push(r);
       configs = fetched;
     }
@@ -935,7 +995,7 @@ program
         }
         if (opts.fix) {
           const { content, isTemplate } = redactContent(c.content, fmt);
-          updateConfig(c.id, { content, is_template: isTemplate });
+          await store.updateConfig(c.id, { content, is_template: isTemplate });
           if (visible.length > 0) console.log(chalk.green("  ✓ Redacted."));
         }
       }
@@ -967,7 +1027,7 @@ program
     const omitted = Math.max(0, result.findings.length - visible.length);
 
     if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
+      printJson(result);
     } else if (result.findings.length === 0) {
       console.log(chalk.green("✓") + ` Package-manager scan clean (${result.scannedFiles} file(s)).`);
     } else {
@@ -994,26 +1054,26 @@ mcpCmd.command("install")
   .description("Install configs MCP server into an agent")
   .option("--claude", "install into Claude Code")
   .option("--codex", "install into Codex")
-  .option("--gemini", "install into Gemini")
+  .option("--antigravity", "install into Google Antigravity")
   .option("--all", "install into all agents")
-  .option("--profile <level>", "set CONFIGS_PROFILE (minimal|standard|full)", "standard")
+  .option("--profile <level>", "set INSTRUCTIONS_PROFILE (minimal|standard|full)", "standard")
   .action(async (opts) => {
-    const targets = opts.all ? ["claude", "codex", "gemini"] : [
+    const targets = opts.all ? ["claude", "codex", "antigravity"] : [
       ...(opts.claude ? ["claude"] : []),
       ...(opts.codex ? ["codex"] : []),
-      ...(opts.gemini ? ["gemini"] : []),
+      ...(opts.antigravity ? ["antigravity"] : []),
     ];
     if (targets.length === 0) {
-      console.log(chalk.dim("Specify --claude, --codex, --gemini, or --all"));
+      console.log(chalk.dim("Specify --claude, --codex, --antigravity, or --all"));
       return;
     }
     for (const target of targets) {
       try {
-        const { vars } = getMachineProfileContext({});
+        const { vars } = await getMachineProfileContext({}, resolveConfigStore());
         const mcpBinary = `${vars["BUN_BIN_DIR"]}/configs-mcp`;
         if (target === "claude") {
           const cmd = opts.profile && opts.profile !== "full"
-            ? ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", "env", `CONFIGS_PROFILE=${opts.profile}`, mcpBinary]
+            ? ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", "env", `INSTRUCTIONS_PROFILE=${opts.profile}`, mcpBinary]
             : ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", "configs", "--", mcpBinary];
           const proc = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit" });
           await proc.exited;
@@ -1032,19 +1092,24 @@ mcpCmd.command("install")
           }
           appendFileSync(configPath, block);
           console.log(chalk.green("✓") + " Installed into Codex");
-        } else if (target === "gemini") {
-          const { readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
-          const { join: j } = await import("node:path");
-          const configPath = j(homedir(), ".gemini", "settings.json");
+        } else if (target === "antigravity") {
+          const { mkdirSync: md, readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
+          const { dirname: dn, join: j } = await import("node:path");
+          const configPath = j(homedir(), ".gemini", "config", "mcp_config.json");
           let settings: Record<string, unknown> = {};
           if (ex(configPath)) {
             try { settings = JSON.parse(rf(configPath, "utf-8")); } catch { /* empty */ }
           }
           const mcpServers = (settings["mcpServers"] ?? {}) as Record<string, unknown>;
-          mcpServers["configs"] = { command: mcpBinary, args: [] };
+          mcpServers["configs"] = {
+            command: mcpBinary,
+            args: [],
+            ...(opts.profile && opts.profile !== "full" ? { env: { INSTRUCTIONS_PROFILE: opts.profile } } : {}),
+          };
           settings["mcpServers"] = mcpServers;
+          md(dn(configPath), { recursive: true });
           wf(configPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
-          console.log(chalk.green("✓") + " Installed into Gemini");
+          console.log(chalk.green("✓") + " Installed into Antigravity");
         }
       } catch (e) {
         console.error(chalk.red(`✗ Failed to install into ${target}: ${e instanceof Error ? e.message : String(e)}`));
@@ -1071,17 +1136,17 @@ program
   .description("First-time setup: sync all known configs, create default profile")
   .option("--force", "delete existing DB and start fresh")
   .action(async (opts) => {
-    const dbPath = join(homedir(), ".hasna", "configs", "configs.db");
-    if (opts.force && existsSync(dbPath)) {
-      const { rmSync } = await import("node:fs");
-      rmSync(dbPath);
-      console.log(chalk.dim("Deleted existing DB."));
-      resetDatabase();
+    const store = resolveConfigStore();
+    if (opts.force) {
+      // Routes through the Store: LocalConfigStore wipes the on-disk SQLite db;
+      // CloudConfigStore refuses (you can't force-wipe the shared cloud store).
+      await store.reset();
+      console.log(chalk.dim("Reset local store."));
     }
-    console.log(chalk.bold("@hasna/configs — initializing\n"));
+    console.log(chalk.bold("@hasna/instructions — initializing\n"));
 
     // Sync known configs
-    const result = await syncKnown({});
+    const result = await syncKnown({ store });
     console.log(chalk.green("✓") + ` Synced: +${result.added} updated:${result.updated} unchanged:${result.unchanged}`);
     if (result.skipped.length > 0) {
       console.log(chalk.dim("  skipped: " + result.skipped.join(", ")));
@@ -1093,30 +1158,34 @@ program
       { slug: "secrets-schema", name: "Secrets Schema", category: "secrets_schema" as const, content: "# .secrets Schema\n\nLocation: ~/.secrets (sourced by ~/.zshrc)\nFormat: export KEY_NAME=\"value\"\n\nKeys: ANTHROPIC_API_KEY, OPENAI_API_KEY, EXA_API_KEY, NPM_TOKEN, GITHUB_TOKEN", desc: "Shape of ~/.secrets (no values)" },
     ];
     for (const ref of refs) {
-      try { getConfig(ref.slug); } catch {
-        createConfig({ name: ref.name, category: ref.category, agent: "global", format: "markdown", content: ref.content, kind: "reference", description: ref.desc });
+      try { await store.getConfig(ref.slug); } catch {
+        await store.createConfig({ name: ref.name, category: ref.category, agent: "global", format: "markdown", content: ref.content, kind: "reference", description: ref.desc });
       }
     }
-    ensureProjectDashboardStandardConfig();
+    await ensureGlobalAgentRulesStandardConfig(store);
+    await ensureProjectDashboardStandardConfig(store);
 
     // Create default profile
-    try { getProfile("my-setup"); } catch {
-      const p = createProfile({ name: "my-setup", description: "Default profile with all known configs" });
-      const allConfigs = listConfigs();
-      for (const c of allConfigs) addConfigToProfile(p.id, c.id);
+    try { await store.getProfile("my-setup"); } catch {
+      const p = await store.createProfile({ name: "my-setup", description: "Default profile with all known configs" });
+      const allConfigs = await store.listConfigs();
+      for (const c of allConfigs) await store.addConfigToProfile(p.id, c.id);
       console.log(chalk.green("✓") + ` Created profile "my-setup" with ${allConfigs.length} configs`);
     }
 
-    const machineProfiles = ensurePlatformProfiles();
+    const machineProfiles = await ensurePlatformProfiles(store);
     console.log(chalk.green("✓") + ` Ensured ${machineProfiles.length} machine-aware profile(s)`);
 
     // Show summary
-    const stats = getConfigStats();
+    const stats = await store.getConfigStats();
     console.log(chalk.bold("\nDB stats:"));
     for (const [key, count] of Object.entries(stats)) {
       if (count > 0) console.log(`  ${key.padEnd(18)} ${count}`);
     }
-    console.log(chalk.dim(`\nDB: ${dbPath}`));
+    const location = isCloudMode()
+      ? `${process.env["HASNA_INSTRUCTIONS_API_URL"]}/v1 (self_hosted)`
+      : process.env["HASNA_INSTRUCTIONS_DB_PATH"] || join(homedir(), ".hasna", "instructions", "instructions.db");
+    console.log(chalk.dim(`\n${isCloudMode() ? "API" : "DB"}: ${location}`));
   });
 
 // ── status ────────────────────────────────────────────────────────────────────
@@ -1125,19 +1194,20 @@ program
   .description("Health check: total configs, drift from disk, unredacted secrets")
   .option("--json", "output metadata-only JSON")
   .action(async (opts: { json?: boolean }) => {
-    const status = getConfigsStatus();
+    const status = await getConfigsStatus(resolveConfigStore());
 
     if (opts.json) {
-      console.log(JSON.stringify(status, null, 2));
+      printJson(status);
       return;
     }
 
-    console.log(chalk.bold("@hasna/configs") + chalk.dim(` v${pkg.version}`));
+    console.log(chalk.bold("@hasna/instructions") + chalk.dim(` v${pkg.version}`));
     console.log(chalk.cyan("Database:") + ` ${status.env.database.kind} (${status.env.database.active ?? "default"})`);
     console.log(chalk.cyan("Total:") + ` ${status.counts.configs.total} configs\n`);
     console.log(chalk.cyan("Drifted:") + ` ${status.health.driftedTargets === 0 ? chalk.green("0") : chalk.yellow(String(status.health.driftedTargets))} (stored differs from disk)`);
     console.log(chalk.cyan("Missing:") + ` ${status.health.missingTargets === 0 ? chalk.green("0") : chalk.yellow(String(status.health.missingTargets))} (file not on disk)`);
     console.log(chalk.cyan("Secrets:") + ` ${status.health.unredactedSecretFindings === 0 ? chalk.green("0 ✓") : chalk.red(String(status.health.unredactedSecretFindings) + " ⚠")} unredacted`);
+    console.log(chalk.cyan("Retired agents:") + ` ${status.health.retiredAgentRows === 0 ? chalk.green("0") : chalk.yellow(String(status.health.retiredAgentRows))} row(s)`);
     console.log(chalk.cyan("Templates:") + ` ${status.counts.configs.templates} (with {{VAR}} placeholders)`);
   });
 
@@ -1150,11 +1220,11 @@ program
   .description("Export configs to a timestamped backup file")
   .action(async () => {
     const { mkdirSync: mk } = await import("node:fs");
-    const backupDir = join(homedir(), ".hasna", "configs", "backups");
+    const backupDir = join(homedir(), ".hasna", "instructions", "backups");
     mk(backupDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "-").slice(0, 19);
     const outPath = join(backupDir, `configs-${ts}.tar.gz`);
-    const result = await exportConfigs(outPath);
+    const result = await exportConfigs(outPath, { store: resolveConfigStore() });
     const { statSync: st } = await import("node:fs");
     const size = st(outPath).size;
     console.log(chalk.green("✓") + ` Backup: ${result.count} configs → ${outPath} (${(size / 1024).toFixed(1)}KB)`);
@@ -1165,7 +1235,7 @@ program
   .description("Restore configs from a backup file")
   .option("--overwrite", "overwrite existing configs (default: skip)")
   .action(async (file, opts) => {
-    const result = await importConfigs(file, { conflict: opts.overwrite ? "overwrite" : "skip" });
+    const result = await importConfigs(file, { conflict: opts.overwrite ? "overwrite" : "skip", store: resolveConfigStore() });
     console.log(chalk.green("✓") + ` Restored: +${result.created} updated:${result.updated} skipped:${result.skipped}`);
     if (result.errors.length > 0) {
       for (const e of result.errors) console.log(chalk.red("  " + e));
@@ -1177,6 +1247,7 @@ program
   .command("doctor")
   .description("Validate configs: syntax, permissions, missing files, secrets")
   .action(async () => {
+    const store = resolveConfigStore();
     let issues = 0;
     const pass = (msg: string) => console.log(chalk.green("  ✓ ") + msg);
     const fail = (msg: string) => { issues++; console.log(chalk.red("  ✗ ") + msg); };
@@ -1195,7 +1266,7 @@ program
     }
 
     // Check DB configs
-    const allConfigs = listConfigs();
+    const allConfigs = await store.listConfigs();
     console.log(chalk.cyan(`\nStored configs (${allConfigs.length}):`));
 
     // Validate JSON/TOML syntax
@@ -1271,8 +1342,9 @@ program
   .description("Diff two stored configs against each other")
   .action(async (a, b) => {
     try {
-      const configA = getConfig(a);
-      const configB = getConfig(b);
+      const store = resolveConfigStore();
+      const configA = await store.getConfig(a);
+      const configB = await store.getConfig(b);
       console.log(chalk.bold(`${configA.slug}`) + chalk.dim(` (${configA.category}/${configA.agent})`));
       console.log(chalk.bold(`${configB.slug}`) + chalk.dim(` (${configB.category}/${configB.agent})`));
       console.log();
@@ -1310,11 +1382,12 @@ program
   .description("Watch known config files for changes and auto-sync to DB")
   .option("-i, --interval <ms>", "poll interval in milliseconds", "3000")
   .action(async (opts) => {
+    const store = resolveConfigStore();
     const interval = Number(opts.interval);
     const { statSync: st } = await import("node:fs");
     const { expandPath } = await import("../lib/apply.js");
 
-    console.log(chalk.bold("@hasna/configs watch") + chalk.dim(` — polling every ${interval}ms`));
+    console.log(chalk.bold("@hasna/instructions watch") + chalk.dim(` — polling every ${interval}ms`));
     console.log(chalk.dim("Watching known config files for changes…\n"));
 
     // Build file → mtime map
@@ -1368,7 +1441,7 @@ program
         }
       }
       if (changed > 0) {
-        const result = await syncKnown({});
+        const result = await syncKnown({ store });
         const ts = new Date().toLocaleTimeString();
         console.log(`${chalk.dim(ts)} ${chalk.green("✓")} ${changed} file(s) changed/new → synced +${result.added} updated:${result.updated}`);
       }
@@ -1386,12 +1459,13 @@ program
   .option("--json", "output as JSON")
   .option("--markdown", "output as markdown")
   .action(async () => {
-    const stats = getConfigStats();
-    const allConfigs = listConfigs();
+    const store = resolveConfigStore();
+    const stats = await store.getConfigStats();
+    const allConfigs = await store.listConfigs();
     const fileConfigs = allConfigs.filter((c) => c.kind === "file");
     const refConfigs = allConfigs.filter((c) => c.kind === "reference");
     const templates = allConfigs.filter((c) => c.is_template);
-    const profiles = listProfiles();
+    const profiles = await store.listProfiles();
 
     // Drift check
     let drifted = 0, missing = 0;
@@ -1440,7 +1514,8 @@ program
   .option("--dry-run", "show what would be removed")
   .option("--limit <n>", `max orphan rows to print (default ${DEFAULT_LIST_LIMIT})`)
   .action(async (opts) => {
-    const configs = listConfigs({ kind: "file" });
+    const store = resolveConfigStore();
+    const configs = await store.listConfigs({ kind: "file" });
     let removed = 0;
     let printed = 0;
     const maxPrinted = parseLimit(opts.limit, DEFAULT_LIST_LIMIT);
@@ -1456,7 +1531,7 @@ program
           }
           printed++;
         }
-        if (!opts.dryRun) deleteConfig(c.id);
+        if (!opts.dryRun) await store.deleteConfig(c.id);
         removed++;
       }
     }
@@ -1475,6 +1550,7 @@ program
   .option("--dry-run", "show what would be installed without doing it")
   .option("--skip-mcp", "skip MCP server registration")
   .action(async (opts) => {
+    const store = resolveConfigStore();
     const packages = [
       { name: "@hasna/todos", bin: "todos", mcp: "todos-mcp" },
       { name: "@hasna/mementos", bin: "mementos", mcp: "mementos-mcp" },
@@ -1490,7 +1566,7 @@ program
       { name: "@hasna/brains", bin: "brains", mcp: "brains-mcp" },
     ];
 
-    console.log(chalk.bold("@hasna/configs bootstrap") + chalk.dim(` — installing ${packages.length} ecosystem packages\n`));
+    console.log(chalk.bold("@hasna/instructions bootstrap") + chalk.dim(` — installing ${packages.length} ecosystem packages\n`));
 
     // 1. Install global packages
     console.log(chalk.cyan("Installing CLI tools:"));
@@ -1521,7 +1597,7 @@ program
     // 3. Run configs init
     console.log(chalk.cyan("\nInitializing configs:"));
     if (!opts.dryRun) {
-      const result = await syncKnown({});
+      const result = await syncKnown({ store });
       console.log(chalk.green("  ✓ ") + `Synced ${result.added + result.updated + result.unchanged} known configs`);
     } else {
       console.log(chalk.dim("  would run: configs init"));
@@ -1537,7 +1613,7 @@ program
   .option("-a, --agent <agent>", "only sync this agent")
   .option("--dry-run", "preview without writing")
   .action(async (opts) => {
-    const result = await syncKnown({ dryRun: opts.dryRun, agent: opts.agent });
+    const result = await syncKnown({ dryRun: opts.dryRun, agent: opts.agent, store: resolveConfigStore() });
     console.log(chalk.green("✓") + ` Pulled: +${result.added} updated:${result.updated} unchanged:${result.unchanged}`);
   });
 
@@ -1547,7 +1623,7 @@ program
   .option("-a, --agent <agent>", "only push this agent")
   .option("--dry-run", "preview without writing")
   .action(async (opts) => {
-    const result = await syncToDisk({ dryRun: opts.dryRun, agent: opts.agent });
+    const result = await syncToDisk({ dryRun: opts.dryRun, agent: opts.agent, store: resolveConfigStore() });
     console.log(chalk.green("✓") + ` Pushed: updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
   });
 
@@ -1558,7 +1634,7 @@ program
   .option("--check", "only check, don't install")
   .action(async (opts) => {
     try {
-      const proc = Bun.spawn(["npm", "view", "@hasna/configs", "version"], { stdout: "pipe", stderr: "pipe" });
+      const proc = Bun.spawn(["npm", "view", "@hasna/instructions", "version"], { stdout: "pipe", stderr: "pipe" });
       const latest = (await new Response(proc.stdout).text()).trim();
       await proc.exited;
       if (latest === pkg.version) {
@@ -1567,7 +1643,7 @@ program
         console.log(`Current: ${chalk.dim(pkg.version)} → Latest: ${chalk.green(latest)}`);
         if (!opts.check) {
           console.log(chalk.dim("Installing..."));
-          const install = Bun.spawn(["bun", "install", "-g", `@hasna/configs@${latest}`], { stdout: "inherit", stderr: "inherit" });
+          const install = Bun.spawn(["bun", "install", "-g", `@hasna/instructions@${latest}`], { stdout: "inherit", stderr: "inherit" });
           await install.exited;
           console.log(chalk.green("✓") + ` Updated to ${latest}`);
         }
@@ -1584,15 +1660,15 @@ program
   .option("-e, --email <email>", "Contact email")
   .option("-c, --category <cat>", "Category: bug, feature, general", "general")
   .action(async (message, opts) => {
-    const db = getDatabase();
-    db.run(
-      "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
-      [message, opts.email || null, opts.category || "general", pkg.version]
-    );
+    await resolveConfigStore().sendFeedback({
+      message,
+      email: opts.email || null,
+      category: opts.category || "general",
+      version: pkg.version,
+    });
     console.log(chalk.green("✓") + " Feedback saved. Thank you!");
   });
 
 program.version(pkg.version).name("instructions");
-registerStorageCommands(program);
 registerEventsCommands(program, { source: "configs" });
 program.parse(process.argv);

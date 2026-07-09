@@ -134,21 +134,20 @@ and `API_KEY_SIGNING_SECRET` are also accepted). Client apps use
 `InstructionsV1Client` is generated from the serve OpenAPI document
 (`bun run generate:sdk`).
 
-## Storage Sync (local CLI)
+## Storage Modes
 
-The local CLI supports optional remote storage sync through a package-local
-Postgres connection:
+Every CLI command, MCP tool, and SDK method routes through a single `ConfigStore`
+abstraction with two transports:
 
-```bash
-export HASNA_INSTRUCTIONS_DATABASE_URL=postgres://...
-instructions storage status
-instructions storage push
-instructions storage pull
-instructions storage sync
-```
+- **local** — on-box SQLite (`LocalConfigStore`), fully first-class. Used when no
+  API env vars are set.
+- **api** (self_hosted / cloud) — HTTP `/v1` + bearer key (`CloudConfigStore`).
+  Activated by setting **both** `HASNA_INSTRUCTIONS_API_URL` and
+  `HASNA_INSTRUCTIONS_API_KEY`. Identical client code; only the URL/key differ,
+  and the self_hosted/cloud distinction is enforced server-side by tenancy.
 
-The MCP server also exposes `storage_status`, `storage_push`, `storage_pull`, and
-`storage_sync`.
+Clients never hold a database DSN. The raw Postgres connection is a server-only
+concern (`instructions-serve`).
 
 ## Data Directory
 
@@ -158,7 +157,12 @@ Local data is stored in `~/.hasna/configs/` (unchanged, for fleet continuity).
 
 `instructions session plan` and `instructions session apply` render
 OpenIdentities and instruction sources into provider-native files for Claude,
-Codex, Cursor, OpenCode, and Codewith.
+Codex, Cursor, OpenCode, Codewith, aicopilot, and Google Antigravity.
+The old Google agent target is removed; Antigravity is the only Google coding
+agent render target. Antigravity workspace rules are rendered to
+`.agents/rules/*.md`; its current global rules and MCP files use Google's
+legacy-named `~/.gemini/GEMINI.md` and `~/.gemini/config/mcp_config.json`
+paths but remain owned by the `antigravity` target.
 
 ```bash
 instructions session plan \
@@ -174,12 +178,19 @@ instructions session apply \
   --identity-export ./instructions.json
 ```
 
-Accepted source layers are `global`, `provider`/`tool`, `account`,
-`identity`/`agent`, `project`, and `local`. Empty renders fail closed unless
-`--allow-empty-sources` is passed. Apply writes generated manifests with file
-hashes, checks previous manifests for drift, refuses unmanaged file conflicts
-unless `--force` is passed, removes stale managed mirrors only when safe, and
-writes local snapshots before mutating managed files.
+Accepted source layers are `global`, `provider`/`tool`, `account`, `machine`,
+`division`, `workspace`, `project`/`repo`, `path`, `identity`/`agent`,
+`session`, and `local`. Empty renders fail closed unless `--allow-empty-sources`
+is passed. Apply writes generated manifests with file hashes, checks previous
+manifests for drift, refuses unmanaged file conflicts unless `--force` is
+passed, removes stale managed mirrors only when safe, and writes local snapshots
+before mutating managed files.
+
+`instructions init` and `bun run seed` also seed
+`global-agent-rules-standard`, the managed global/system prompt source for
+session renaming, task-scoped worktrees, PR-first landing, protected-branch
+push safety, autonomous repair, Hasna CLI source-of-truth usage, conversation
+surface routing, and unbudgeted Codewith goals unless a user asks for budgets.
 
 ## Machine-aware Profiles
 

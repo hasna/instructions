@@ -13,7 +13,7 @@ import {
 const servers: Array<{ stop: () => void }> = [];
 
 beforeEach(() => {
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   resetDatabase();
   getDatabase();
 });
@@ -23,7 +23,7 @@ afterEach(() => {
     servers.pop()?.stop();
   }
   resetDatabase();
-  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
 });
 
 describe("configs MCP HTTP transport", () => {

@@ -1,3 +1,4 @@
+import { LocalConfigStore } from "../data/config-store";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, mkdirSync, existsSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -10,14 +11,14 @@ let tmpDir: string;
 
 beforeEach(() => {
   resetDatabase();
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   tmpDir = join(tmpdir(), `configs-syncdir-test-${Date.now()}`);
   mkdirSync(tmpDir, { recursive: true });
 });
 
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
 });
 
 describe("syncToDir", () => {
@@ -25,7 +26,7 @@ describe("syncToDir", () => {
     const db = getDatabase();
     const target = join(tmpDir, "output.txt");
     createConfig({ name: "Out", category: "tools", content: "hello", target_path: target }, db);
-    const result = await syncToDir(tmpDir, { db });
+    const result = await syncToDir(tmpDir, { store: new LocalConfigStore(db) });
     expect(result.updated + result.unchanged).toBeGreaterThanOrEqual(0);
   });
 
@@ -33,14 +34,14 @@ describe("syncToDir", () => {
     const db = getDatabase();
     const target = join(tmpDir, "dryout.txt");
     createConfig({ name: "Dry", category: "tools", content: "data", target_path: target }, db);
-    await syncToDir(tmpDir, { db, dryRun: true });
+    await syncToDir(tmpDir, { store: new LocalConfigStore(db), dryRun: true });
     expect(existsSync(target)).toBe(false);
   });
 
   test("skips reference kind configs", async () => {
     const db = getDatabase();
     createConfig({ name: "Ref", category: "workspace", content: "doc", kind: "reference" }, db);
-    const result = await syncToDir(tmpDir, { db });
+    const result = await syncToDir(tmpDir, { store: new LocalConfigStore(db) });
     expect(result.updated).toBe(0);
     expect(result.unchanged).toBe(0);
   });
@@ -53,7 +54,7 @@ describe("syncFromDir recursive", () => {
     mkdirSync(nested, { recursive: true });
     writeFileSync(join(tmpDir, "root.txt"), "root");
     writeFileSync(join(nested, "deep.txt"), "deep");
-    const result = await syncFromDir(tmpDir, { db, recursive: true });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: true });
     expect(result.added).toBe(2);
     expect(listConfigs(undefined, db).length).toBe(2);
   });
@@ -65,7 +66,7 @@ describe("syncFromDir recursive", () => {
     writeFileSync(join(tmpDir, ".git", "HEAD"), "ref: refs/heads/main");
     writeFileSync(join(tmpDir, "node_modules", "pkg.json"), "{}");
     writeFileSync(join(tmpDir, "real.txt"), "real");
-    const result = await syncFromDir(tmpDir, { db });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db) });
     expect(result.added).toBe(1); // only real.txt
   });
 
@@ -73,7 +74,7 @@ describe("syncFromDir recursive", () => {
     const db = getDatabase();
     writeFileSync(join(tmpDir, "data.db"), "binary");
     writeFileSync(join(tmpDir, "config.txt"), "config");
-    const result = await syncFromDir(tmpDir, { db });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db) });
     expect(result.added).toBe(1); // only config.txt
   });
 
@@ -82,7 +83,7 @@ describe("syncFromDir recursive", () => {
     mkdirSync(join(tmpDir, "sub"), { recursive: true });
     writeFileSync(join(tmpDir, "top.txt"), "top");
     writeFileSync(join(tmpDir, "sub", "nested.txt"), "nested");
-    const result = await syncFromDir(tmpDir, { db, recursive: false });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     expect(result.added).toBe(1); // only top.txt
   });
 });

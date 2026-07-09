@@ -3,11 +3,11 @@ import { basename, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { ApplyResult, Config, ConfigOutput } from "../types/index.js";
 import { ConfigApplyError } from "../types/index.js";
-import { getDatabase, now } from "../db/database.js";
-import { listConfigs, updateConfig } from "../db/configs.js";
-import { createSnapshot } from "../db/snapshots.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import type { ProfileVariables } from "../types/index.js";
+import { isRetiredOrUnsupportedConfigAgent } from "./config-agents.js";
 import { renderMachineAwareContent } from "./machine.js";
+import { ANTIGRAVITY_RULE_FILE_CHAR_LIMIT } from "./session-render.js";
 import { applyTransform } from "./transforms.js";
 
 export function getConfigHome(): string {
@@ -48,7 +48,7 @@ export function normalizeTargetPath(p: string): string {
 export interface ApplyOptions {
   dryRun?: boolean;
   force?: boolean;
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   vars?: ProfileVariables;
   outputAgent?: Config["agent"];
 }
@@ -66,6 +66,12 @@ async function writeConfigResult(
   const renderedContent = opts.vars
     ? renderMachineAwareContent(content, opts.vars)
     : content;
+  const targetAgent = meta.agent ?? config.agent;
+  if (isAntigravityRuleTarget(targetAgent, renderedTargetPath) && renderedContent.length > ANTIGRAVITY_RULE_FILE_CHAR_LIMIT) {
+    throw new ConfigApplyError(
+      `Antigravity rule file ${renderedTargetPath} is ${renderedContent.length} characters; split it before applying because Antigravity limits rule files to ${ANTIGRAVITY_RULE_FILE_CHAR_LIMIT} characters.`
+    );
+  }
   const path = expandPath(renderedTargetPath);
   const previousContent = existsSync(path)
     ? readFileSync(path, "utf-8")
@@ -79,8 +85,8 @@ async function writeConfigResult(
     }
 
     if (previousContent !== null && changed) {
-      const db = opts.db || getDatabase();
-      createSnapshot(config.id, previousContent, config.version, db);
+      const store = opts.store ?? resolveConfigStore();
+      await store.createSnapshot(config.id, previousContent, config.version);
     }
 
     writeFileSync(path, renderedContent, "utf-8");
@@ -97,6 +103,10 @@ async function writeConfigResult(
   };
 }
 
+function isAntigravityRuleTarget(agent: Config["agent"] | undefined, targetPath: string): boolean {
+  return agent === "antigravity" && /\.(md|mdc|markdown)$/i.test(targetPath);
+}
+
 function isGeneratedOutputTarget(config: Config, configs: Config[]): boolean {
   if (!config.target_path) return false;
   const targetPath = normalizeTargetPath(config.target_path);
@@ -110,9 +120,16 @@ export async function applyConfig(
   config: Config,
   opts: ApplyOptions = {}
 ): Promise<ApplyResult> {
+  if (opts.outputAgent && isRetiredOrUnsupportedConfigAgent(opts.outputAgent)) {
+    throw new ConfigApplyError(`Config output agent "${opts.outputAgent}" is retired or unsupported — cannot apply to disk.`);
+  }
+  if (isRetiredOrUnsupportedConfigAgent(config.agent)) {
+    throw new ConfigApplyError(`Config "${config.name}" uses retired or unsupported agent "${config.agent}" — cannot apply to disk.`);
+  }
+
   const selectedOutputs = opts.outputAgent
     ? config.outputs.filter((output) => output.agent === opts.outputAgent)
-    : config.outputs;
+    : config.outputs.filter((output) => !isRetiredOrUnsupportedConfigAgent(output.agent));
   const shouldApplyPrimary = !opts.outputAgent || config.agent === opts.outputAgent;
 
   if (config.kind === "reference" || ((!config.target_path || !shouldApplyPrimary) && selectedOutputs.length === 0)) {
@@ -121,8 +138,8 @@ export async function applyConfig(
     );
   }
 
-  const db = opts.db || getDatabase();
-  const contextConfigs = selectedOutputs.length > 0 || config.target_path ? listConfigs(undefined, db) : [config];
+  const store = opts.store ?? resolveConfigStore();
+  const contextConfigs = selectedOutputs.length > 0 || config.target_path ? await store.listConfigs() : [config];
   if (isGeneratedOutputTarget(config, contextConfigs)) {
     throw new ConfigApplyError(
       `Config "${config.name}" targets a generated output path. Apply the canonical source config instead.`
@@ -149,7 +166,7 @@ export async function applyConfig(
   }
 
   if (!opts.dryRun) {
-    updateConfig(config.id, { synced_at: now() }, db);
+    await store.updateConfig(config.id, { synced_at: new Date().toISOString() });
   }
 
   return result;
@@ -175,6 +192,7 @@ export async function applyConfigs(
   const results: ApplyResult[] = [];
   for (const config of configs) {
     if (config.kind === "reference") continue;
+    if (isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
     results.push(await applyConfig(config, opts));
   }
   return results;

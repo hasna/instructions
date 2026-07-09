@@ -1,16 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { Database } from "bun:sqlite";
-import { getDatabase } from "./db/database.js";
-import { getConfigStats, listConfigs } from "./db/configs.js";
-import { listProfiles } from "./db/profiles.js";
-import { listMachines } from "./db/machines.js";
+import { resolveConfigStore, type ConfigStore } from "./data/config-store.js";
+import type { Config } from "./types/index.js";
 import { expandPath } from "./lib/apply.js";
+import { isRetiredOrUnsupportedConfigAgent } from "./lib/config-agents.js";
+import { getPackageVersion } from "./lib/package-version.js";
 import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
 
 const PACKAGE_NAME = "@hasna/instructions";
-const PACKAGE_VERSION = "0.3.0";
+const PACKAGE_VERSION = getPackageVersion();
 
-type ActiveDbEnv = "HASNA_CONFIGS_DB_PATH" | "CONFIGS_DB_PATH" | null;
+type ActiveDbEnv = "HASNA_INSTRUCTIONS_DB_PATH" | null;
 type DatabaseKind = "memory" | "file";
 type ContractStatus = "ok" | "warn";
 
@@ -23,8 +22,7 @@ export interface ConfigsStatusContract {
   };
   env: {
     database: {
-      primary: "HASNA_CONFIGS_DB_PATH";
-      fallback: "CONFIGS_DB_PATH";
+      primary: "HASNA_INSTRUCTIONS_DB_PATH";
       active: ActiveDbEnv;
       kind: DatabaseKind;
     };
@@ -35,6 +33,7 @@ export interface ConfigsStatusContract {
       file: number;
       reference: number;
       templates: number;
+      retiredAgentRows: number;
     };
     byCategory: Record<string, number>;
     byAgent: Record<string, number>;
@@ -51,9 +50,11 @@ export interface ConfigsStatusContract {
     driftedTargets: number;
     missingTargets: number;
     unredactedSecretFindings: number;
+    retiredAgentRows: number;
     hasDrift: boolean;
     hasMissingTargets: boolean;
     hasUnredactedSecrets: boolean;
+    hasRetiredAgentRows: boolean;
   };
   safety: {
     includesConfigValues: false;
@@ -65,13 +66,12 @@ export interface ConfigsStatusContract {
 }
 
 function activeDatabaseEnv(): ActiveDbEnv {
-  if (process.env["HASNA_CONFIGS_DB_PATH"]) return "HASNA_CONFIGS_DB_PATH";
-  if (process.env["CONFIGS_DB_PATH"]) return "CONFIGS_DB_PATH";
+  if (process.env["HASNA_INSTRUCTIONS_DB_PATH"]) return "HASNA_INSTRUCTIONS_DB_PATH";
   return null;
 }
 
 function configuredDatabaseKind(): DatabaseKind {
-  const value = process.env["HASNA_CONFIGS_DB_PATH"] ?? process.env["CONFIGS_DB_PATH"] ?? "";
+  const value = process.env["HASNA_INSTRUCTIONS_DB_PATH"] ?? "";
   return value === ":memory:" || value.startsWith("file::memory:") ? "memory" : "file";
 }
 
@@ -85,28 +85,22 @@ function countBy<T>(items: T[], getValue: (item: T) => string | null | undefined
   return counts;
 }
 
-function tableCount(db: Database, table: string): number {
-  try {
-    const row = db.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM ${table}`).get();
-    return Number(row?.count ?? 0);
-  } catch {
-    return 0;
-  }
-}
-
-export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusContract {
+export async function getConfigsStatus(
+  store: ConfigStore = resolveConfigStore(),
+): Promise<ConfigsStatusContract> {
   let databaseReachable = true;
-  let configs: ReturnType<typeof listConfigs> = [];
+  let configs: Config[] = [];
   let categoryStats: Record<string, number> = { total: 0 };
 
   try {
-    configs = listConfigs(undefined, db);
-    categoryStats = getConfigStats(db);
+    configs = await store.listConfigs();
+    categoryStats = await store.getConfigStats();
   } catch {
     databaseReachable = false;
   }
 
   const fileConfigs = configs.filter((config) => config.kind === "file");
+  const retiredAgentRows = configs.filter((config) => isRetiredOrUnsupportedConfigAgent(config.agent)).length;
   let driftedTargets = 0;
   let missingTargets = 0;
   let unredactedSecretFindings = 0;
@@ -114,6 +108,7 @@ export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusCon
 
   for (const config of fileConfigs) {
     unredactedSecretFindings += scanSecrets(config.content, config.format as RedactFormat).length;
+    if (isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
     if (!config.target_path) continue;
 
     knownTargets += 1;
@@ -130,17 +125,33 @@ export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusCon
     }
   }
 
-  const profiles = databaseReachable ? listProfiles(db).length : 0;
-  const machines = databaseReachable ? listMachines(db).length : 0;
-  const profileLinks = databaseReachable ? tableCount(db, "profile_configs") : 0;
-  const snapshots = databaseReachable ? tableCount(db, "config_snapshots") : 0;
+  let profiles = 0;
+  let machines = 0;
+  let profileLinks = 0;
+  let snapshots = 0;
+  if (databaseReachable) {
+    try {
+      const profileList = await store.listProfiles();
+      profiles = profileList.length;
+      machines = (await store.listMachines()).length;
+      for (const profile of profileList) {
+        profileLinks += (await store.getProfileConfigs(profile.id)).length;
+      }
+      for (const config of configs) {
+        snapshots += (await store.listSnapshots(config.id)).length;
+      }
+    } catch {
+      databaseReachable = false;
+    }
+  }
   const byCategory = Object.fromEntries(Object.entries(categoryStats).filter(([key]) => key !== "total"));
 
   const status: ContractStatus =
     databaseReachable &&
     driftedTargets === 0 &&
     missingTargets === 0 &&
-    unredactedSecretFindings === 0
+    unredactedSecretFindings === 0 &&
+    retiredAgentRows === 0
       ? "ok"
       : "warn";
 
@@ -153,8 +164,7 @@ export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusCon
     },
     env: {
       database: {
-        primary: "HASNA_CONFIGS_DB_PATH",
-        fallback: "CONFIGS_DB_PATH",
+        primary: "HASNA_INSTRUCTIONS_DB_PATH",
         active: activeDatabaseEnv(),
         kind: configuredDatabaseKind(),
       },
@@ -165,6 +175,7 @@ export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusCon
         file: fileConfigs.length,
         reference: configs.filter((config) => config.kind === "reference").length,
         templates: configs.filter((config) => config.is_template).length,
+        retiredAgentRows,
       },
       byCategory,
       byAgent: countBy(configs, (config) => config.agent),
@@ -181,9 +192,11 @@ export function getConfigsStatus(db: Database = getDatabase()): ConfigsStatusCon
       driftedTargets,
       missingTargets,
       unredactedSecretFindings,
+      retiredAgentRows,
       hasDrift: driftedTargets > 0,
       hasMissingTargets: missingTargets > 0,
       hasUnredactedSecrets: unredactedSecretFindings > 0,
+      hasRetiredAgentRows: retiredAgentRows > 0,
     },
     safety: {
       includesConfigValues: false,

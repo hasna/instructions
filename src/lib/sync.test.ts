@@ -1,29 +1,33 @@
+import { LocalConfigStore } from "../data/config-store";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig, listConfigs } from "../db/configs";
-import { diffConfig, detectCategory, detectAgent, detectFormat } from "./sync";
+import { diffConfig, detectCategory, detectAgent, detectFormat, syncToDisk } from "./sync";
 import { syncFromDir } from "./sync-dir";
+import type { ConfigAgent } from "../types";
 
 let tmpDir: string;
 
 beforeEach(() => {
   resetDatabase();
-  process.env["CONFIGS_DB_PATH"] = ":memory:";
+  process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   tmpDir = join(tmpdir(), `configs-sync-test-${Date.now()}`);
   mkdirSync(tmpDir, { recursive: true });
 });
 
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env["CONFIGS_DB_PATH"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+  delete process.env["CONFIGS_HOME"];
 });
 
 describe("detectCategory", () => {
   test("detects rules for claude.md", () => expect(detectCategory("/home/user/.claude/CLAUDE.md")).toBe("rules"));
   test("detects rules for rules dir", () => expect(detectCategory("/home/user/.claude/rules/git.md")).toBe("rules"));
+  test("detects rules for Antigravity rule files whose names contain mcp", () => expect(detectCategory("/home/user/repo/.agents/rules/mcp.md")).toBe("rules"));
   test("detects agent for .claude dir", () => expect(detectCategory("/home/user/.claude/settings.json")).toBe("agent"));
   test("detects shell for .zshrc", () => expect(detectCategory("/home/user/.zshrc")).toBe("shell"));
   test("detects git for .gitconfig", () => expect(detectCategory("/home/user/.gitconfig")).toBe("git"));
@@ -49,7 +53,7 @@ describe("syncFromDir", () => {
   test("adds new files from disk", async () => {
     writeFileSync(join(tmpDir, "test.md"), "# Hello");
     const db = getDatabase();
-    const result = await syncFromDir(tmpDir, { db, recursive: false });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     expect(result.added).toBe(1);
     expect(listConfigs(undefined, db).length).toBe(1);
   });
@@ -57,8 +61,8 @@ describe("syncFromDir", () => {
   test("unchanged files are not updated", async () => {
     const db = getDatabase();
     writeFileSync(join(tmpDir, "same.txt"), "same");
-    await syncFromDir(tmpDir, { db, recursive: false });
-    const result2 = await syncFromDir(tmpDir, { db, recursive: false });
+    await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
+    const result2 = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     expect(result2.unchanged).toBe(1);
     expect(result2.updated).toBe(0);
   });
@@ -67,23 +71,23 @@ describe("syncFromDir", () => {
     const db = getDatabase();
     const file = join(tmpDir, "change.txt");
     writeFileSync(file, "v1");
-    await syncFromDir(tmpDir, { db, recursive: false });
+    await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     writeFileSync(file, "v2");
-    const result = await syncFromDir(tmpDir, { db, recursive: false });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), recursive: false });
     expect(result.updated).toBe(1);
   });
 
   test("dry-run does not write to DB", async () => {
     const db = getDatabase();
     writeFileSync(join(tmpDir, "new.md"), "content");
-    const result = await syncFromDir(tmpDir, { db, dryRun: true, recursive: false });
+    const result = await syncFromDir(tmpDir, { store: new LocalConfigStore(db), dryRun: true, recursive: false });
     expect(result.added).toBe(1);
     expect(listConfigs(undefined, db).length).toBe(0);
   });
 
   test("returns skipped for missing dir", async () => {
     const db = getDatabase();
-    const result = await syncFromDir("/nonexistent/path", { db });
+    const result = await syncFromDir("/nonexistent/path", { store: new LocalConfigStore(db) });
     expect(result.skipped.length).toBeGreaterThan(0);
   });
 });
@@ -93,25 +97,25 @@ describe("diffConfig", () => {
     writeFileSync(join(tmpDir, "same.txt"), "content");
     const db = getDatabase();
     const c = createConfig({ name: "same", category: "tools", content: "content", target_path: join(tmpDir, "same.txt") }, db);
-    expect(diffConfig(c)).toBe("(no diff — identical)");
+    expect(await diffConfig(c)).toBe("(no diff — identical)");
   });
 
   test("returns diff for different content", async () => {
     writeFileSync(join(tmpDir, "diff.txt"), "disk content");
     const db = getDatabase();
     const c = createConfig({ name: "diff", category: "tools", content: "stored content", target_path: join(tmpDir, "diff.txt") }, db);
-    const diff = diffConfig(c);
+    const diff = await diffConfig(c);
     expect(diff).toContain("-stored content");
     expect(diff).toContain("+disk content");
   });
 
-  test("returns file not found for missing path", () => {
+  test("returns file not found for missing path", async () => {
     const db = getDatabase();
     const c = createConfig({ name: "missing", category: "tools", content: "x", target_path: join(tmpDir, "nope.txt") }, db);
-    expect(diffConfig(c)).toContain("not found on disk");
+    expect(await diffConfig(c)).toContain("not found on disk");
   });
 
-  test("diff includes transformed output paths", () => {
+  test("diff includes transformed output paths", async () => {
     const db = getDatabase();
     const primary = join(tmpDir, "CLAUDE.md");
     const output = join(tmpDir, "AGENTS.md");
@@ -128,10 +132,47 @@ describe("diffConfig", () => {
       ],
     }, db);
 
-    const diff = diffConfig(c, { db });
+    const diff = await diffConfig(c, { store: new LocalConfigStore(db) });
 
     expect(diff).toContain(`+++ disk (${output})`);
     expect(diff).toContain("-# Claude");
     expect(diff).toContain("+# stale");
+  });
+});
+
+describe("syncToDisk", () => {
+  test("skips stale retired Gemini rows and still applies active Antigravity rows", async () => {
+    const db = getDatabase();
+    const store = new LocalConfigStore(db);
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const antigravityTarget = join(tmpDir, ".gemini", "GEMINI.md");
+
+    createConfig({
+      name: "Stale Gemini Global Rules",
+      category: "rules",
+      agent: "gemini" as ConfigAgent,
+      target_path: "~/.gemini/GEMINI.md",
+      format: "markdown",
+      content: "retired gemini content",
+    }, db);
+
+    const retiredOnlyResult = await syncToDisk({ store });
+    expect(retiredOnlyResult.skipped.length).toBe(1);
+    expect(retiredOnlyResult.skipped[0]).toContain("deprecated agent: gemini");
+    expect(existsSync(antigravityTarget)).toBe(false);
+
+    createConfig({
+      name: "Active Antigravity Global Rules",
+      category: "rules",
+      agent: "antigravity",
+      target_path: "~/.gemini/GEMINI.md",
+      format: "markdown",
+      content: "active antigravity content",
+    }, db);
+
+    const result = await syncToDisk({ store });
+    expect(result.updated).toBe(1);
+    expect(result.skipped.length).toBe(1);
+    expect(readFileSync(antigravityTarget, "utf-8")).toBe("active antigravity content");
   });
 });

@@ -8,6 +8,7 @@ export const CODEWITH_NATIVE_IMPORTS_ENV = "HASNA_CONFIGS_CODEWITH_NATIVE_IMPORT
 export const SESSION_RENDER_MANAGED_MARKER = "Managed by @hasna/configs session render";
 export const SESSION_RENDER_SCHEMA = "hasna.configs.session-render/v1";
 export const RAW_STORE_ROOT_ENV = "HASNA_CONFIGS_HOME";
+export const ANTIGRAVITY_RULE_FILE_CHAR_LIMIT = 12_000;
 
 export const SESSION_RENDER_TOOLS = [
   "claude",
@@ -15,11 +16,27 @@ export const SESSION_RENDER_TOOLS = [
   "cursor",
   "opencode",
   "codewith",
+  "aicopilot",
+  "antigravity",
 ] as const;
 
 export type SessionRenderTool = (typeof SESSION_RENDER_TOOLS)[number];
-export type SessionRenderMode = "native-imports" | "flattened-markdown" | "cursor-mdc" | "opencode-instructions";
-export type SessionInstructionLayer = "global" | "tool" | "account" | "agent" | "project" | "local";
+export type SessionRenderMode = "native-imports" | "flattened-markdown" | "cursor-mdc" | "opencode-instructions" | "antigravity-rules";
+export const SESSION_INSTRUCTION_LAYERS = [
+  "global",
+  "tool",
+  "account",
+  "machine",
+  "division",
+  "workspace",
+  "repo",
+  "path",
+  "agent",
+  "session",
+  "local",
+] as const;
+export type SessionInstructionLayer = (typeof SESSION_INSTRUCTION_LAYERS)[number];
+export type SessionInstructionLayerAlias = SessionInstructionLayer | "provider" | "identity" | "project";
 export type SessionInstructionMerge = "append" | "replace";
 export type SessionRenderFileRole = "index" | "fragment" | "rule" | "config" | "manifest";
 export type SessionRenderTargetKind = "session-home" | "project-root" | "blocked";
@@ -62,7 +79,7 @@ export interface SessionInstructionSource {
   id: string;
   content: string;
   label?: string;
-  layer?: SessionInstructionLayer;
+  layer?: SessionInstructionLayerAlias;
   merge?: SessionInstructionMerge;
   order?: number;
   path?: string;
@@ -255,17 +272,58 @@ export const SESSION_TOOL_ADAPTERS: Record<SessionRenderTool, SessionToolAdapter
     nativeImports: false,
     description: "OpenCode AGENTS.md plus opencode.json instructions pointing at managed fragments.",
   },
+  aicopilot: {
+    tool: "aicopilot",
+    mode: "flattened-markdown",
+    indexFile: "AICOPILOT.md",
+    managedDir: ".hasna/instructions",
+    envVar: "AICOPILOT_CONFIG_DIR",
+    nativeImports: false,
+    description: "AI Copilot AICOPILOT.md flattened instruction file.",
+  },
+  antigravity: {
+    tool: "antigravity",
+    mode: "antigravity-rules",
+    managedDir: ".agents/rules",
+    nativeImports: false,
+    description: "Google Antigravity project rules in .agents/rules/*.md.",
+  },
   codewith: CODEWITH_FLATTENED_ADAPTER,
 };
 
-const LAYER_RANK: Record<SessionInstructionLayer, number> = {
+export const SESSION_LAYER_RANK: Record<SessionInstructionLayer, number> = {
   global: 10,
   tool: 20,
   account: 30,
-  agent: 40,
-  project: 50,
-  local: 60,
+  machine: 40,
+  division: 50,
+  workspace: 60,
+  repo: 70,
+  path: 80,
+  agent: 90,
+  session: 100,
+  local: 110,
 };
+
+export function normalizeSessionInstructionLayer(value: unknown): SessionInstructionLayer {
+  if (value === "provider") return "tool";
+  if (value === "identity") return "agent";
+  if (value === "project") return "repo";
+  if (
+    value === "global" ||
+    value === "tool" ||
+    value === "account" ||
+    value === "machine" ||
+    value === "division" ||
+    value === "workspace" ||
+    value === "repo" ||
+    value === "path" ||
+    value === "agent" ||
+    value === "session" ||
+    value === "local"
+  ) return value;
+  throw new Error(`Invalid session instruction layer: ${String(value)}`);
+}
 
 function ensureTrailingNewline(content: string): string {
   return content.endsWith("\n") ? content : `${content}\n`;
@@ -339,7 +397,7 @@ function normalizeSources(
         content,
         normalizedId: slug(source.id),
         resolvedLabel: source.label ?? source.id,
-        resolvedLayer: source.layer ?? "agent",
+        resolvedLayer: source.layer === undefined ? "agent" : normalizeSessionInstructionLayer(source.layer),
         resolvedMerge: source.merge ?? "append",
         resolvedOrder: source.order ?? index,
         resolvedRules: normalizeInstructionRules(source, tool),
@@ -351,7 +409,7 @@ function normalizeSources(
       return normalized;
     })
     .sort((a, b) =>
-      LAYER_RANK[a.resolvedLayer] - LAYER_RANK[b.resolvedLayer] ||
+      SESSION_LAYER_RANK[a.resolvedLayer] - SESSION_LAYER_RANK[b.resolvedLayer] ||
       a.resolvedOrder - b.resolvedOrder ||
       a.id.localeCompare(b.id)
     );
@@ -586,6 +644,38 @@ function buildOpenCodeFiles(
   ];
 }
 
+function buildAntigravityRuleFiles(
+  targetHome: string,
+  adapter: SessionToolAdapter,
+  sources: OrderedSessionInstructionSource[],
+): SessionRenderFile[] {
+  return sources.flatMap((source, index) => {
+    const n = String(index + 1).padStart(2, "0");
+    const sourcePath = posix.join(adapter.managedDir, `${n}-${source.normalizedId}.md`);
+    const sourceFile = makeAntigravityRuleFile(targetHome, sourcePath, sectionForSource(source), [source.id]);
+    const ruleFiles = source.resolvedRules.map((rule) => {
+      const rulePath = posix.join(adapter.managedDir, `${n}-${source.normalizedId}-${rule.resolvedPath}`);
+      return makeAntigravityRuleFile(targetHome, rulePath, sectionForRule(source, rule), [source.id, rule.id]);
+    });
+    return [sourceFile, ...ruleFiles];
+  });
+}
+
+function makeAntigravityRuleFile(
+  targetHome: string,
+  relativePath: string,
+  content: string,
+  sourceIds: string[],
+): SessionRenderFile {
+  const file = makeFile(targetHome, relativePath, "rule", content, sourceIds);
+  if (file.content.length > ANTIGRAVITY_RULE_FILE_CHAR_LIMIT) {
+    throw new Error(
+      `Antigravity rule file ${file.relativePath} is ${file.content.length} characters; split it before rendering because Antigravity limits rule files to ${ANTIGRAVITY_RULE_FILE_CHAR_LIMIT} characters.`
+    );
+  }
+  return file;
+}
+
 function buildFiles(
   targetHome: string,
   adapter: SessionToolAdapter,
@@ -601,6 +691,8 @@ function buildFiles(
       return buildCursorRuleFiles(targetHome, adapter, sources);
     case "opencode-instructions":
       return buildOpenCodeFiles(targetHome, adapter, profile, sources);
+    case "antigravity-rules":
+      return buildAntigravityRuleFiles(targetHome, adapter, sources);
   }
 }
 
@@ -665,13 +757,15 @@ function resolveRenderTarget(input: SessionRenderInput): {
   targetKind: SessionRenderTargetKind;
   blockers: string[];
 } {
-  if (input.tool === "cursor") {
+  if (input.tool === "cursor" || input.tool === "antigravity") {
     if (!input.projectRoot) {
+      const label = input.tool === "cursor" ? "Cursor rules" : "Antigravity rules";
+      const path = input.tool === "cursor" ? ".cursor/rules files" : ".agents/rules files";
       return {
         targetHome: defaultTargetHome(input.tool, input.profile, input.sessionId),
         targetKind: "blocked",
         blockers: [
-          "Cursor rules are project-scoped; pass --project-root (or projectRoot) before applying .cursor/rules files. --target-home is not treated as a repository root for Cursor.",
+          `${label} are project-scoped; pass --project-root (or projectRoot) before applying ${path}. --target-home is not treated as a repository root for ${input.tool}.`,
         ],
       };
     }
@@ -1015,10 +1109,11 @@ function layerFromIdentityKind(kind: string | undefined, exportShape: IdentityEx
     case "account-overlay":
       return "account";
     case "project-overlay":
-      return "project";
+      return "repo";
     case "machine-overlay":
+      return "machine";
     case "session-overlay":
-      return "local";
+      return "session";
     default:
       throw new Error(`Invalid identity instruction source kind: ${kind}`);
   }
@@ -1127,8 +1222,7 @@ function normalizeSourcePaths(value: unknown): SessionInstructionSourcePath[] {
 }
 
 function requireLayer(value: unknown): SessionInstructionLayer {
-  if (value === "global" || value === "tool" || value === "account" || value === "agent" || value === "project" || value === "local") return value;
-  throw new Error(`Invalid session instruction layer: ${String(value)}`);
+  return normalizeSessionInstructionLayer(value);
 }
 
 function requireMerge(value: unknown): SessionInstructionMerge {

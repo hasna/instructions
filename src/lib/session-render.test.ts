@@ -4,7 +4,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ANTIGRAVITY_RULE_FILE_CHAR_LIMIT,
   CODEWITH_NATIVE_IMPORTS_ENV,
+  SESSION_INSTRUCTION_LAYERS,
+  SESSION_LAYER_RANK,
   planSessionRender,
   resolveSessionPath,
   sourcesFromIdentityExport,
@@ -175,6 +178,55 @@ describe("session render planner", () => {
     expect(plan.files[0]?.path).toBe(join(projectRoot, ".cursor", "rules", "01-global-codewith.mdc"));
   });
 
+  test("plans Antigravity as project-owned .agents rules", () => {
+    const projectRoot = join(tmpRoot, "repo");
+    const plan = planSessionRender({
+      tool: "antigravity",
+      profile: "account999",
+      projectRoot,
+      sources: [globalIdentity, agentIdentity],
+    });
+
+    expect(plan.adapter.mode).toBe("antigravity-rules");
+    expect(plan.targetKind).toBe("project-root");
+    expect(plan.targetOwner.kind).toBe("project");
+    expect(plan.files.map((file) => file.relativePath)).toEqual([
+      ".agents/rules/01-global-codewith.md",
+      ".agents/rules/02-agent-marcus.md",
+    ]);
+    expect(plan.files[0]?.content).toContain("Global Codewith Identity");
+  });
+
+  test("blocks Antigravity planning until a repository root is explicit", () => {
+    const plan = planSessionRender({
+      tool: "antigravity",
+      profile: "account999",
+      targetHome: join(tmpRoot, "not-a-repo-root"),
+      sources: [globalIdentity],
+    });
+
+    expect(plan.blocked).toBe(true);
+    expect(plan.writable).toBe(false);
+    expect(plan.targetKind).toBe("blocked");
+    expect(plan.files).toEqual([]);
+    expect(plan.blockers.join("\n")).toContain("Antigravity rules are project-scoped");
+  });
+
+  test("rejects Antigravity rules over the provider file-size limit", () => {
+    expect(() =>
+      planSessionRender({
+        tool: "antigravity",
+        profile: "account999",
+        projectRoot: join(tmpRoot, "repo"),
+        sources: [{
+          id: "oversized",
+          content: "x".repeat(ANTIGRAVITY_RULE_FILE_CHAR_LIMIT + 1),
+          layer: "global",
+        }],
+      })
+    ).toThrow("limits rule files");
+  });
+
   test("blocks Cursor planning until a repository root is explicit", () => {
     const plan = planSessionRender({
       tool: "cursor",
@@ -228,6 +280,45 @@ describe("session render planner", () => {
     expect(plan.files[0]?.relativePath).toBe("CODEWITH.md");
     expect(plan.files[0]?.content).not.toContain("@./.hasna/instructions");
     expect(plan.files[0]?.content).toContain("Global Codewith Identity");
+  });
+
+  test("orders the managed prompt hierarchy from global to local", () => {
+    expect(SESSION_INSTRUCTION_LAYERS).toEqual([
+      "global",
+      "tool",
+      "account",
+      "machine",
+      "division",
+      "workspace",
+      "repo",
+      "path",
+      "agent",
+      "session",
+      "local",
+    ]);
+    expect(SESSION_LAYER_RANK.global).toBeLessThan(SESSION_LAYER_RANK.machine);
+    expect(SESSION_LAYER_RANK.machine).toBeLessThan(SESSION_LAYER_RANK.repo);
+    expect(SESSION_LAYER_RANK.repo).toBeLessThan(SESSION_LAYER_RANK.session);
+    expect(SESSION_LAYER_RANK.session).toBeLessThan(SESSION_LAYER_RANK.local);
+  });
+
+  test("normalizes legacy public layer aliases at render time", () => {
+    const plan = planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome: "/tmp/codex-account999",
+      sources: [
+        { id: "provider-alias", content: "provider alias", layer: "provider" },
+        { id: "project-alias", content: "project alias", layer: "project" },
+        { id: "identity-alias", content: "identity alias", layer: "identity" },
+      ],
+    });
+
+    expect(plan.manifest.sources.map((source) => [source.id, source.layer])).toEqual([
+      ["provider-alias", "tool"],
+      ["project-alias", "repo"],
+      ["identity-alias", "agent"],
+    ]);
   });
 
   test("plans Codewith native imports only when the runtime gate is enabled", () => {
@@ -326,7 +417,7 @@ describe("session render planner", () => {
       sources,
     });
 
-    expect(plan.manifest.sources.map((source) => source.layer)).toEqual(["tool", "project"]);
+    expect(plan.manifest.sources.map((source) => source.layer)).toEqual(["tool", "repo"]);
     expect(plan.manifest.sources[0]?.sourcePaths[0]?.path).toBe("providers/codewith.md");
     expect(plan.manifest.sources[1]?.owner).toMatchObject({ kind: "project" });
   });
@@ -398,7 +489,7 @@ describe("session render planner", () => {
     expect(sources[0]).toMatchObject({
       id: "kind-project-overlay",
       label: "Kind Project Overlay",
-      layer: "project",
+      layer: "repo",
       merge: "replace",
       order: 700,
     });

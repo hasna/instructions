@@ -2,21 +2,20 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { ConfigFilter, ExportManifest } from "../types/index.js";
-import { getDatabase, now } from "../db/database.js";
-import { listConfigs, getConfig } from "../db/configs.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 
 export interface ExportOptions {
   filter?: ConfigFilter;
   profileId?: string;
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
 }
 
 export async function exportConfigs(
   outputPath: string,
   opts: ExportOptions = {}
 ): Promise<{ path: string; count: number }> {
-  const d = opts.db || getDatabase();
-  const configs = listConfigs(opts.filter, d);
+  const store = opts.store ?? resolveConfigStore();
+  const configs = await store.listConfigs(opts.filter);
 
   const absOutput = resolve(outputPath);
   const tmpDir = join(tmpdir(), `configs-export-${Date.now()}`);
@@ -28,7 +27,7 @@ export async function exportConfigs(
     // Write manifest (metadata only, no content)
     const manifest: ExportManifest = {
       version: "1.0.0",
-      exported_at: now(),
+      exported_at: new Date().toISOString(),
       configs: configs.map(({ content: _content, ...meta }) => meta),
     };
     writeFileSync(join(tmpDir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf-8");

@@ -1,6 +1,5 @@
-import type { Database } from "bun:sqlite";
 import type { Config, ProfileVariables } from "../types/index.js";
-import { createConfig, getConfig, updateConfig } from "../db/configs.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 
 export const PROJECT_DASHBOARD_STANDARD_SLUG = "agent-managed-project-dashboard-standard";
 
@@ -82,7 +81,7 @@ ids, passport numbers, credentials, and contract clauses unless an explicit
 approved storage policy exists.
 `;
 
-export function ensureProjectDashboardStandardConfig(db?: Database): Config {
+export async function ensureProjectDashboardStandardConfig(store: ConfigStore = resolveConfigStore()): Promise<Config> {
   const input = {
     name: "Agent Managed Project Dashboard Standard",
     category: "workspace" as const,
@@ -95,7 +94,7 @@ export function ensureProjectDashboardStandardConfig(db?: Database): Config {
   };
 
   try {
-    const existing = getConfig(PROJECT_DASHBOARD_STANDARD_SLUG, db);
+    const existing = await store.getConfig(PROJECT_DASHBOARD_STANDARD_SLUG);
     if (
       existing.content !== input.content
       || existing.description !== input.description
@@ -104,10 +103,10 @@ export function ensureProjectDashboardStandardConfig(db?: Database): Config {
       || existing.format !== input.format
       || existing.kind !== input.kind
     ) {
-      return updateConfig(existing.id, input, db);
+      return await store.updateConfig(existing.id, input);
     }
     return existing;
   } catch {
-    return createConfig(input, db);
+    return await store.createConfig(input);
   }
 }

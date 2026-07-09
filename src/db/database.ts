@@ -1,20 +1,16 @@
 import { Database } from "bun:sqlite";
-import { cpSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 function getDbPath(): string {
-  if (process.env["HASNA_CONFIGS_DB_PATH"]) {
-    return process.env["HASNA_CONFIGS_DB_PATH"];
+  if (process.env["HASNA_INSTRUCTIONS_DB_PATH"]) {
+    return process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   }
-  if (process.env["CONFIGS_DB_PATH"]) {
-    return process.env["CONFIGS_DB_PATH"]; // backward compat
-  }
-  migrateDotfile();
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-  const dir = join(home, ".hasna", "configs");
+  const dir = join(home, ".hasna", "instructions");
   mkdirSync(dir, { recursive: true });
-  return join(dir, "configs.db");
+  return join(dir, "instructions.db");
 }
 
 export function uuid(): string {
@@ -133,6 +129,22 @@ export function resetDatabase(): void {
   _db = null;
 }
 
+/**
+ * Destroy the on-disk local database: close the handle and delete the db file
+ * plus its WAL/SHM sidecars. Used by `init --force`. Resolves the path from the
+ * db module (honoring HASNA_INSTRUCTIONS_DB_PATH); a no-op for the
+ * in-memory (`:memory:`) database. Local-only — the CloudConfigStore never calls
+ * this (destroying the shared cloud store from a client is forbidden).
+ */
+export function resetLocalDatabase(): void {
+  resetDatabase();
+  const dbPath = getDbPath();
+  if (dbPath === ":memory:") return;
+  for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(p)) rmSync(p);
+  }
+}
+
 function applyMigrations(db: Database): void {
   let currentVersion = 0;
   try {
@@ -163,23 +175,39 @@ function ensureFeedbackTable(db: Database): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+  // Older databases created the feedback table before these columns existed.
+  // CREATE TABLE IF NOT EXISTS won't backfill them, so insertFeedback would fail
+  // with "table feedback has no column named category". Add any missing column
+  // idempotently so both fresh and legacy on-disk stores accept the same insert.
+  const existing = new Set(
+    db
+      .query<{ name: string }, []>("PRAGMA table_info(feedback)")
+      .all()
+      .map((r) => r.name),
+  );
+  const required: Array<[string, string]> = [
+    ["email", "TEXT"],
+    ["category", "TEXT DEFAULT 'general'"],
+    ["version", "TEXT"],
+    ["machine_id", "TEXT"],
+    ["created_at", "TEXT"],
+  ];
+  for (const [name, def] of required) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE feedback ADD COLUMN ${name} ${def}`);
+  }
 }
 
-function migrateDotfile(): void {
-  const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-  const oldDirs = [join(home, ".open-configs"), join(home, ".configs")];
-  const newDir = join(home, ".hasna", "configs");
-  if (existsSync(newDir)) return;
+export interface FeedbackInput {
+  message: string;
+  email?: string | null;
+  category?: string | null;
+  version?: string | null;
+}
 
-  for (const oldDir of oldDirs) {
-    if (!existsSync(oldDir)) continue;
-    try {
-      if (!statSync(oldDir).isDirectory()) continue;
-      mkdirSync(join(home, ".hasna"), { recursive: true });
-      cpSync(oldDir, newDir, { recursive: true, force: false });
-      return;
-    } catch {
-      // Ignore legacy directories that cannot be copied.
-    }
-  }
+export function insertFeedback(input: FeedbackInput, db?: Database): void {
+  const d = db || getDatabase();
+  d.run(
+    "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
+    [input.message, input.email ?? null, input.category ?? "general", input.version ?? null],
+  );
 }

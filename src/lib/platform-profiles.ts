@@ -1,8 +1,14 @@
-import type { Database } from "bun:sqlite";
 import type { CreateProfileInput, Profile } from "../types/index.js";
-import { addConfigToProfile, createProfile, getProfile, profileHasSelectors, updateProfile } from "../db/profiles.js";
-import { listConfigs } from "../db/configs.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { PROJECT_DASHBOARD_PROFILE_VARIABLES } from "./project-dashboard-standard.js";
+
+/** Pure selector check (mirrors db profileHasSelectors without touching sqlite). */
+function profileHasSelectors(profile: Pick<Profile, "selectors">): boolean {
+  const selectors = profile.selectors ?? {};
+  return (selectors.os?.length ?? 0) > 0
+    || (selectors.arch?.length ?? 0) > 0
+    || (selectors.hostnames?.length ?? 0) > 0;
+}
 
 export const PLATFORM_PROFILE_PRESETS: CreateProfileInput[] = [
   {
@@ -31,27 +37,27 @@ export const PLATFORM_PROFILE_PRESETS: CreateProfileInput[] = [
   },
 ];
 
-export function ensurePlatformProfiles(db?: Database): Profile[] {
-  const configs = listConfigs(undefined, db);
+export async function ensurePlatformProfiles(store: ConfigStore = resolveConfigStore()): Promise<Profile[]> {
+  const configs = await store.listConfigs();
   const ensured: Profile[] = [];
 
   for (const preset of PLATFORM_PROFILE_PRESETS) {
     let profile: Profile;
     try {
-      profile = getProfile(preset.name, db);
+      profile = await store.getProfile(preset.name);
       if (!profileHasSelectors(profile) || Object.keys(profile.variables).length === 0) {
-        profile = updateProfile(profile.id, {
+        profile = await store.updateProfile(profile.id, {
           description: profile.description ?? preset.description,
           selectors: profileHasSelectors(profile) ? profile.selectors : preset.selectors,
           variables: Object.keys(profile.variables).length > 0 ? profile.variables : preset.variables,
-        }, db);
+        });
       }
     } catch {
-      profile = createProfile(preset, db);
+      profile = await store.createProfile(preset);
     }
 
     for (const config of configs) {
-      addConfigToProfile(profile.id, config.id, db);
+      await store.addConfigToProfile(profile.id, config.id);
     }
     ensured.push(profile);
   }

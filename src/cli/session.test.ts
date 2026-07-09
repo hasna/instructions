@@ -25,7 +25,7 @@ describe("configs session CLI", () => {
     const result = runCli(["session", "plan", "--help"]);
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("global|provider|tool|account|identity|agent|project|local");
+    expect(result.stdout).toContain("global|provider|tool|account|machine|division|workspace|project|repo|path|identity|agent|session|local");
     expect(result.stdout).toContain("--project-root");
     expect(result.stdout).toContain("--allow-empty-sources");
   });
@@ -209,7 +209,7 @@ describe("configs session CLI", () => {
       expect(result.status).toBe(0);
       const plan = JSON.parse(result.stdout) as { manifest: { sources: Array<{ id: string; layer: string }> } };
       expect(plan.manifest.sources.map((source) => source.id)).toEqual(["provider-codewith", "project-cli"]);
-      expect(plan.manifest.sources.map((source) => source.layer)).toEqual(["tool", "project"]);
+      expect(plan.manifest.sources.map((source) => source.layer)).toEqual(["tool", "repo"]);
       expect(result.stdout).not.toContain("Claude only.");
     } finally {
       rmSync(home, { recursive: true, force: true });

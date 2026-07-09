@@ -1,9 +1,9 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, SyncResult } from "../types/index.js";
-import { getDatabase } from "../db/database.js";
-import { createConfig, listConfigs, updateConfig } from "../db/configs.js";
+import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { applyConfig, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
+import { isRetiredOrUnsupportedConfigAgent, retiredOrUnsupportedAgentReason } from "./config-agents.js";
 import { redactContent } from "./redact.js";
 import { detectMachineContext, templateizeMachineContent } from "./machine.js";
 import { applyTransform } from "./transforms.js";
@@ -31,7 +31,8 @@ export const CLAUDE_PROMPT_OUTPUTS: ConfigOutput[] = [
   { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
   { agent: "codewith", target_path: "~/.codewith/CODEWITH.md", transform: "codex-flat" },
   { agent: "opencode", target_path: "~/.config/opencode/AGENTS.md", transform: "opencode-flat" },
-  { agent: "aicopilot", target_path: "~/.config/aicopilot/AGENTS.md", transform: "opencode-flat" },
+  { agent: "aicopilot", target_path: "~/.config/aicopilot/AICOPILOT.md", transform: "codex-flat" },
+  { agent: "antigravity", target_path: "~/.gemini/GEMINI.md", transform: "codex-flat" },
   { agent: "cursor", target_path: "~/.cursor/rules/claude.mdc", transform: "cursor-mdc" },
 ];
 
@@ -115,12 +116,15 @@ export const KNOWN_CONFIGS: KnownConfig[] = [
   { path: "~/.codewith/config.toml",      name: "codewith-config",           category: "mcp",   agent: "codewith", format: "toml", optional: true, description: "codewith config (Codex fork, includes Skills MCP server entries)" },
 
   // ── aicopilot ──────────────────────────────────────────────────────────────
-  { path: "~/.config/aicopilot/AGENTS.md",    name: "aicopilot-agents-md",   category: "rules", agent: "aicopilot", format: "markdown", optional: true },
-  { path: "~/.config/aicopilot/opencode.json", name: "aicopilot-config",     category: "mcp",   agent: "aicopilot", format: "json", optional: true, description: "AI Copilot config (OpenCode fork, includes Skills MCP server entries)" },
+  { path: "~/.config/aicopilot/AICOPILOT.md", name: "aicopilot-aicopilot-md", category: "rules", agent: "aicopilot", format: "markdown", optional: true },
+  { path: "~/.config/aicopilot/aicopilot.json", name: "aicopilot-config",    category: "mcp",   agent: "aicopilot", format: "json", optional: true, description: "AI Copilot config (includes instructions and MCP server entries)" },
 
-  // ── Gemini ─────────────────────────────────────────────────────────────────
-  { path: "~/.gemini/settings.json",     name: "gemini-settings",          category: "agent",  agent: "gemini", format: "json" },
-  { path: "~/.gemini/GEMINI.md",         name: "gemini-gemini-md",         category: "rules",  agent: "gemini", format: "markdown", optional: true },
+  // ── Antigravity ────────────────────────────────────────────────────────────
+  // Google Antigravity's current docs keep the global rules/MCP files under
+  // legacy-named ~/.gemini paths. These entries belong to the antigravity
+  // agent target; they do not re-enable a retired gemini target.
+  { path: "~/.gemini/GEMINI.md",          name: "antigravity-global-rules", category: "rules",  agent: "antigravity", format: "markdown", optional: true, description: "Google Antigravity global rules file" },
+  { path: "~/.gemini/config/mcp_config.json", name: "antigravity-global-mcp", category: "mcp", agent: "antigravity", format: "json", optional: true, description: "Google Antigravity global MCP server entries" },
 
   // ── MCP ────────────────────────────────────────────────────────────────────
   { path: "~/.claude.json",              name: "claude-json",              category: "mcp",    agent: "claude", format: "json", description: "Claude Code global config (includes MCP server entries)" },
@@ -149,24 +153,26 @@ export const PROJECT_CONFIG_FILES = [
   { file: ".mcp.json",                 category: "mcp" as ConfigCategory,    agent: "claude" as ConfigAgent, format: "json" as ConfigFormat },
   { file: "AGENTS.md",                 category: "rules" as ConfigCategory,  agent: "codex" as ConfigAgent,  format: "markdown" as ConfigFormat },
   { file: ".codex/AGENTS.md",          category: "rules" as ConfigCategory,  agent: "codex" as ConfigAgent,  format: "markdown" as ConfigFormat },
-  { file: "GEMINI.md",                 category: "rules" as ConfigCategory,  agent: "gemini" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".opencode/AGENTS.md",       category: "rules" as ConfigCategory,  agent: "opencode" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".codewith/CODEWITH.md",      category: "rules" as ConfigCategory,  agent: "codewith" as ConfigAgent, format: "markdown" as ConfigFormat },
+  { file: ".aicopilot/AICOPILOT.md",    category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },
+  { file: "AICOPILOT.md",               category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".cursor/mcp.json",          category: "mcp" as ConfigCategory,    agent: "cursor" as ConfigAgent, format: "json" as ConfigFormat },
+  { file: ".agents/mcp_config.json",    category: "mcp" as ConfigCategory,    agent: "antigravity" as ConfigAgent, format: "json" as ConfigFormat },
 ];
 
 export interface SyncProjectOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   dryRun?: boolean;
   projectDir: string;
 }
 
 export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult> {
-  const d = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const absDir = expandPath(opts.projectDir);
   const projectName = absDir.split("/").pop() || "project";
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
-  const allConfigs = listConfigs(undefined, d);
+  const allConfigs = await store.listConfigs();
   const machine = detectMachineContext();
 
   // Sync project config files
@@ -186,10 +192,10 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
       const existing = allConfigs.find((c) => c.target_path === targetPath || c.slug === slug);
 
       if (!existing) {
-        if (!opts.dryRun) createConfig({ name, category: pf.category, agent: pf.agent, format: pf.format, content, target_path: targetPath, is_template: isTemplate }, d);
+        if (!opts.dryRun) await store.createConfig({ name, category: pf.category, agent: pf.agent, format: pf.format, content, target_path: targetPath, is_template: isTemplate });
         result.added++;
       } else if (existing.content !== content) {
-        if (!opts.dryRun) updateConfig(existing.id, { content, is_template: isTemplate }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { content, is_template: isTemplate });
         result.updated++;
       } else {
         result.unchanged++;
@@ -197,26 +203,28 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
     } catch { result.skipped.push(pf.file); }
   }
 
-  // Also sync .claude/rules/*.md or *.mdc if exists
-  const rulesDir = join(absDir, ".claude", "rules");
-  if (existsSync(rulesDir)) {
-    const mdFiles = readdirSync(rulesDir).filter((f) => f.endsWith(".md") || f.endsWith(".mdc"));
+  for (const ruleDir of [
+    { dir: join(absDir, ".claude", "rules"), agent: "claude" as ConfigAgent, namePrefix: "rules" },
+    { dir: join(absDir, ".agents", "rules"), agent: "antigravity" as ConfigAgent, namePrefix: "antigravity-rules" },
+  ]) {
+    if (!existsSync(ruleDir.dir)) continue;
+    const mdFiles = readdirSync(ruleDir.dir).filter((f) => f.endsWith(".md") || f.endsWith(".mdc"));
     for (const f of mdFiles) {
-      const abs = join(rulesDir, f);
+      const abs = join(ruleDir.dir, f);
       const raw = readFileSync(abs, "utf-8");
       const redacted = redactContent(raw, "markdown");
       const machineAware = templateizeMachineContent(redacted.content, machine);
       const content = machineAware.content;
       const isTemplate = redacted.isTemplate || machineAware.changed;
-      const name = `${projectName}/rules/${f}`;
+      const name = `${projectName}/${ruleDir.namePrefix}/${f}`;
       const targetPath = abs.startsWith(getConfigHome()) ? abs.replace(getConfigHome(), "~") : abs;
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       const existing = allConfigs.find((c) => c.target_path === targetPath || c.slug === slug);
       if (!existing) {
-        if (!opts.dryRun) createConfig({ name, category: "rules", agent: "claude", format: "markdown", content, target_path: targetPath, is_template: isTemplate }, d);
+        if (!opts.dryRun) await store.createConfig({ name, category: "rules", agent: ruleDir.agent, format: "markdown", content, target_path: targetPath, is_template: isTemplate });
         result.added++;
       } else if (existing.content !== content) {
-        if (!opts.dryRun) updateConfig(existing.id, { content, is_template: isTemplate }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { content, is_template: isTemplate });
         result.updated++;
       } else { result.unchanged++; }
     }
@@ -226,14 +234,14 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
 }
 
 export interface SyncKnownOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   dryRun?: boolean;
   agent?: ConfigAgent;
   category?: ConfigCategory;
 }
 
 export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult> {
-  const d = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
   const home = getConfigHome();
   const machine = detectMachineContext();
@@ -242,7 +250,7 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
   if (opts.agent) targets = targets.filter((k) => k.agent === opts.agent);
   if (opts.category) targets = targets.filter((k) => k.category === opts.category);
 
-  const allConfigs = listConfigs(undefined, d);
+  const allConfigs = await store.listConfigs();
   const existingOutputOwners = outputOwnerIdsByTarget(allConfigs);
 
   for (const known of targets) {
@@ -269,13 +277,13 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
         const existing = allConfigs.find((c) => c.target_path === targetPath || c.slug === slug);
         const outputs = known.agent === "claude" ? claudeRuleOutputs(f) : known.outputs;
         if (!existing) {
-          if (!opts.dryRun) createConfig({ name, category: known.category, agent: known.agent, format: "markdown", content, target_path: targetPath, is_template: isTemplate, outputs }, d);
+          if (!opts.dryRun) await store.createConfig({ name, category: known.category, agent: known.agent, format: "markdown", content, target_path: targetPath, is_template: isTemplate, outputs });
           result.added++;
         } else if (existing.content !== content) {
-          if (!opts.dryRun) updateConfig(existing.id, { content, is_template: isTemplate, outputs }, d);
+          if (!opts.dryRun) await store.updateConfig(existing.id, { content, is_template: isTemplate, outputs });
           result.updated++;
         } else if (!outputsEqual(existing.outputs, outputs)) {
-          if (!opts.dryRun) updateConfig(existing.id, { outputs }, d);
+          if (!opts.dryRun) await store.updateConfig(existing.id, { outputs });
           result.updated++;
         } else {
           result.unchanged++;
@@ -305,7 +313,7 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
 
       if (!existing) {
         if (!opts.dryRun) {
-          createConfig({
+          await store.createConfig({
             name: known.name,
             category: known.category,
             agent: known.agent,
@@ -316,14 +324,14 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
             description: known.description,
             is_template: isTemplate,
             outputs: known.outputs,
-          }, d);
+          });
         }
         result.added++;
       } else if (existing.content !== content) {
-        if (!opts.dryRun) updateConfig(existing.id, { content, is_template: isTemplate, outputs: known.outputs }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { content, is_template: isTemplate, outputs: known.outputs });
         result.updated++;
       } else if (!outputsEqual(existing.outputs, known.outputs)) {
-        if (!opts.dryRun) updateConfig(existing.id, { outputs: known.outputs }, d);
+        if (!opts.dryRun) await store.updateConfig(existing.id, { outputs: known.outputs });
         result.updated++;
       } else {
         result.unchanged++;
@@ -337,17 +345,17 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
 
 // ── Apply configs back to disk ────────────────────────────────────────────────
 export interface SyncToDiskOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
   dryRun?: boolean;
   agent?: ConfigAgent;
   category?: ConfigCategory;
 }
 
 export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResult> {
-  const d = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
 
-  const allFileConfigs = listConfigs({ kind: "file", ...opts.category ? { category: opts.category } : {} }, d);
+  const allFileConfigs = await store.listConfigs({ kind: "file", ...opts.category ? { category: opts.category } : {} });
   const outputOwners = outputOwnerIdsByTarget(allFileConfigs);
   let configs = allFileConfigs.filter((config) => {
     return !isGeneratedOutputTarget(config, outputOwners);
@@ -358,8 +366,12 @@ export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResu
 
   for (const config of configs) {
     if (!config.target_path && config.outputs.length === 0) continue;
+    if (isRetiredOrUnsupportedConfigAgent(config.agent)) {
+      result.skipped.push(`${config.slug} (${retiredOrUnsupportedAgentReason(config.agent)})`);
+      continue;
+    }
     try {
-      const r = await applyConfig(config, { dryRun: opts.dryRun, db: d, outputAgent: opts.agent });
+      const r = await applyConfig(config, { dryRun: opts.dryRun, store, outputAgent: opts.agent });
       r.changed ? result.updated++ : result.unchanged++;
     } catch {
       result.skipped.push(config.target_path ?? config.id);
@@ -370,7 +382,7 @@ export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResu
 
 // ── Diff a config against disk ────────────────────────────────────────────────
 export interface DiffConfigOptions {
-  db?: ReturnType<typeof getDatabase>;
+  store?: ConfigStore;
 }
 
 function buildDiff(expectedContent: string, targetPath: string): string {
@@ -395,13 +407,13 @@ function buildDiff(expectedContent: string, targetPath: string): string {
   return lines.join("\n");
 }
 
-export function diffConfig(config: Config, opts: DiffConfigOptions = {}): string {
+export async function diffConfig(config: Config, opts: DiffConfigOptions = {}): Promise<string> {
   if (!config.target_path && config.outputs.length === 0) return "(reference — no target path)";
 
   const diffs: string[] = [];
-  const db = opts.db || getDatabase();
+  const store = opts.store ?? resolveConfigStore();
   const contextConfigs = config.outputs.length > 0 || config.target_path
-    ? listConfigs(undefined, db)
+    ? await store.listConfigs()
     : [config];
 
   if (isGeneratedOutputTarget(config, outputOwnerIdsByTarget(contextConfigs))) {
@@ -427,9 +439,9 @@ export function diffConfig(config: Config, opts: DiffConfigOptions = {}): string
 // ── Helpers (kept for tests + add command) ────────────────────────────────────
 export function detectCategory(filePath: string): ConfigCategory {
   const p = filePath.toLowerCase().replace(getConfigHome(), "~");
-  if (p.includes("/.claude/rules/") || p.includes("/.cursor/rules/") || p.endsWith("claude.md") || p.endsWith("agents.md") || p.endsWith("codewith.md") || p.endsWith("gemini.md") || p.endsWith(".mdc")) return "rules";
-  if (p.includes("/.claude/") || p.includes("/.codex/") || p.includes("/.gemini/") || p.includes("/.cursor/") || p.includes("/.config/opencode/") || p.includes("/.codewith/") || p.includes("/.config/aicopilot/")) return "agent";
+  if (p.includes("/.claude/rules/") || p.includes("/.cursor/rules/") || p.includes("/.agents/rules/") || p.endsWith("claude.md") || p.endsWith("agents.md") || p.endsWith("codewith.md") || p.endsWith("aicopilot.md") || p.endsWith("/.gemini/gemini.md") || p.endsWith(".mdc")) return "rules";
   if (p.includes(".mcp.json") || p.includes("mcp")) return "mcp";
+  if (p.includes("/.claude/") || p.includes("/.codex/") || p.includes("/.antigravity/") || p.includes("/.agents/") || p.includes("/.cursor/") || p.includes("/.config/opencode/") || p.includes("/.codewith/") || p.includes("/.config/aicopilot/")) return "agent";
   if (p.includes(".zshrc") || p.includes(".zprofile") || p.includes(".bashrc") || p.includes(".bash_profile")) return "shell";
   if (p.includes(".gitconfig") || p.includes(".gitignore")) return "git";
   if (p.includes(".npmrc") || p.includes("tsconfig") || p.includes("bunfig")) return "tools";
@@ -439,13 +451,15 @@ export function detectCategory(filePath: string): ConfigCategory {
 
 export function detectAgent(filePath: string): ConfigAgent {
   const p = filePath.toLowerCase().replace(getConfigHome(), "~");
+  if (p.endsWith("/.gemini/gemini.md") || p.endsWith("/.gemini/config/mcp_config.json")) return "antigravity";
+  if (p.includes("/.agents/rules/") || p.endsWith("/.agents/mcp_config.json")) return "antigravity";
   if (p.includes("/.claude/") || p.endsWith("claude.md")) return "claude";
   if (p.includes("/.config/opencode/")) return "opencode";
   if (p.includes("/.cursor/") || p.endsWith(".mdc")) return "cursor";
   if (p.includes("/.codewith/") || p.endsWith("codewith.md")) return "codewith";
   if (p.includes("/.config/aicopilot/")) return "aicopilot";
+  if (p.includes("/.antigravity/")) return "antigravity";
   if (p.includes("/.codex/") || p.endsWith("agents.md")) return "codex";
-  if (p.includes("/.gemini/") || p.endsWith("gemini.md")) return "gemini";
   if (p.includes(".zshrc") || p.includes(".zprofile") || p.includes(".bashrc")) return "zsh";
   if (p.includes(".gitconfig") || p.includes(".gitignore")) return "git";
   if (p.includes(".npmrc")) return "npm";

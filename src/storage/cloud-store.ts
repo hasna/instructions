@@ -18,6 +18,7 @@ import {
   type ConfigSnapshot,
   type CreateConfigInput,
   type CreateProfileInput,
+  type Machine,
   type Profile,
   type ProfileSelector,
   type ProfileVariables,
@@ -270,6 +271,27 @@ export async function createSnapshot(
   return { id: row.id, config_id: row.config_id, content: row.content, version: Number(row.version), created_at: toIso(row.created_at) };
 }
 
+export async function createSnapshotContent(
+  client: TypedQueryClient,
+  idOrSlug: string,
+  content: string,
+  version: number,
+): Promise<ConfigSnapshot> {
+  const config = await getConfig(client, idOrSlug);
+  const id = randomUUID();
+  await client.execute(
+    `INSERT INTO config_snapshots (id, config_id, content, version, created_at)
+     VALUES ($1,$2,$3,$4,now())`,
+    [id, config.id, content, version],
+  );
+  const row = await client.get<{ id: string; config_id: string; content: string; version: number; created_at: unknown }>(
+    "SELECT id, config_id, content, version, created_at FROM config_snapshots WHERE id = $1",
+    [id],
+  );
+  if (!row) throw new Error("snapshot insert failed");
+  return { id: row.id, config_id: row.config_id, content: row.content, version: Number(row.version), created_at: toIso(row.created_at) };
+}
+
 export async function listSnapshots(
   client: TypedQueryClient,
   idOrSlug: string,
@@ -280,6 +302,45 @@ export async function listSnapshots(
     [config.id],
   );
   return rows.map((r) => ({ id: r.id, config_id: r.config_id, content: r.content, version: Number(r.version), created_at: toIso(r.created_at) }));
+}
+
+export async function getSnapshotById(
+  client: TypedQueryClient,
+  snapshotId: string,
+): Promise<ConfigSnapshot | null> {
+  const row = await client.get<{ id: string; config_id: string; content: string; version: number; created_at: unknown }>(
+    "SELECT id, config_id, content, version, created_at FROM config_snapshots WHERE id = $1",
+    [snapshotId],
+  );
+  return row ? { id: row.id, config_id: row.config_id, content: row.content, version: Number(row.version), created_at: toIso(row.created_at) } : null;
+}
+
+export async function getSnapshotByVersion(
+  client: TypedQueryClient,
+  idOrSlug: string,
+  version: number,
+): Promise<ConfigSnapshot | null> {
+  const config = await getConfig(client, idOrSlug);
+  const row = await client.get<{ id: string; config_id: string; content: string; version: number; created_at: unknown }>(
+    "SELECT id, config_id, content, version, created_at FROM config_snapshots WHERE config_id = $1 AND version = $2",
+    [config.id, version],
+  );
+  return row ? { id: row.id, config_id: row.config_id, content: row.content, version: Number(row.version), created_at: toIso(row.created_at) } : null;
+}
+
+export async function pruneSnapshots(
+  client: TypedQueryClient,
+  idOrSlug: string,
+  keep = 10,
+): Promise<number> {
+  const config = await getConfig(client, idOrSlug);
+  const result = await client.query(
+    `DELETE FROM config_snapshots WHERE config_id = $1 AND id NOT IN (
+       SELECT id FROM config_snapshots WHERE config_id = $1 ORDER BY version DESC LIMIT $2
+     )`,
+    [config.id, keep],
+  );
+  return result.rowCount ?? 0;
 }
 
 // ── Profiles ─────────────────────────────────────────────────────────────────
@@ -395,4 +456,136 @@ export async function updateProfile(
 export async function deleteProfile(client: TypedQueryClient, idOrSlug: string): Promise<void> {
   const existing = await getProfile(client, idOrSlug);
   await client.execute("DELETE FROM profiles WHERE id = $1", [existing.id]);
+}
+
+// ── Profile membership ───────────────────────────────────────────────────────
+
+export async function addConfigToProfile(
+  client: TypedQueryClient,
+  profileIdOrSlug: string,
+  configId: string,
+): Promise<void> {
+  const profile = await getProfile(client, profileIdOrSlug);
+  const maxRow = await client.get<{ max_order: number | null }>(
+    "SELECT MAX(sort_order) AS max_order FROM profile_configs WHERE profile_id = $1",
+    [profile.id],
+  );
+  const order = (maxRow?.max_order ?? -1) + 1;
+  await client.execute(
+    `INSERT INTO profile_configs (profile_id, config_id, sort_order)
+     VALUES ($1,$2,$3) ON CONFLICT (profile_id, config_id) DO NOTHING`,
+    [profile.id, configId, order],
+  );
+}
+
+export async function removeConfigFromProfile(
+  client: TypedQueryClient,
+  profileIdOrSlug: string,
+  configId: string,
+): Promise<void> {
+  const profile = await getProfile(client, profileIdOrSlug);
+  await client.execute(
+    "DELETE FROM profile_configs WHERE profile_id = $1 AND config_id = $2",
+    [profile.id, configId],
+  );
+}
+
+// ── Profile resolution (machine-aware) ───────────────────────────────────────
+
+function profileHasSelectors(selectors: ProfileSelector): boolean {
+  return (selectors.os?.length ?? 0) > 0
+    || (selectors.arch?.length ?? 0) > 0
+    || (selectors.hostnames?.length ?? 0) > 0;
+}
+
+export async function resolveProfileForMachine(
+  client: TypedQueryClient,
+  machine: { hostname?: string; os?: string; arch?: string },
+): Promise<Profile | null> {
+  const profiles = (await listProfiles(client)).filter((p) => profileHasSelectors(p.selectors));
+  const host = (machine.hostname ?? "").trim().toLowerCase();
+  const os = (machine.os ?? "").trim().toLowerCase();
+  const arch = (machine.arch ?? "").trim().toLowerCase();
+  const matches = profiles
+    .filter((p) => {
+      const s = p.selectors;
+      const osOk = !s.os?.length || s.os.some((c) => c.trim().toLowerCase() === os);
+      const archOk = !s.arch?.length || s.arch.some((c) => c.trim().toLowerCase() === arch);
+      const hostOk = !s.hostnames?.length || s.hostnames.some((c) => c.trim().toLowerCase() === host);
+      return osOk && archOk && hostOk;
+    })
+    .map((p) => ({
+      profile: p,
+      score: (p.selectors.hostnames?.length ? 100 : 0) + (p.selectors.os?.length ? 10 : 0) + (p.selectors.arch?.length ? 10 : 0),
+    }))
+    .sort((a, b) => b.score - a.score || a.profile.name.localeCompare(b.profile.name));
+  return matches[0]?.profile ?? null;
+}
+
+// ── Machines ─────────────────────────────────────────────────────────────────
+
+interface MachineDbRow {
+  id: string;
+  hostname: string;
+  os: string | null;
+  arch: string | null;
+  last_applied_at: unknown;
+  created_at: unknown;
+}
+
+function rowToMachine(row: MachineDbRow): Machine {
+  return {
+    id: row.id,
+    hostname: row.hostname,
+    os: row.os,
+    arch: row.arch,
+    last_applied_at: row.last_applied_at == null ? null : toIso(row.last_applied_at),
+    created_at: toIso(row.created_at),
+  };
+}
+
+export async function listMachines(client: TypedQueryClient): Promise<Machine[]> {
+  const rows = await client.many<MachineDbRow>(
+    "SELECT * FROM machines ORDER BY last_applied_at DESC NULLS LAST",
+  );
+  return rows.map(rowToMachine);
+}
+
+export async function registerMachine(
+  client: TypedQueryClient,
+  hostname: string,
+  os: string | null,
+  arch: string | null,
+): Promise<Machine> {
+  const existing = await client.get<MachineDbRow>("SELECT * FROM machines WHERE hostname = $1", [hostname]);
+  if (existing) {
+    if (existing.os !== os || existing.arch !== arch) {
+      await client.execute("UPDATE machines SET os = $1, arch = $2 WHERE hostname = $3", [os, arch, hostname]);
+    }
+    const row = await client.get<MachineDbRow>("SELECT * FROM machines WHERE hostname = $1", [hostname]);
+    return rowToMachine(row!);
+  }
+  const id = randomUUID();
+  await client.execute(
+    "INSERT INTO machines (id, hostname, os, arch, last_applied_at, created_at) VALUES ($1,$2,$3,$4,NULL,now())",
+    [id, hostname, os, arch],
+  );
+  const row = await client.get<MachineDbRow>("SELECT * FROM machines WHERE id = $1", [id]);
+  return rowToMachine(row!);
+}
+
+export async function updateMachineApplied(client: TypedQueryClient, hostname: string): Promise<void> {
+  await client.execute("UPDATE machines SET last_applied_at = now() WHERE hostname = $1", [hostname]);
+}
+
+// ── Feedback ─────────────────────────────────────────────────────────────────
+
+export async function insertFeedback(
+  client: TypedQueryClient,
+  input: { message: string; email?: string | null; category?: string | null; version?: string | null },
+): Promise<void> {
+  await client.execute(
+    "INSERT INTO feedback (id, message, email, category, version, created_at) VALUES ($1,$2,$3,$4,$5,now())",
+    [randomUUID(), input.message, input.email ?? null, input.category ?? "general", input.version ?? null],
+  );
 }
