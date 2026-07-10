@@ -9,6 +9,7 @@ import { planSessionRender, sourceFromConfig } from "./session-render";
 import {
   GLOBAL_AGENT_RULES_STANDARD_CONTENT,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
+  NO_BRITTLE_HARDCODING_RULE,
   ensureGlobalAgentRulesStandardConfig,
 } from "./global-agent-rules-standard";
 
@@ -40,6 +41,9 @@ describe("global agent rules standard", () => {
     expect(content).toContain("Never mutate shared checkouts");
     expect(content).toContain("PR-first landing");
     expect(content).toMatch(/Never push directly to `main`, the default branch, or any protected branch/);
+    expect(content).toContain(NO_BRITTLE_HARDCODING_RULE);
+    expect(content).toContain("medium and large applications");
+    expect(content).toContain("temporary compatibility shims are allowed only when scoped, named, and justified");
     expect(content).toContain("Act autonomously");
     expect(content).toContain("owning\n   CLIs, packages, and workflows");
     expect(content).toContain("destructive decisions, secret-bearing decisions, user-only authority");
@@ -92,7 +96,31 @@ describe("global agent rules standard", () => {
     expect(plan.files[0]?.content).toContain("Global Coding Agent Rules Standard");
     expect(plan.files[0]?.content).toContain("Never mutate shared checkouts");
     expect(plan.files[0]?.content).toContain("conversations blockers");
+    expect(plan.files[0]?.content).toContain(NO_BRITTLE_HARDCODING_RULE);
     expect(plan.manifest.sources[0]?.layer).toBe("global");
+  });
+
+  test("renders the no-hardcoding rule into Codewith and Antigravity plans", async () => {
+    const config = await ensureGlobalAgentRulesStandardConfig(new LocalConfigStore(db));
+    const source = sourceFromConfig(config);
+
+    const codewith = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: "/tmp/codewith-account999",
+      sources: [source],
+    });
+    expect(codewith.files[0]?.relativePath).toBe("CODEWITH.md");
+    expect(codewith.files[0]?.content).toContain(NO_BRITTLE_HARDCODING_RULE);
+
+    const antigravity = planSessionRender({
+      tool: "antigravity",
+      profile: "account999",
+      projectRoot: "/tmp/repo",
+      sources: [source],
+    });
+    expect(antigravity.files[0]?.relativePath).toBe(".agents/rules/01-global-agent-rules-standard.md");
+    expect(antigravity.files[0]?.content).toContain(NO_BRITTLE_HARDCODING_RULE);
   });
 
   test("platform profiles link the global rules standard when present", async () => {
