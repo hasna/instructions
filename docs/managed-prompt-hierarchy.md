@@ -68,14 +68,20 @@ The managed global prompt must include these rules:
 3. PR-first landing: normal changes go through branch/worktree plus PR.
 4. Never push directly to `main`, the default branch, or any protected branch
    unless the user explicitly instructs that exact repo and operation.
-5. Agents act autonomously: diagnose, repair, validate, and iterate on the
+5. Agents must not hardcode brittle values, paths, provider names, config,
+   business logic, environment-specific IDs, or one-off mappings when a
+   source-of-truth, schema/config-driven, package-owned, reusable, or cleaner
+   abstraction exists. This is especially strict in medium and large
+   applications; explicit constants, fixtures, tests, and temporary
+   compatibility shims are allowed only when scoped, named, and justified.
+6. Agents act autonomously: diagnose, repair, validate, and iterate on the
    owning CLIs, packages, and workflows before asking the user. Ask only when
    blocked by destructive decisions, secret-bearing decisions, user-only
    authority, or external state the agent cannot safely obtain.
-6. Use Hasna CLIs/packages as source of truth: `todos`, `conversations`,
+7. Use Hasna CLIs/packages as source of truth: `todos`, `conversations`,
    `mementos`, `knowledge`, `projects`, `repos`, `accounts`, `instructions`,
    `machines`, `secrets`, and `access`.
-7. Use the fleet conversation surfaces correctly:
+8. Use the fleet conversation surfaces correctly:
    `announcements` for `[FREEZE]`, `[UNFREEZE]`, `[BREAKING]`, `[CUTOVER]`,
    `[POLICY]`, and `[RELEASE]`; `incidents` for outages, crash loops, data risk,
    or security exposure; `git-publishing` before and after package publishes;
@@ -84,10 +90,10 @@ The managed global prompt must include these rules:
    discussion; project/product channels for normal work; and `conversations
    blockers` for blocker discovery. Do not invent or refer to a literal
    blockers channel.
-8. Never set Codewith goal/token budgets or goal-plan budgets unless the user
+9. Never set Codewith goal/token budgets or goal-plan budgets unless the user
    explicitly asks for a budget. Durable goals and goal plans should be
    unbudgeted by default.
-9. Never expose secrets in prompts, tasks, memories, conversations, manifests,
+10. Never expose secrets in prompts, tasks, memories, conversations, manifests,
    reports, logs, or PR text. Reference vault item names and grants only.
 
 ## Implementation Notes

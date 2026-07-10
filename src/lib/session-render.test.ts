@@ -13,6 +13,7 @@ import {
   sourcesFromIdentityExport,
   type SessionInstructionSource,
 } from "./session-render";
+import { GLOBAL_AGENT_RULES_STANDARD_CONTENT, NO_BRITTLE_HARDCODING_RULE } from "./global-agent-rules-standard";
 
 const globalIdentity: SessionInstructionSource = {
   id: "global-codewith",
@@ -28,6 +29,14 @@ const agentIdentity: SessionInstructionSource = {
   layer: "agent",
   order: 10,
   content: "Prefer repository-local evidence and focused tests.",
+};
+
+const globalRulesStandard: SessionInstructionSource = {
+  id: "global-agent-rules-standard",
+  label: "Global Agent Rules Standard",
+  layer: "global",
+  order: 0,
+  content: GLOBAL_AGENT_RULES_STANDARD_CONTENT,
 };
 
 function hash(content: string): string {
@@ -197,6 +206,19 @@ describe("session render planner", () => {
     expect(plan.files[0]?.content).toContain("Global Codewith Identity");
   });
 
+  test("renders the no-hardcoding global rule into Antigravity project rules", () => {
+    const projectRoot = join(tmpRoot, "repo");
+    const plan = planSessionRender({
+      tool: "antigravity",
+      profile: "account999",
+      projectRoot,
+      sources: [globalRulesStandard],
+    });
+
+    expect(plan.files[0]?.relativePath).toBe(".agents/rules/01-global-agent-rules-standard.md");
+    expect(plan.files[0]?.content).toContain(NO_BRITTLE_HARDCODING_RULE);
+  });
+
   test("blocks Antigravity planning until a repository root is explicit", () => {
     const plan = planSessionRender({
       tool: "antigravity",
@@ -319,6 +341,18 @@ describe("session render planner", () => {
       ["project-alias", "repo"],
       ["identity-alias", "agent"],
     ]);
+  });
+
+  test("renders the no-hardcoding global rule into flattened Codewith instructions", () => {
+    const plan = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: "/tmp/codewith-account999",
+      sources: [globalRulesStandard],
+    });
+
+    expect(plan.files[0]?.relativePath).toBe("CODEWITH.md");
+    expect(plan.files[0]?.content).toContain(NO_BRITTLE_HARDCODING_RULE);
   });
 
   test("plans Codewith native imports only when the runtime gate is enabled", () => {

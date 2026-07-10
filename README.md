@@ -189,8 +189,9 @@ before mutating managed files.
 `instructions init` and `bun run seed` also seed
 `global-agent-rules-standard`, the managed global/system prompt source for
 session renaming, task-scoped worktrees, PR-first landing, protected-branch
-push safety, autonomous repair, Hasna CLI source-of-truth usage, conversation
-surface routing, and unbudgeted Codewith goals unless a user asks for budgets.
+push safety, no brittle hardcoding when source-of-truth or reusable abstractions
+exist, autonomous repair, Hasna CLI source-of-truth usage, conversation surface
+routing, and unbudgeted Codewith goals unless a user asks for budgets.
 
 ## Machine-aware Profiles
 

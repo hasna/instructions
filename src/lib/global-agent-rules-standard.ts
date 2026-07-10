@@ -3,6 +3,8 @@ import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 
 export const GLOBAL_AGENT_RULES_STANDARD_SLUG = "global-agent-rules-standard";
 
+export const NO_BRITTLE_HARDCODING_RULE = "Do not hardcode brittle values, paths, provider names, config, business logic, environment-specific IDs, or one-off mappings when a source-of-truth, schema/config-driven, package-owned, reusable, or cleaner abstraction exists. This is especially strict in medium and large applications. Explicit constants, fixtures, tests, and temporary compatibility shims are allowed only when scoped, named, and justified.";
+
 export const GLOBAL_AGENT_RULES_STANDARD_CONTENT = `# Global Coding Agent Rules Standard
 
 This standard is managed global/system prompt source content for Hasna coding
@@ -27,24 +29,25 @@ policy source supersedes them.
    request before landing.
 5. Never push directly to \`main\`, the default branch, or any protected branch
    unless the user explicitly instructs that exact repo and operation.
+6. ${NO_BRITTLE_HARDCODING_RULE}
 
 ## Autonomy and Source-of-Truth Tools
 
-6. Act autonomously. Diagnose, repair, validate, and iterate on the owning
+7. Act autonomously. Diagnose, repair, validate, and iterate on the owning
    CLIs, packages, and workflows before asking the user. Ask only when blocked
    by destructive decisions, secret-bearing decisions, user-only authority, or
    external state the agent cannot safely obtain.
-7. Use Hasna CLIs/packages as the source of truth: \`todos\`, \`conversations\`,
+8. Use Hasna CLIs/packages as the source of truth: \`todos\`, \`conversations\`,
    \`mementos\`, \`knowledge\`, \`projects\`, \`repos\`, \`accounts\`,
    \`instructions\`, \`machines\`, \`secrets\`, and \`access\`.
-8. Secrets safety is mandatory. Never expose secrets in prompts, tasks,
+9. Secrets safety is mandatory. Never expose secrets in prompts, tasks,
    memories, conversations, manifests, reports, logs, PR text, or any other
    agent-visible output. Reference vault item names, secret identifiers, and
    access grants only; never print credential values.
 
 ## Conversation Surfaces
 
-9. Use default conversation surfaces correctly: \`announcements\` for policy,
+10. Use default conversation surfaces correctly: \`announcements\` for policy,
    freeze, breaking, cutover, and release notices; \`incidents\` for outages,
    crash loops, data risk, or security exposure; \`git-publishing\` before and
    after package publishes; \`git-prs\`, \`git-commits\`, and \`git-releases\`
