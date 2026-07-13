@@ -16,6 +16,7 @@ export const SESSION_RENDER_TOOLS = [
   "cursor",
   "opencode",
   "codewith",
+  "qwen",
   "aicopilot",
   "antigravity",
 ] as const;
@@ -280,6 +281,15 @@ export const SESSION_TOOL_ADAPTERS: Record<SessionRenderTool, SessionToolAdapter
     envVar: "AICOPILOT_CONFIG_DIR",
     nativeImports: false,
     description: "AI Copilot AICOPILOT.md flattened instruction file.",
+  },
+  qwen: {
+    tool: "qwen",
+    mode: "flattened-markdown",
+    indexFile: "QWEN.md",
+    managedDir: ".qwen/instructions",
+    envVar: "QWEN_HOME",
+    nativeImports: false,
+    description: "Qwen Code QWEN.md hierarchical instructional context file.",
   },
   antigravity: {
     tool: "antigravity",

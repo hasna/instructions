@@ -43,7 +43,7 @@ continue to map to `repo`; `machine-overlay` maps to `machine`; and
 | `cursor` | Project-owned `.cursor/rules/*.mdc`. |
 | `opencode` | `AGENTS.md`, `opencode.json`, and `.hasna/instructions` fragments. |
 | `aicopilot` | `AICOPILOT.md`, with optional `aicopilot.json` instructions in a later pass. |
-| `qwen` | User and project `settings.json` files at `~/.qwen/settings.json` and `.qwen/settings.json`; native hooks should be represented there when verified. |
+| `qwen` | Profile-scoped `QWEN.md` session render/apply output; known sync also tracks `~/.qwen/QWEN.md`, `~/.qwen/settings.json`, project `QWEN.md`, and `.qwen/settings.json`. Native hooks should be represented in settings when verified. |
 | `antigravity` | Project-owned `.agents/rules/*.md`, workspace MCP at `.agents/mcp_config.json`, and Google's current legacy-named global Antigravity files at `~/.gemini/GEMINI.md` and `~/.gemini/config/mcp_config.json`. |
 
 The retired Google coding-agent target has no active render path. Do not create
@@ -107,10 +107,11 @@ The guard covers Codewith, Codex, Claude Code, Qwen Code, OpenCode, Cursor, and
 Google Antigravity. Gemini CLI remains excluded. Codewith and Codex must use
 managed `PreToolUse` as a hard-deny/context-injection surface and
 `PermissionRequest` for approvals; `PreToolUse` must not return ask-style
-approval decisions. Claude and Qwen should use native hook settings where
-available. OpenCode, Cursor, and Antigravity must use a verified native
-plugin/config path or an explicitly managed wrapper/plugin fallback before hard
-enforcement is claimed.
+approval decisions. Qwen `QWEN.md` rendering is policy context only; hard
+enforcement for Qwen requires native hook settings or a managed wrapper/plugin.
+Claude and Qwen should use native hook settings where available. OpenCode,
+Cursor, and Antigravity must use a verified native plugin/config path or an
+explicitly managed wrapper/plugin fallback before hard enforcement is claimed.
 
 ## Implementation Notes
 
@@ -118,8 +119,8 @@ The implementation is incremental:
 
 1. Extend the session render layer model and aliases.
 2. Add active Antigravity support and remove the retired Google agent from active config sync.
-3. Track Qwen Code settings as an active config owner without adding a retired
-   Gemini target.
+3. Add Qwen Code `QWEN.md` session rendering and track Qwen settings as an
+   active config owner without adding a retired Gemini target.
 4. Keep Codewith behavior compatible with existing flattened renders and the
    `HASNA_CONFIGS_CODEWITH_NATIVE_IMPORTS` gate.
 5. Seed the managed `global-agent-rules-standard` reference so canonical global

@@ -288,6 +288,22 @@ describe("session render planner", () => {
     expect(plan.files.filter((file) => file.role === "fragment")).toHaveLength(2);
   });
 
+  test("plans Qwen as a QWEN.md instructional context file", () => {
+    const plan = planSessionRender({
+      tool: "qwen",
+      profile: "account999",
+      targetHome: "/tmp/qwen-account999",
+      sources: [globalIdentity, agentIdentity],
+    });
+
+    expect(plan.adapter.mode).toBe("flattened-markdown");
+    expect(plan.env).toEqual({ QWEN_HOME: "/tmp/qwen-account999" });
+    expect(plan.files).toHaveLength(1);
+    expect(plan.files[0]?.relativePath).toBe("QWEN.md");
+    expect(plan.files[0]?.content).toContain("Global Codewith Identity");
+    expect(plan.files[0]?.content).toContain("Marcus Agent Identity");
+  });
+
   test("plans Codewith as flattened CODEWITH.md until native imports are gated on", () => {
     const plan = planSessionRender({
       tool: "codewith",

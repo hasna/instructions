@@ -40,6 +40,8 @@ describe("dangerous operation guard standard", () => {
     expect(content).toContain("`PreToolUse` is a hard-deny and context-injection surface");
     expect(content).toContain("Approval decisions belong in `PermissionRequest` hooks");
     expect(content).toContain("do not return `permissionDecision: \"ask\"` from\n  `PreToolUse`");
+    expect(content).toContain("Session rendering writes Qwen Code `QWEN.md`");
+    expect(content).toContain("policy context only");
     expect(content).toContain("Qwen Code native `settings.json` hooks");
     expect(content).toContain("`~/.qwen/settings.json`");
     expect(content).toContain("`.qwen/settings.json`");
@@ -66,7 +68,7 @@ describe("dangerous operation guard standard", () => {
     expect(stored.version).toBe(2);
   });
 
-  test("renders through managed Codewith, Codex, and Antigravity session outputs", async () => {
+  test("renders through managed guard outputs for all claimed render targets", async () => {
     const config = await ensureDangerousOperationGuardStandardConfig(new LocalConfigStore(db));
     const source = sourceFromConfig(config);
 
@@ -88,6 +90,48 @@ describe("dangerous operation guard standard", () => {
     });
     expect(codex.files[0]?.relativePath).toBe("AGENTS.md");
     expect(codex.files[0]?.content).toContain("PreToolUse");
+
+    const claude = planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome: "/tmp/claude-account999",
+      sources: [source],
+    });
+    expect(claude.files[0]?.relativePath).toBe("CLAUDE.md");
+    expect(claude.files[0]?.content).toContain("@./.hasna/instructions/01-dangerous-operation-guard-standard.md");
+    expect(claude.files[1]?.content).toContain("Claude Code native hooks");
+
+    const opencode = planSessionRender({
+      tool: "opencode",
+      profile: "account999",
+      targetHome: "/tmp/opencode-account999",
+      sources: [source],
+    });
+    expect(opencode.files[0]?.relativePath).toBe("AGENTS.md");
+    expect(opencode.files[1]?.relativePath).toBe("opencode.json");
+    expect(opencode.files[0]?.content).toContain("OpenCode");
+    expect(JSON.parse(opencode.files[1]!.content)).toMatchObject({
+      instructions: [".hasna/instructions/01-dangerous-operation-guard-standard.md"],
+    });
+
+    const cursor = planSessionRender({
+      tool: "cursor",
+      profile: "account999",
+      projectRoot: "/tmp/repo",
+      sources: [source],
+    });
+    expect(cursor.files[0]?.relativePath).toBe(".cursor/rules/01-dangerous-operation-guard-standard.mdc");
+    expect(cursor.files[0]?.content).toContain("Cursor rule files are advisory prompt context");
+
+    const qwen = planSessionRender({
+      tool: "qwen",
+      profile: "account999",
+      targetHome: "/tmp/qwen-account999",
+      sources: [source],
+    });
+    expect(qwen.files[0]?.relativePath).toBe("QWEN.md");
+    expect(qwen.files[0]?.content).toContain("Qwen Code");
+    expect(qwen.files[0]?.content).toContain("policy context only");
 
     const antigravity = planSessionRender({
       tool: "antigravity",

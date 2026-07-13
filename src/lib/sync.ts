@@ -34,6 +34,7 @@ export const CLAUDE_PROMPT_OUTPUTS: ConfigOutput[] = [
   { agent: "aicopilot", target_path: "~/.config/aicopilot/AICOPILOT.md", transform: "codex-flat" },
   { agent: "antigravity", target_path: "~/.gemini/GEMINI.md", transform: "codex-flat" },
   { agent: "cursor", target_path: "~/.cursor/rules/claude.mdc", transform: "cursor-mdc" },
+  { agent: "qwen", target_path: "~/.qwen/QWEN.md", transform: "codex-flat" },
 ];
 
 function claudeRuleOutputs(fileName: string): ConfigOutput[] {
@@ -127,6 +128,7 @@ export const KNOWN_CONFIGS: KnownConfig[] = [
   { path: "~/.gemini/config/mcp_config.json", name: "antigravity-global-mcp", category: "mcp", agent: "antigravity", format: "json", optional: true, description: "Google Antigravity global MCP server entries" },
 
   // ── Qwen Code ──────────────────────────────────────────────────────────────
+  { path: "~/.qwen/QWEN.md",             name: "qwen-qwen-md",              category: "rules", agent: "qwen", format: "markdown", optional: true, description: "Qwen Code global instructional context" },
   { path: "~/.qwen/settings.json",        name: "qwen-settings",            category: "agent", agent: "qwen", format: "json", optional: true, description: "Qwen Code settings.json, including native hooks" },
 
   // ── MCP ────────────────────────────────────────────────────────────────────
@@ -161,6 +163,7 @@ export const PROJECT_CONFIG_FILES = [
   { file: ".aicopilot/AICOPILOT.md",    category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: "AICOPILOT.md",               category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".cursor/mcp.json",          category: "mcp" as ConfigCategory,    agent: "cursor" as ConfigAgent, format: "json" as ConfigFormat },
+  { file: "QWEN.md",                    category: "rules" as ConfigCategory,  agent: "qwen" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".agents/mcp_config.json",    category: "mcp" as ConfigCategory,    agent: "antigravity" as ConfigAgent, format: "json" as ConfigFormat },
   { file: ".qwen/settings.json",         category: "agent" as ConfigCategory,  agent: "qwen" as ConfigAgent, format: "json" as ConfigFormat },
 ];

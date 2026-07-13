@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@hasna/configs",
+      "name": "@hasna/instructions",
       "dependencies": {
         "@hasna/contracts": "0.4.2",
         "@hasna/events": "^0.1.6",

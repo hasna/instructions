@@ -49,8 +49,11 @@ them, or through a documented wrapper/plugin fallback where it does not.
 
 ## Qwen Code
 
-- Use Qwen Code native \`settings.json\` hooks. User-level settings live at
-  \`~/.qwen/settings.json\`; project-level settings live at
+- Session rendering writes Qwen Code \`QWEN.md\` instructional context. This is
+  policy context only; hard enforcement still requires native hooks or a
+  managed wrapper/plugin.
+- Use Qwen Code native \`settings.json\` hooks for hard enforcement. User-level
+  settings live at \`~/.qwen/settings.json\`; project-level settings live at
   \`.qwen/settings.json\`.
 - Qwen hooks are configured under the \`hooks\` object with event arrays such
   as \`PreToolUse\`; each hook entry should be a managed command or HTTP hook
@@ -87,7 +90,8 @@ them, or through a documented wrapper/plugin fallback where it does not.
 
 Before rollout is marked complete:
 
-1. Render or sync managed instructions/config for each active station01 agent.
+1. Render managed instructions for every render-supported station01 agent and
+   sync managed settings/config for hook-only surfaces.
 2. Verify Gemini is absent from active target lists and generated outputs.
 3. Verify Codewith/Codex \`PreToolUse\` rejects ask-style approvals and
    \`PermissionRequest\` is the approval path.
