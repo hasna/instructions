@@ -164,6 +164,10 @@ agent render target. Antigravity workspace rules are rendered to
 legacy-named `~/.gemini/GEMINI.md` and `~/.gemini/config/mcp_config.json`
 paths but remain owned by the `antigravity` target.
 
+Known config sync also tracks Qwen Code `settings.json` files at
+`~/.qwen/settings.json` and `.qwen/settings.json`, so native hook settings can
+be managed without adding a new prompt renderer.
+
 ```bash
 instructions session plan \
   --tool codewith \
@@ -192,6 +196,14 @@ session renaming, task-scoped worktrees, PR-first landing, protected-branch
 push safety, no brittle hardcoding when source-of-truth or reusable abstractions
 exist, autonomous repair, Hasna CLI source-of-truth usage, conversation surface
 routing, and unbudgeted Codewith goals unless a user asks for budgets.
+
+They also seed `dangerous-operation-guard-standard`, the managed station01 guard
+source for risky shell commands, edits, git operations, package installs, and
+secret-adjacent access. The guard excludes Gemini CLI, requires Codewith/Codex
+`PreToolUse` to hard-deny or inject context rather than ask for approval, uses
+`PermissionRequest` for Codewith/Codex approvals, and records native hook or
+wrapper/plugin fallback expectations for Claude, Qwen, OpenCode, Cursor, and
+Antigravity.
 
 ## Machine-aware Profiles
 

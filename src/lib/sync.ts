@@ -126,6 +126,9 @@ export const KNOWN_CONFIGS: KnownConfig[] = [
   { path: "~/.gemini/GEMINI.md",          name: "antigravity-global-rules", category: "rules",  agent: "antigravity", format: "markdown", optional: true, description: "Google Antigravity global rules file" },
   { path: "~/.gemini/config/mcp_config.json", name: "antigravity-global-mcp", category: "mcp", agent: "antigravity", format: "json", optional: true, description: "Google Antigravity global MCP server entries" },
 
+  // ── Qwen Code ──────────────────────────────────────────────────────────────
+  { path: "~/.qwen/settings.json",        name: "qwen-settings",            category: "agent", agent: "qwen", format: "json", optional: true, description: "Qwen Code settings.json, including native hooks" },
+
   // ── MCP ────────────────────────────────────────────────────────────────────
   { path: "~/.claude.json",              name: "claude-json",              category: "mcp",    agent: "claude", format: "json", description: "Claude Code global config (includes MCP server entries)" },
 
@@ -159,6 +162,7 @@ export const PROJECT_CONFIG_FILES = [
   { file: "AICOPILOT.md",               category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".cursor/mcp.json",          category: "mcp" as ConfigCategory,    agent: "cursor" as ConfigAgent, format: "json" as ConfigFormat },
   { file: ".agents/mcp_config.json",    category: "mcp" as ConfigCategory,    agent: "antigravity" as ConfigAgent, format: "json" as ConfigFormat },
+  { file: ".qwen/settings.json",         category: "agent" as ConfigCategory,  agent: "qwen" as ConfigAgent, format: "json" as ConfigFormat },
 ];
 
 export interface SyncProjectOptions {
@@ -441,7 +445,7 @@ export function detectCategory(filePath: string): ConfigCategory {
   const p = filePath.toLowerCase().replace(getConfigHome(), "~");
   if (p.includes("/.claude/rules/") || p.includes("/.cursor/rules/") || p.includes("/.agents/rules/") || p.endsWith("claude.md") || p.endsWith("agents.md") || p.endsWith("codewith.md") || p.endsWith("aicopilot.md") || p.endsWith("/.gemini/gemini.md") || p.endsWith(".mdc")) return "rules";
   if (p.includes(".mcp.json") || p.includes("mcp")) return "mcp";
-  if (p.includes("/.claude/") || p.includes("/.codex/") || p.includes("/.antigravity/") || p.includes("/.agents/") || p.includes("/.cursor/") || p.includes("/.config/opencode/") || p.includes("/.codewith/") || p.includes("/.config/aicopilot/")) return "agent";
+  if (p.includes("/.claude/") || p.includes("/.codex/") || p.includes("/.antigravity/") || p.includes("/.agents/") || p.includes("/.cursor/") || p.includes("/.config/opencode/") || p.includes("/.codewith/") || p.includes("/.config/aicopilot/") || p.includes("/.qwen/")) return "agent";
   if (p.includes(".zshrc") || p.includes(".zprofile") || p.includes(".bashrc") || p.includes(".bash_profile")) return "shell";
   if (p.includes(".gitconfig") || p.includes(".gitignore")) return "git";
   if (p.includes(".npmrc") || p.includes("tsconfig") || p.includes("bunfig")) return "tools";
@@ -458,6 +462,7 @@ export function detectAgent(filePath: string): ConfigAgent {
   if (p.includes("/.cursor/") || p.endsWith(".mdc")) return "cursor";
   if (p.includes("/.codewith/") || p.endsWith("codewith.md")) return "codewith";
   if (p.includes("/.config/aicopilot/")) return "aicopilot";
+  if (p.includes("/.qwen/")) return "qwen";
   if (p.includes("/.antigravity/")) return "antigravity";
   if (p.includes("/.codex/") || p.endsWith("agents.md")) return "codex";
   if (p.includes(".zshrc") || p.includes(".zprofile") || p.includes(".bashrc")) return "zsh";

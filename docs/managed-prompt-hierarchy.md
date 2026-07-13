@@ -17,7 +17,7 @@ Render sources are composed in this order:
 | Layer | Purpose |
 | --- | --- |
 | `global` | Non-overridable Hasna rules and default agent behavior. |
-| `tool` | Tool/provider-specific behavior such as Codewith, Claude, Codex, Cursor, OpenCode, Antigravity, or aicopilot. |
+| `tool` | Tool/provider-specific behavior such as Codewith, Claude, Codex, Qwen, Cursor, OpenCode, Antigravity, or aicopilot. |
 | `account` | Account or auth-profile overlays such as `live-codewith`. |
 | `machine` | Host-specific rules for machines such as `spark01`, Apple laptops, or fleet nodes. |
 | `division` | Area-level rules for repo families such as `opensource`, `hasnastudio`, `hasnatools`, or `infra`. |
@@ -43,6 +43,7 @@ continue to map to `repo`; `machine-overlay` maps to `machine`; and
 | `cursor` | Project-owned `.cursor/rules/*.mdc`. |
 | `opencode` | `AGENTS.md`, `opencode.json`, and `.hasna/instructions` fragments. |
 | `aicopilot` | `AICOPILOT.md`, with optional `aicopilot.json` instructions in a later pass. |
+| `qwen` | User and project `settings.json` files at `~/.qwen/settings.json` and `.qwen/settings.json`; native hooks should be represented there when verified. |
 | `antigravity` | Project-owned `.agents/rules/*.md`, workspace MCP at `.agents/mcp_config.json`, and Google's current legacy-named global Antigravity files at `~/.gemini/GEMINI.md` and `~/.gemini/config/mcp_config.json`. |
 
 The retired Google coding-agent target has no active render path. Do not create
@@ -96,16 +97,35 @@ The managed global prompt must include these rules:
 10. Never expose secrets in prompts, tasks, memories, conversations, manifests,
    reports, logs, or PR text. Reference vault item names and grants only.
 
+## Dangerous Operation Guard
+
+`instructions init` and `bun run seed` also seed
+`dangerous-operation-guard-standard`, the managed rollout source for risky
+operation policy on sustained station01 coding agents.
+
+The guard covers Codewith, Codex, Claude Code, Qwen Code, OpenCode, Cursor, and
+Google Antigravity. Gemini CLI remains excluded. Codewith and Codex must use
+managed `PreToolUse` as a hard-deny/context-injection surface and
+`PermissionRequest` for approvals; `PreToolUse` must not return ask-style
+approval decisions. Claude and Qwen should use native hook settings where
+available. OpenCode, Cursor, and Antigravity must use a verified native
+plugin/config path or an explicitly managed wrapper/plugin fallback before hard
+enforcement is claimed.
+
 ## Implementation Notes
 
 The implementation is incremental:
 
 1. Extend the session render layer model and aliases.
 2. Add active Antigravity support and remove the retired Google agent from active config sync.
-3. Keep Codewith behavior compatible with existing flattened renders and the
+3. Track Qwen Code settings as an active config owner without adding a retired
+   Gemini target.
+4. Keep Codewith behavior compatible with existing flattened renders and the
    `HASNA_CONFIGS_CODEWITH_NATIVE_IMPORTS` gate.
-4. Seed the managed `global-agent-rules-standard` reference so canonical global
+5. Seed the managed `global-agent-rules-standard` reference so canonical global
    prompt content includes the required operating rules.
-5. Add tests that prove layer ordering, Antigravity output paths, the
+6. Seed the managed `dangerous-operation-guard-standard` reference so station01
+   guard requirements can roll out through instructions-managed config.
+7. Add tests that prove layer ordering, Antigravity output paths, the
    Antigravity 12,000-character rule-file limit, active agent target coverage,
-   and the seeded global rules content.
+   and the seeded global rules and dangerous-operation guard content.
