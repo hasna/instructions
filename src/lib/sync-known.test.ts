@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 describe("KNOWN_CONFIGS", () => {
-  test("has required configs (claude, codex, opencode, cursor, codewith, aicopilot, antigravity, shell, git, tools)", () => {
+  test("has required configs (claude, codex, opencode, cursor, codewith, aicopilot, antigravity, qwen, shell, git, tools)", () => {
     const agents = new Set(KNOWN_CONFIGS.map((k) => k.agent));
     expect(agents.has("claude")).toBe(true);
     expect(agents.has("codex")).toBe(true);
@@ -34,6 +34,7 @@ describe("KNOWN_CONFIGS", () => {
     expect(agents.has("codewith")).toBe(true);
     expect(agents.has("aicopilot")).toBe(true);
     expect(agents.has("antigravity")).toBe(true);
+    expect(agents.has("qwen")).toBe(true);
     expect(agents.has("zsh")).toBe(true);
     expect(agents.has("git")).toBe(true);
     expect(agents.has("npm")).toBe(true);
@@ -48,6 +49,7 @@ describe("KNOWN_CONFIGS", () => {
       "global",
       "npm",
       "opencode",
+      "qwen",
       "zsh",
     ]);
   });
@@ -64,8 +66,10 @@ describe("KNOWN_CONFIGS", () => {
       "global",
       "npm",
       "opencode",
+      "qwen",
       "zsh",
     ]);
+    expect(CONFIG_AGENTS).not.toContain("gemini" as never);
   });
 
   test("registers new coding agent rule and MCP targets", () => {
@@ -80,6 +84,8 @@ describe("KNOWN_CONFIGS", () => {
     expect(paths.has("~/.codewith/config.toml")).toBe(true);
     expect(paths.has("~/.cursor/rules")).toBe(true);
     expect(paths.has("~/.cursor/mcp.json")).toBe(true);
+    expect(paths.has("~/.qwen/QWEN.md")).toBe(true);
+    expect(paths.has("~/.qwen/settings.json")).toBe(true);
   });
 
   test("has optional flag on non-essential configs", () => {
@@ -156,6 +162,7 @@ describe("syncKnown", () => {
         { agent: "aicopilot", target_path: "~/.config/aicopilot/AICOPILOT.md", transform: "codex-flat" },
         { agent: "antigravity", target_path: "~/.gemini/GEMINI.md", transform: "codex-flat" },
         { agent: "cursor", target_path: "~/.cursor/rules/claude.mdc", transform: "cursor-mdc" },
+        { agent: "qwen", target_path: "~/.qwen/QWEN.md", transform: "codex-flat" },
       ]);
     } finally {
       if (originalHome === undefined) delete process.env["CONFIGS_HOME"];
@@ -183,7 +190,7 @@ describe("syncKnown", () => {
     const config = getConfig("claude-claude-md", db);
 
     expect(result.updated).toBe(1);
-    expect(config.outputs.map((output) => output.agent)).toEqual(["codex", "codewith", "opencode", "aicopilot", "antigravity", "cursor"]);
+    expect(config.outputs.map((output) => output.agent)).toEqual(["codex", "codewith", "opencode", "aicopilot", "antigravity", "cursor", "qwen"]);
   });
 });
 
@@ -275,6 +282,9 @@ describe("PROJECT_CONFIG_FILES", () => {
     expect(files).toContain(".codewith/CODEWITH.md");
     expect(files).toContain("AICOPILOT.md");
     expect(files).toContain(".agents/mcp_config.json");
+    expect(files).toContain("QWEN.md");
+    expect(files).toContain(".qwen/settings.json");
+    expect(files).not.toContain("GEMINI.md");
   });
 });
 

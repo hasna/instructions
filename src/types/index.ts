@@ -24,6 +24,7 @@ export const CONFIG_AGENTS = [
   "codewith",
   "aicopilot",
   "antigravity",
+  "qwen",
   "zsh",
   "git",
   "npm",

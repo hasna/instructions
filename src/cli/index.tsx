@@ -18,6 +18,7 @@ import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFile
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
+import { ensureDangerousOperationGuardStandardConfig } from "../lib/dangerous-operation-guard-standard.js";
 import { getConfigsStatus } from "../status.js";
 import { resolveConfigStore, isCloudMode, type ConfigStore } from "../data/config-store.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
@@ -425,8 +426,8 @@ program
 // ── sync ─────────────────────────────────────────────────────────────────────
 program
   .command("sync")
-  .description("Sync known AI coding configs from disk into DB (claude, codex, opencode, cursor, codewith, aicopilot, antigravity, zsh, git, npm)")
-  .option("-a, --agent <agent>", "only sync configs for this agent (claude|codex|opencode|cursor|codewith|aicopilot|antigravity|zsh|git|npm)")
+  .description("Sync known AI coding configs from disk into DB (claude, codex, opencode, cursor, codewith, aicopilot, antigravity, qwen, zsh, git, npm)")
+  .option("-a, --agent <agent>", "only sync configs for this agent (claude|codex|opencode|cursor|codewith|aicopilot|antigravity|qwen|zsh|git|npm)")
   .option("-c, --category <cat>", "only sync configs in this category")
   .option("-p, --project [dir]", "sync project-scoped configs (CLAUDE.md, .mcp.json, etc.) from a project dir")
   .option("--all", "with --project: scan all subdirs for projects to sync")
@@ -1163,6 +1164,7 @@ program
       }
     }
     await ensureGlobalAgentRulesStandardConfig(store);
+    await ensureDangerousOperationGuardStandardConfig(store);
     await ensureProjectDashboardStandardConfig(store);
 
     // Create default profile

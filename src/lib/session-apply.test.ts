@@ -55,7 +55,7 @@ describe("session apply writer", () => {
     expect(existsSync(join(targetHome, "AGENTS.md"))).toBe(false);
   });
 
-  test("writes Claude, Codex, Cursor, OpenCode, and Codewith adapter files", () => {
+  test("writes Claude, Codex, Cursor, OpenCode, Qwen, and Codewith adapter files", () => {
     const adapters: Array<{ tool: SessionRenderTool; targetHome: string; expected: string[]; projectRoot?: string }> = [
       {
         tool: "claude",
@@ -77,6 +77,11 @@ describe("session apply writer", () => {
         tool: "opencode",
         targetHome: targetFor("opencode"),
         expected: ["AGENTS.md", "opencode.json", ".hasna/instructions/01-global-codewith.md", ".hasna/instructions/02-agent-marcus.md"],
+      },
+      {
+        tool: "qwen",
+        targetHome: targetFor("qwen"),
+        expected: ["QWEN.md"],
       },
       {
         tool: "codewith",

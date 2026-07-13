@@ -157,12 +157,18 @@ Local data is stored in `~/.hasna/configs/` (unchanged, for fleet continuity).
 
 `instructions session plan` and `instructions session apply` render
 OpenIdentities and instruction sources into provider-native files for Claude,
-Codex, Cursor, OpenCode, Codewith, aicopilot, and Google Antigravity.
+Codex, Cursor, OpenCode, Codewith, Qwen, aicopilot, and Google Antigravity.
 The old Google agent target is removed; Antigravity is the only Google coding
 agent render target. Antigravity workspace rules are rendered to
 `.agents/rules/*.md`; its current global rules and MCP files use Google's
 legacy-named `~/.gemini/GEMINI.md` and `~/.gemini/config/mcp_config.json`
 paths but remain owned by the `antigravity` target.
+
+Qwen Code session rendering writes `QWEN.md` instructional context with
+`QWEN_HOME` pointing at the rendered profile home. Known config sync also
+tracks Qwen Code `QWEN.md` and `settings.json` files at `~/.qwen/...` and
+project `QWEN.md` / `.qwen/settings.json`, so native hook settings can be
+managed without claiming session-rendered context is hard enforcement.
 
 ```bash
 instructions session plan \
@@ -192,6 +198,14 @@ session renaming, task-scoped worktrees, PR-first landing, protected-branch
 push safety, no brittle hardcoding when source-of-truth or reusable abstractions
 exist, autonomous repair, Hasna CLI source-of-truth usage, conversation surface
 routing, and unbudgeted Codewith goals unless a user asks for budgets.
+
+They also seed `dangerous-operation-guard-standard`, the managed station01 guard
+source for risky shell commands, edits, git operations, package installs, and
+secret-adjacent access. The guard excludes Gemini CLI, requires Codewith/Codex
+`PreToolUse` to hard-deny or inject context rather than ask for approval, uses
+`PermissionRequest` for Codewith/Codex approvals, records that Qwen `QWEN.md`
+is policy context only, and records native hook or wrapper/plugin fallback
+expectations for Claude, Qwen, OpenCode, Cursor, and Antigravity.
 
 ## Machine-aware Profiles
 

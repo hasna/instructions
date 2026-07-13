@@ -100,6 +100,11 @@ export {
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
   ensureGlobalAgentRulesStandardConfig,
 } from "./lib/global-agent-rules-standard.js";
+export {
+  DANGEROUS_OPERATION_GUARD_STANDARD_CONTENT,
+  DANGEROUS_OPERATION_GUARD_STANDARD_SLUG,
+  ensureDangerousOperationGuardStandardConfig,
+} from "./lib/dangerous-operation-guard-standard.js";
 
 // Lib — sync
 export { syncKnown, syncToDisk, syncProject, diffConfig, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS, PROJECT_CONFIG_FILES } from "./lib/sync.js";
