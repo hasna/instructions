@@ -20,7 +20,7 @@ import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-s
 import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
 import { ensureDangerousOperationGuardStandardConfig } from "../lib/dangerous-operation-guard-standard.js";
 import { getConfigsStatus } from "../status.js";
-import { resolveConfigStore, isCloudMode, type ConfigStore } from "../data/config-store.js";
+import { resolveConfigStore, isCloudMode, formatCliError, type ConfigStore } from "../data/config-store.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
 import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
 
@@ -304,7 +304,7 @@ program
       console.log(chalk.dim("─".repeat(60)));
       printLine(c.content);
     } catch (e) {
-      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
   });
@@ -361,7 +361,7 @@ program
       if (opts.json) { printJson({ deleted: true, id: config.id, slug: config.slug }); return; }
       console.log(chalk.green("✓") + ` Deleted: ${chalk.bold(config.name)} ${chalk.dim(`(${config.slug})`)}`);
     } catch (e) {
-      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
   });
@@ -386,7 +386,7 @@ program
         console.log(`  ${outputStatus} ${output.path} ${chalk.dim(`[${output.agent}/${output.transform}] (${outputChange})`)}`);
       }
     } catch (e) {
-      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
   });
@@ -418,7 +418,7 @@ program
       }
       console.log(chalk.dim(`${drifted}/${configs.length} drifted`));
     } catch (e) {
-      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
   });
@@ -635,7 +635,7 @@ profileCmd.command("show <id>").description("Show profile and its configs")
     if (page.has_more) {
       console.log(chalk.dim(`Showing ${page.items.length} of ${page.total}. Next: configs profile show ${id} --cursor ${page.next_cursor} --limit ${page.limit}`));
     }
-  } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+  } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
 });
 
 profileCmd.command("add <profile> <config>").description("Add a config to a profile").action(async (profile, config) => {
@@ -644,7 +644,7 @@ profileCmd.command("add <profile> <config>").description("Add a config to a prof
     const c = await store.getConfig(config);
     await store.addConfigToProfile(profile, c.id);
     console.log(chalk.green("✓") + ` Added ${c.slug} to profile ${profile}`);
-  } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+  } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
 });
 
 profileCmd.command("remove <profile> <config>").description("Remove a config from a profile").action(async (profile, config) => {
@@ -653,7 +653,7 @@ profileCmd.command("remove <profile> <config>").description("Remove a config fro
     const c = await store.getConfig(config);
     await store.removeConfigFromProfile(profile, c.id);
     console.log(chalk.green("✓") + ` Removed ${c.slug} from profile ${profile}`);
-  } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+  } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
 });
 
 profileCmd.command("apply [id]").description("Apply all configs in a profile to disk")
@@ -681,7 +681,7 @@ profileCmd.command("apply [id]").description("Apply all configs in a profile to 
         if (r.changed) changed++;
       }
       console.log(chalk.dim(`\n${changed}/${results.length} changed (${selected.slug} on ${machine.hostname} ${machine.os_family}/${machine.arch})`));
-    } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+    } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
   });
 
 profileCmd.command("resolve").description("Resolve the matching machine-aware profile")
@@ -711,7 +711,7 @@ profileCmd.command("delete <id>").description("Delete a profile").action(async (
     const p = await store.getProfile(id);
     await store.deleteProfile(p.id);
     console.log(chalk.green("✓") + ` Deleted profile: ${p.name}`);
-  } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+  } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
 });
 
 // ── session ──────────────────────────────────────────────────────────────────
@@ -768,7 +768,7 @@ sessionCmd.command("plan")
       }
       console.log(chalk.dim("Dry run only. No files were written."));
     } catch (e) {
-      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
   });
@@ -832,7 +832,7 @@ sessionCmd.command("apply")
         process.exitCode = 1;
       }
     } catch (e) {
-      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
   });
@@ -854,7 +854,7 @@ snapshotCmd.command("list <config>").description("List snapshots for a config")
       console.log(`  v${s.version} ${chalk.dim(s.created_at)} ${chalk.dim(s.id)}`);
     }
     pageFooter(`configs snapshot list ${configId}`, page, "Use `configs snapshot show <id>` to print snapshot content.");
-  } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+  } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
 });
 
 snapshotCmd.command("show <id>").description("Show a snapshot's content").action(async (id) => {
@@ -870,7 +870,7 @@ snapshotCmd.command("restore <config> <snapshot-id>").description("Restore a con
     if (!snap) { console.error(chalk.red("Snapshot not found: " + snapId)); process.exit(1); }
     await store.updateConfig(configId, { content: snap.content });
     console.log(chalk.green("✓") + ` Restored ${configId} to snapshot v${snap.version}`);
-  } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+  } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
 });
 
 // ── template ──────────────────────────────────────────────────────────────────
@@ -884,7 +884,7 @@ templateCmd.command("vars <id>").description("Show template variables").action(a
     for (const v of vars) {
       console.log(`  ${chalk.cyan("{{" + v.name + "}}")}${v.description ? chalk.dim(" — " + v.description) : ""}`);
     }
-  } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
+  } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
 });
 
 templateCmd.command("render <id>")
@@ -936,7 +936,7 @@ templateCmd.command("render <id>")
         console.log(rendered);
       }
     } catch (e) {
-      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
   });
@@ -1113,7 +1113,7 @@ mcpCmd.command("install")
           console.log(chalk.green("✓") + " Installed into Antigravity");
         }
       } catch (e) {
-        console.error(chalk.red(`✗ Failed to install into ${target}: ${e instanceof Error ? e.message : String(e)}`));
+        console.error(chalk.red(`✗ Failed to install into ${target}: ${formatCliError(e)}`));
       }
     }
   });
@@ -1373,7 +1373,7 @@ program
         console.log(chalk.dim(`\n${diffs} difference(s)`));
       }
     } catch (e) {
-      console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
   });
@@ -1651,7 +1651,7 @@ program
         }
       }
     } catch (e) {
-      console.error(chalk.red("Failed to check for updates: " + (e instanceof Error ? e.message : String(e))));
+      console.error(chalk.red("Failed to check for updates: " + (formatCliError(e))));
     }
   });
 
@@ -1673,4 +1673,14 @@ program
 
 program.version(pkg.version).name("instructions");
 registerEventsCommands(program, { source: "configs" });
-program.parse(process.argv);
+
+// Use parseAsync so async action rejections are awaited and routed through a
+// single top-level handler. With the synchronous `program.parse`, a rejected
+// async action (e.g. a revoked-API-key CloudHttpError on `list`/`add`) surfaced
+// as a raw unhandled-promise stack trace. formatCliError turns auth failures
+// into an actionable re-auth message; commands with their own try/catch still
+// handle and exit before reaching here.
+program.parseAsync(process.argv).catch((e) => {
+  console.error(chalk.red(formatCliError(e)));
+  process.exit(1);
+});
