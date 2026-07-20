@@ -78,6 +78,42 @@ const API_URL_ENV = "HASNA_INSTRUCTIONS_API_URL";
 const API_KEY_ENV = "HASNA_INSTRUCTIONS_API_KEY";
 
 /**
+ * True when `err` is a cloud authentication failure — an HTTP 401/403 from the
+ * `/v1` API, which is what a missing, expired, or revoked bearer key produces.
+ */
+export function isCloudAuthError(err: unknown): err is CloudHttpError {
+  return err instanceof CloudHttpError && (err.status === 401 || err.status === 403);
+}
+
+/**
+ * Render an error for CLI/user display. A cloud auth failure (401/403 — e.g. a
+ * revoked or invalid `HASNA_INSTRUCTIONS_API_KEY`) is rewritten into a clear,
+ * actionable re-auth message so the operator is not blocked by a raw
+ * `CloudHttpError`: they can rotate the key or fall back to the local store.
+ * All other errors fall back to their plain message (unchanged behaviour).
+ */
+export function formatCliError(err: unknown, env: NodeJS.ProcessEnv = process.env): string {
+  if (isCloudAuthError(err)) {
+    const apiUrl = env[API_URL_ENV]?.trim();
+    const detail = err.message?.trim();
+    // Only echo the server's own message when it adds signal beyond the generic
+    // `HTTP <status> on ...` fallback synthesised by CloudConfigStore.request.
+    const serverNote = detail && !/^HTTP \d+\b/.test(detail) ? `  Server said: ${detail}` : "";
+    return [
+      `Instructions cloud API rejected the request (HTTP ${err.status}: authentication failed).`,
+      serverNote,
+      `  The API key in ${API_KEY_ENV} is missing, expired, or revoked${apiUrl ? ` for ${apiUrl}` : ""}.`,
+      `  To continue, either:`,
+      `    - set a valid key:   export ${API_KEY_ENV}=<new-key>`,
+      `    - or use the local store instead:   unset ${API_URL_ENV} ${API_KEY_ENV}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
  * Resolve cloud config from the environment.
  * - both vars set   -> config (api transport: self_hosted / cloud)
  * - neither set     -> null (local SQLite)
