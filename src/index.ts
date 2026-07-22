@@ -70,6 +70,36 @@ export {
   checkSessionRenderDrift,
   SessionApplyError,
 } from "./lib/session-apply.js";
+
+// Lib — strict Projects context bundle rendering
+export {
+  LEGACY_CONFIGS_COMPAT_VERSION,
+  LEGACY_CONFIGS_EXECUTABLE,
+  LEGACY_CONFIGS_PACKAGE,
+  PROJECT_CONTEXT_CACHE_PATH,
+  PROJECT_CONTEXT_FRAGMENT_PATH,
+  PROJECT_CONTEXT_LOCK_PATH,
+  PROJECT_CONTEXT_MANAGED_COMMENT,
+  PROJECT_CONTEXT_MANIFEST_PATH,
+  PROJECT_CONTEXT_MAX_COMMANDS,
+  PROJECT_CONTEXT_MAX_INPUT_BYTES,
+  PROJECT_CONTEXT_MAX_RENDERED_BYTES,
+  PROJECT_CONTEXT_SCHEMA,
+  ProjectContextError,
+  applyProjectContext,
+  computeProjectContextSourceHash,
+  parseProjectContextBundle,
+  planProjectContext,
+} from "./lib/project-context.js";
+export type {
+  ProjectContextApplyOptions,
+  ProjectContextApplyResult,
+  ProjectContextBundleV1,
+  ProjectContextPlan,
+  ProjectContextPlanInput,
+  ProjectContextRuntime,
+  ProjectContextStatus,
+} from "./lib/project-context.js";
 export type {
   SessionApplyAction,
   SessionApplyFileResult,

@@ -2,7 +2,7 @@
 import { registerEventsCommands } from "@hasna/events/commander";
 import { program } from "commander";
 import chalk from "chalk";
-import { existsSync, readFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { applyConfig, applyConfigs, expandPath } from "../lib/apply.js";
@@ -19,6 +19,14 @@ import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
 import { ensureDangerousOperationGuardStandardConfig } from "../lib/dangerous-operation-guard-standard.js";
+import {
+  ProjectContextError,
+  PROJECT_CONTEXT_MAX_INPUT_BYTES,
+  applyProjectContext,
+  parseProjectContextBundle,
+  planProjectContext,
+  type ProjectContextRuntime,
+} from "../lib/project-context.js";
 import { getConfigsStatus } from "../status.js";
 import { resolveConfigStore, isCloudMode, type ConfigStore } from "../data/config-store.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
@@ -195,6 +203,62 @@ function planJsonForOutput(plan: SessionRenderPlan) {
     manifestFile: stripSessionFileContent(plan.manifestFile),
     allFiles: plan.allFiles.map(stripSessionFileContent),
   };
+}
+
+function parseProjectContextRuntime(value: string): ProjectContextRuntime {
+  if (value === "codex") return "agents";
+  if (value === "claude" || value === "codewith" || value === "agents") return value;
+  throw new ProjectContextError("PROJECT_CONTEXT_INVALID", `unsupported runtime ${value}; expected claude|codewith|agents|codex`);
+}
+
+function readProjectContextBundleOption(value: string | undefined, allowMissing = false): { json?: string; sourcePath?: string } {
+  if (value === undefined) return {};
+  if (value === "-") return { json: readBoundedProjectContextStdin() };
+  const path = resolveSessionPath(value);
+  if (!existsSync(path)) {
+    if (allowMissing) return {};
+    throw new ProjectContextError("PROJECT_CONTEXT_INPUT_MISSING", `bundle file not found: ${path}`);
+  }
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new ProjectContextError("PROJECT_CONTEXT_SYMLINK_REJECTED", "bundle input must be a regular non-symlink file");
+  }
+  if (stat.size > PROJECT_CONTEXT_MAX_INPUT_BYTES) {
+    throw new ProjectContextError("PROJECT_CONTEXT_INPUT_TOO_LARGE", `bundle exceeds ${PROJECT_CONTEXT_MAX_INPUT_BYTES} bytes`);
+  }
+  return { json: readFileSync(path, "utf8"), sourcePath: path };
+}
+
+function readBoundedProjectContextStdin(): string {
+  const chunks: Buffer[] = [];
+  const chunk = Buffer.allocUnsafe(4_096);
+  let total = 0;
+  while (true) {
+    const bytesRead = readSync(0, chunk, 0, chunk.length, null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+    if (total > PROJECT_CONTEXT_MAX_INPUT_BYTES) {
+      throw new ProjectContextError("PROJECT_CONTEXT_INPUT_TOO_LARGE", `bundle exceeds ${PROJECT_CONTEXT_MAX_INPUT_BYTES} bytes`);
+    }
+    chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
+function parsePositiveInteger(value: string | undefined, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new ProjectContextError("PROJECT_CONTEXT_INVALID", `${label} must be a positive integer`);
+  return parsed;
+}
+
+function printProjectContextFailure(error: unknown, json: boolean): void {
+  const normalized = error instanceof ProjectContextError
+    ? error
+    : new ProjectContextError("PROJECT_CONTEXT_FAILED", error instanceof Error ? error.message : String(error));
+  if (json) printJson({ ok: false, error: { code: normalized.code, message: normalized.message } });
+  else console.error(chalk.red(normalized.message));
+  process.exitCode = 1;
 }
 
 function parseVarArgs(values?: string[]): ProfileVariables | undefined {
@@ -714,6 +778,102 @@ profileCmd.command("delete <id>").description("Delete a profile").action(async (
   } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
 });
 
+// ── project-context ──────────────────────────────────────────────────────────
+const projectContextCmd = program.command("project-context")
+  .description("Validate and atomically render a strict Projects context bundle");
+
+projectContextCmd.command("plan")
+  .description("Validate a bundle and preview its bounded provider adapter without writing")
+  .requiredOption("--runtime <runtime>", "selected consumer (claude|codewith|agents|codex)")
+  .requiredOption("--workspace-root <path>", "absolute project or coordination workspace root")
+  .requiredOption("--bundle <path|->", "durable v1 JSON file, or - for stdin")
+  .option("--codewith-native-imports", "declare that the selected Codewith runtime consumes native @ imports")
+  .option("--json", "output plan JSON")
+  .action((opts) => {
+    try {
+      const runtime = parseProjectContextRuntime(opts.runtime);
+      const input = readProjectContextBundleOption(opts.bundle);
+      const bundle = parseProjectContextBundle(input.json!);
+      const plan = planProjectContext({
+        workspace_root: resolveSessionPath(opts.workspaceRoot),
+        runtime,
+        bundle,
+        source_path: input.sourcePath,
+        codewith_native_imports: opts.codewithNativeImports,
+      });
+      const output = {
+        ok: true,
+        dry_run: true,
+        runtime: plan.runtime,
+        workspace_root: plan.workspace_root,
+        project_id: plan.bundle.project.id,
+        revision: plan.bundle.revision,
+        hash: plan.bundle.hash,
+        status: plan.status,
+        age_seconds: plan.age_seconds,
+        target_path: plan.target_path,
+        fragment_path: plan.fragment_path,
+        manifest_path: plan.manifest_path,
+        rendered_bytes: Buffer.byteLength(plan.fragment, "utf8"),
+        included_commands: plan.included_commands,
+        warnings: plan.warnings,
+      };
+      if (opts.json) printJson(output);
+      else {
+        console.log(chalk.bold("project context render plan"));
+        console.log(`${chalk.cyan("runtime:")} ${output.runtime}`);
+        console.log(`${chalk.cyan("project:")} ${output.project_id} @ ${output.revision}`);
+        console.log(`${chalk.cyan("target:")} ${output.target_path}`);
+        console.log(`${chalk.cyan("fragment:")} ${output.fragment_path} (${output.rendered_bytes} bytes)`);
+        console.log(chalk.dim("Dry run only. No files were written."));
+      }
+    } catch (error) {
+      printProjectContextFailure(error, opts.json === true);
+    }
+  });
+
+projectContextCmd.command("apply")
+  .description("Atomically write project context with cache, CAS, and manifest-last semantics")
+  .requiredOption("--runtime <runtime>", "selected consumer (claude|codewith|agents|codex)")
+  .requiredOption("--workspace-root <path>", "absolute project or coordination workspace root")
+  .option("--bundle <path|->", "durable v1 JSON file, or - for stdin")
+  .option("--expected-project-id <id>", "required same-ID guard for stale-cache fallback")
+  .option("--allow-stale-cache", "use a compatible same-ID last-known-good cache when input is unavailable or a newer major")
+  .option("--max-stale-age-seconds <seconds>", "bounded cache age (default 3600, maximum 604800)")
+  .option("--codewith-native-imports", "declare that the selected Codewith runtime consumes native @ imports")
+  .option("--force", "repair malformed or mismatched managed markers while preserving bytes outside the forced range")
+  .option("--dry-run", "validate and preview without writing")
+  .option("--json", "output apply JSON")
+  .action((opts) => {
+    try {
+      const runtime = parseProjectContextRuntime(opts.runtime);
+      const input = readProjectContextBundleOption(opts.bundle, opts.allowStaleCache === true);
+      const result = applyProjectContext({
+        workspace_root: resolveSessionPath(opts.workspaceRoot),
+        runtime,
+        bundle_json: input.json,
+        source_path: input.sourcePath,
+        expected_project_id: opts.expectedProjectId,
+        allow_stale_cache: opts.allowStaleCache,
+        max_stale_age_seconds: parsePositiveInteger(opts.maxStaleAgeSeconds, "max stale age"),
+        codewith_native_imports: opts.codewithNativeImports,
+        force: opts.force,
+        dry_run: opts.dryRun,
+      });
+      if (opts.json) printJson({ ok: true, ...result });
+      else {
+        const prefix = result.dry_run ? chalk.yellow("[dry-run]") : chalk.green("OK");
+        console.log(`${prefix} project context ${result.runtime}`);
+        console.log(`${chalk.cyan("project:")} ${result.project_id} @ ${result.revision}`);
+        console.log(`${chalk.cyan("status:")} ${result.status} (${result.age_seconds}s)`);
+        console.log(`${chalk.cyan("target:")} ${result.target_path}`);
+        console.log(`${chalk.cyan("manifest:")} ${result.manifest_path}`);
+      }
+    } catch (error) {
+      printProjectContextFailure(error, opts.json === true);
+    }
+  });
+
 // ── session ──────────────────────────────────────────────────────────────────
 const sessionCmd = program.command("session").description("Plan and apply session-scoped agent instruction files");
 
@@ -728,6 +888,7 @@ sessionCmd.command("plan")
   .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
   .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
+  .option("--codewith-native-imports", "select the gated Codewith native @ import adapter")
   .option("--allow-empty-sources", "allow an explicit empty render plan")
   .option("--json", "output dry-run JSON")
   .action(async (opts) => {
@@ -744,6 +905,7 @@ sessionCmd.command("plan")
         targetHome: opts.targetHome,
         projectRoot: opts.projectRoot,
         sessionId: opts.sessionId,
+        codewithNativeImports: opts.codewithNativeImports,
         allowEmptySources: opts.allowEmptySources,
         sources,
       });
@@ -784,6 +946,7 @@ sessionCmd.command("apply")
   .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
   .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
+  .option("--codewith-native-imports", "select the gated Codewith native @ import adapter")
   .option("--allow-empty-sources", "allow an explicit empty render")
   .option("--dry-run", "preview writes and conflicts without writing")
   .option("--force", "overwrite existing unmanaged files")
@@ -802,6 +965,7 @@ sessionCmd.command("apply")
         targetHome: opts.targetHome,
         projectRoot: opts.projectRoot,
         sessionId: opts.sessionId,
+        codewithNativeImports: opts.codewithNativeImports,
         allowEmptySources: opts.allowEmptySources,
         sources,
       });
