@@ -222,12 +222,18 @@ Codewith uses an import only when its existing
 Bytes outside the managed marker pair are preserved. Codewith's
 `.codewith/CODEWITH.override.md` takes precedence and causes the stable
 `PROJECT_CONTEXT_SHADOWED` failure instead of an ignored write.
+Existing Instructions session manifests are updated additively, and later
+`instructions session plan|apply` runs recompose the validated durable project
+context so routine Claude, Codewith, or Codex rerenders cannot discard it.
 
 Input is limited to 8 KiB, output to 4 KiB and six allowlisted argv commands.
 The writer rejects unknown fields, hash/revision inconsistencies, credentials,
 URLs, symlinks, malformed or conflicting markers, and older revisions. Applies
 use a per-workspace lock, compare-and-swap hashes, same-directory fsynced temp
-files and renames, and a metadata-only manifest written last. A same-project,
+files and renames, and a metadata-only manifest written last. Existing-file
+updates require an atomic exchange primitive (Linux `renameat2` or macOS
+`renameatx_np`); unsupported platforms, including Windows, fail closed before
+replacement rather than approximating an exchange. A same-project,
 compatible last-known-good cache can be selected explicitly with
 `--allow-stale-cache --expected-project-id <id>`; its bounded age/status is
 visible in the rendered context.

@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -16,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   PROJECT_CONTEXT_FRAGMENT_PATH,
+  PROJECT_CONTEXT_MANAGED_COMMENT,
   PROJECT_CONTEXT_MANIFEST_PATH,
   ProjectContextError,
   applyProjectContext,
@@ -25,7 +27,8 @@ import {
   type ProjectContextBundleV1,
   type ProjectContextRuntime,
 } from "./project-context";
-import { CODEWITH_NATIVE_IMPORTS_ENV } from "./session-render";
+import { CODEWITH_NATIVE_IMPORTS_ENV, planSessionRender, type SessionRenderTool } from "./session-render";
+import { applySessionRender } from "./session-apply";
 
 let tmpRoot = "";
 let previousCodewithNativeImports: string | undefined;
@@ -143,6 +146,18 @@ describe("project context bundle validation", () => {
     expectCode(() => parseProjectContextBundle(JSON.stringify(tooMany)), "PROJECT_CONTEXT_INVALID");
   });
 
+  test("rejects parseable non-ISO and impossible calendar timestamps", () => {
+    const nonIso = makeBundle({ generated_at: "July 22, 2026 10:00:00 UTC" });
+    nonIso.hash = computeProjectContextSourceHash(nonIso);
+    expectCode(() => parseProjectContextBundle(nonIso), "PROJECT_CONTEXT_INVALID");
+
+    const impossible = makeBundle({
+      project: { ...makeBundle().project, updated_at: "2026-02-30T09:59:00.000Z" },
+    });
+    impossible.hash = computeProjectContextSourceHash(impossible);
+    expectCode(() => parseProjectContextBundle(impossible), "PROJECT_CONTEXT_INVALID");
+  });
+
   test("enforces the 8 KiB encoded input limit before parsing", () => {
     expectCode(() => parseProjectContextBundle(`{"padding":"${"x".repeat(8_192)}"}`), "PROJECT_CONTEXT_INPUT_TOO_LARGE");
   });
@@ -191,6 +206,18 @@ describe("project context bundle validation", () => {
     expect(plan.fragment).toContain("Release \\u0060v2\\u0060\\n**still data**");
     expect(plan.fragment).toContain("`Test.Slug`");
     expect(plan.fragment).not.toContain("Release `v2`");
+  });
+
+  test("accepts an explicitly linked Mementos project with an independent workspace-shaped ID", () => {
+    const bundle = makeBundle({
+      links: {
+        ...makeBundle().links,
+        mementos: { state: "linked", project_id: "wks_mementos_independent", scope: "project" },
+      },
+    });
+    bundle.hash = computeProjectContextSourceHash(bundle);
+
+    expect(parseProjectContextBundle(bundle).links.mementos.project_id).toBe("wks_mementos_independent");
   });
 });
 
@@ -573,6 +600,295 @@ describe("legacy migration and compatibility", () => {
     }), "PROJECT_CONTEXT_MANIFEST_INVALID");
     expect([fragmentPath, targetPath, cachePath].map((path) => readFileSync(path, "utf8"))).toEqual(before);
   });
+
+  test("keeps project context composed across routine Claude, Codewith, and Codex session rerenders", () => {
+    const cases: Array<{ runtime: ProjectContextRuntime; tool: SessionRenderTool; targetHome: (root: string) => string; target: (root: string) => string }> = [
+      { runtime: "claude", tool: "claude", targetHome: (root) => root, target: (root) => join(root, "CLAUDE.md") },
+      { runtime: "codewith", tool: "codewith", targetHome: (root) => join(root, ".codewith"), target: (root) => join(root, ".codewith", "CODEWITH.md") },
+      { runtime: "agents", tool: "codex", targetHome: (root) => root, target: (root) => join(root, "AGENTS.md") },
+    ];
+
+    for (const item of cases) {
+      const root = join(tmpRoot, item.runtime);
+      mkdirSync(item.targetHome(root), { recursive: true });
+      const first = planSessionRender({
+        tool: item.tool,
+        profile: "live-codewith",
+        targetHome: item.targetHome(root),
+        sources: [{
+          id: "global-rules",
+          layer: "global",
+          content: "Original session rules.",
+          provenance: { source: "test-fixture", generatedAt: "2026-07-22T09:00:00.000Z" },
+        }],
+      });
+      expect(applySessionRender(first).applied).toBe(true);
+      const sessionManifestPath = item.runtime === "codewith"
+        ? join(root, ".codewith", ".hasna", "session-render-manifest.json")
+        : join(root, ".hasna", "session-render-manifest.json");
+      const beforeContext = JSON.parse(readFileSync(sessionManifestPath, "utf8")) as Record<string, unknown>;
+      beforeContext.warnings = ["pre-existing session warning"];
+      writeFileSync(sessionManifestPath, `${JSON.stringify(beforeContext, null, 2)}\n`);
+
+      applyProjectContext({
+        workspace_root: root,
+        runtime: item.runtime,
+        bundle_json: bundleJson(),
+        source_path: join(root, "bundle.json"),
+      });
+      const compatibilityManifest = JSON.parse(readFileSync(sessionManifestPath, "utf8")) as {
+        env: Record<string, string>;
+        warnings: string[];
+        sources: Array<{ id: string; provenance: unknown }>;
+      };
+      expect(Object.values(compatibilityManifest.env)).toContain(item.targetHome(root));
+      expect(compatibilityManifest.warnings).toContain("pre-existing session warning");
+      expect(compatibilityManifest.sources.find((source) => source.id === "global-rules")?.provenance).toEqual({
+        source: "test-fixture",
+        generatedAt: "2026-07-22T09:00:00.000Z",
+      });
+
+      const rerender = planSessionRender({
+        tool: item.tool,
+        profile: "live-codewith",
+        targetHome: item.targetHome(root),
+        sources: [{ id: "global-rules", layer: "global", content: "Updated session rules." }],
+      });
+      const index = rerender.files.find((file) => file.role === "index");
+      expect(index?.content).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+      expect(rerender.manifest.sources.map((source) => source.id)).toContain("project-context-bundle");
+      expect(rerender.manifest.projectContext?.projectId).toBe("wks_ZXg7liK4CFJ1KZjC_Fg_b");
+
+      const result = applySessionRender(rerender);
+      expect(result.applied).toBe(true);
+      expect(result.conflicts).toEqual([]);
+      const updatedRules = rerender.files.find((file) => file.content.includes("Updated session rules."));
+      expect(updatedRules).toBeDefined();
+      expect(readFileSync(updatedRules!.path, "utf8")).toContain("Updated session rules.");
+      const rendered = readFileSync(item.target(root), "utf8");
+      expect(rendered).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+      expect(rendered.match(/project context BEGIN/g)).toHaveLength(1);
+    }
+  });
+
+  test("rejects a stale session plan instead of downgrading newer durable project context", () => {
+    const first = planSessionRender({
+      tool: "codex",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "Original session rules." }],
+    });
+    expect(applySessionRender(first).applied).toBe(true);
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    });
+
+    const stalePlan = planSessionRender({
+      tool: "codex",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "Stale planned rules." }],
+    });
+    const newer = makeBundle({ revision: "rev-8" });
+    newer.hash = computeProjectContextSourceHash(newer);
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(newer),
+      source_path: join(tmpRoot, "newer.json"),
+    });
+
+    expectCode(() => applySessionRender(stalePlan), "PROJECT_CONTEXT_SESSION_STALE");
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain("revision=rev-8");
+    expect(readFileSync(join(tmpRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")), "utf8")).toContain('"revision": "rev-8"');
+    expect(existsSync(join(tmpRoot, ".hasna", "project-context.lock"))).toBe(false);
+
+    const freshPlan = planSessionRender({
+      tool: "codex",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "Fresh planned rules." }],
+    });
+    expect(applySessionRender(freshPlan).applied).toBe(true);
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain("Fresh planned rules.");
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain("revision=rev-8");
+  });
+
+  test("rejects a session plan created before the first project-context activation", () => {
+    const stalePlan = planSessionRender({
+      tool: "codex",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "Pre-activation session rules." }],
+    });
+    expect(stalePlan.projectContextGuard).toBeDefined();
+
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    });
+
+    expectCode(() => applySessionRender(stalePlan), "PROJECT_CONTEXT_SESSION_STALE");
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+    expect(readFileSync(join(tmpRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")), "utf8")).toContain('"revision": "rev-7"');
+
+    const freshPlan = planSessionRender({
+      tool: "codex",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "Post-activation session rules." }],
+    });
+    expect(applySessionRender(freshPlan).applied).toBe(true);
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain("Post-activation session rules.");
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+  });
+
+  test("rejects Codewith rerenders when an override shadows the managed target", () => {
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "codewith",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    });
+    const targetHome = join(tmpRoot, ".codewith");
+    const stalePlan = planSessionRender({
+      tool: "codewith",
+      profile: "live-codewith",
+      targetHome,
+      sources: [{ id: "global-rules", layer: "global", content: "Session rules." }],
+    });
+
+    writeFileSync(join(targetHome, "CODEWITH.override.md"), "shadowing user override\n");
+    expectCode(() => applySessionRender(stalePlan), "PROJECT_CONTEXT_SESSION_STALE");
+    expectCode(() => planSessionRender({
+      tool: "codewith",
+      profile: "live-codewith",
+      targetHome,
+      sources: [{ id: "global-rules", layer: "global", content: "Fresh session rules." }],
+    }), "PROJECT_CONTEXT_SHADOWED");
+    expect(readFileSync(join(targetHome, "CODEWITH.md"), "utf8")).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+  });
+
+  test("rejects a mismatched Codewith project root instead of bypassing context guards", () => {
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "codewith",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    });
+    const unrelatedRoot = join(tmpRoot, "unrelated");
+    mkdirSync(unrelatedRoot);
+    expectCode(() => planSessionRender({
+      tool: "codewith",
+      profile: "live-codewith",
+      targetHome: join(tmpRoot, ".codewith"),
+      projectRoot: unrelatedRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "Session rules." }],
+    }), "PROJECT_CONTEXT_PATH_INVALID");
+    expect(readFileSync(join(tmpRoot, ".codewith", "CODEWITH.md"), "utf8")).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+  });
+
+  test("keeps the durable Codewith adapter mode authoritative across session rerenders", () => {
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "codewith",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      codewith_native_imports: true,
+    });
+    const targetHome = join(tmpRoot, ".codewith");
+    expect(readFileSync(join(targetHome, "CODEWITH.md"), "utf8")).toContain(`@../${PROJECT_CONTEXT_FRAGMENT_PATH}`);
+
+    expectCode(() => planSessionRender({
+      tool: "codewith",
+      profile: "live-codewith",
+      targetHome,
+      sources: [{ id: "global-rules", layer: "global", content: "Mismatched mode rules." }],
+    }), "PROJECT_CONTEXT_ADAPTER_MISMATCH");
+
+    process.env[CODEWITH_NATIVE_IMPORTS_ENV] = "1";
+    const matchingPlan = planSessionRender({
+      tool: "codewith",
+      profile: "live-codewith",
+      targetHome,
+      sources: [{ id: "global-rules", layer: "global", content: "Matching mode rules." }],
+    });
+    expect(applySessionRender(matchingPlan).applied).toBe(true);
+    expect(readFileSync(join(targetHome, "CODEWITH.md"), "utf8")).toContain(`@../${PROJECT_CONTEXT_FRAGMENT_PATH}`);
+    const sessionManifest = JSON.parse(readFileSync(join(targetHome, ".hasna", "session-render-manifest.json"), "utf8")) as { adapterMode: string };
+    expect(sessionManifest.adapterMode).toBe("native-imports");
+  });
+
+  test("creates an adoption manifest when project context arrives before the first session render", () => {
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    });
+    expect(existsSync(join(tmpRoot, ".hasna", "session-render-manifest.json"))).toBe(true);
+
+    const firstSession = planSessionRender({
+      tool: "codex",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "First session rules." }],
+    });
+    const applied = applySessionRender(firstSession);
+    expect(applied.applied).toBe(true);
+    expect(applied.conflicts).toEqual([]);
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain("First session rules.");
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+  });
+
+  test("uses a separate bounded reader for valid session manifests larger than 32 KiB", () => {
+    const first = planSessionRender({
+      tool: "claude",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "Session rules." }],
+    });
+    expect(applySessionRender(first).applied).toBe(true);
+    const sessionManifestPath = join(tmpRoot, ".hasna", "session-render-manifest.json");
+    const manifest = JSON.parse(readFileSync(sessionManifestPath, "utf8")) as Record<string, unknown>;
+    manifest.compatibilityPadding = "x".repeat(40 * 1024);
+    writeFileSync(sessionManifestPath, `${JSON.stringify(manifest)}\n`);
+    expect(statSync(sessionManifestPath).size).toBeGreaterThan(32 * 1024);
+
+    expect(applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "claude",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    }).applied).toBe(true);
+    const updated = JSON.parse(readFileSync(sessionManifestPath, "utf8")) as Record<string, unknown>;
+    expect(updated.compatibilityPadding).toBeUndefined();
+    expect((updated.projectContext as { projectId: string }).projectId).toBe("wks_ZXg7liK4CFJ1KZjC_Fg_b");
+  });
+
+  test("does not inject context into a provider runtime that was not selected", () => {
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "codewith",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    });
+
+    const claude = planSessionRender({
+      tool: "claude",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "Claude rules." }],
+    });
+    expect(claude.manifest.projectContext).toBeUndefined();
+    expect(claude.manifest.sources.map((source) => source.id)).not.toContain("project-context-bundle");
+    expect(claude.files[0]?.content).not.toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+  });
 });
 
 describe("cache, revision, crash, and race safety", () => {
@@ -819,6 +1135,69 @@ describe("cache, revision, crash, and race safety", () => {
     expect(second.race_retries).toBe(1);
     expect(readFileSync(target, "utf8")).toContain("concurrent bytes before manifest");
     expect(readFileSync(join(tmpRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")), "utf8")).toContain('"revision": "rev-8"');
+
+    const finalBundle = makeBundle({ revision: "rev-9" });
+    finalBundle.hash = computeProjectContextSourceHash(finalBundle);
+    let changedAfterExchange = false;
+    const third = applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(finalBundle),
+      source_path: join(tmpRoot, "bundle.json"),
+      test_hooks: {
+        after_target_exchange: ({ attempt }) => {
+          if (attempt === 0 && !changedAfterExchange) {
+            changedAfterExchange = true;
+            writeFileSync(target, `${readFileSync(target, "utf8")}concurrent bytes after atomic exchange\n`);
+          }
+        },
+      },
+    });
+    expect(third.race_retries).toBe(1);
+    expect(readFileSync(target, "utf8")).toContain("concurrent bytes after atomic exchange");
+    expect(readFileSync(join(tmpRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")), "utf8")).toContain('"revision": "rev-9"');
+  });
+
+  test("never installs a tampered displaced temp file during exchange recovery", () => {
+    const target = join(tmpRoot, "AGENTS.md");
+    writeFileSync(target, "authoritative user bytes\n");
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      test_hooks: {
+        after_target_exchange: () => {
+          const displaced = readdirSync(tmpRoot).find((entry) => /^\.project-context-.*\.tmp$/.test(entry));
+          if (!displaced) throw new Error("expected displaced target temp");
+          writeFileSync(join(tmpRoot, displaced), "tampered displaced bytes\n");
+        },
+      },
+    }), "PROJECT_CONTEXT_ATOMIC_REPLACE_CONFLICT");
+
+    const rendered = readFileSync(target, "utf8");
+    expect(rendered).toContain("authoritative user bytes");
+    expect(rendered).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+    expect(rendered).not.toContain("tampered displaced bytes");
+    expect(existsSync(join(tmpRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")))).toBe(false);
+    expect(readdirSync(tmpRoot).some((entry) => /^\.project-context-.*\.tmp$/.test(entry))).toBe(true);
+  });
+
+  test("fails closed before replacing an existing target without atomic exchange support", () => {
+    const target = join(tmpRoot, "AGENTS.md");
+    const original = "existing user target bytes\n";
+    writeFileSync(target, original);
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      test_hooks: { atomic_exchange_unavailable: true },
+    }), "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE");
+
+    expect(readFileSync(target, "utf8")).toBe(original);
+    expect(existsSync(join(tmpRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")))).toBe(false);
+    expect(existsSync(join(tmpRoot, ".hasna", "project-context.lock"))).toBe(false);
   });
 
   test("removes only its own lock inode when lock initialization fails", () => {
@@ -856,6 +1235,36 @@ describe("cache, revision, crash, and race safety", () => {
       source_path: join(tmpRoot, "bundle.json"),
     }).applied).toBe(true);
     expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test("does not remove a new owner that replaces a stale lock during takeover", () => {
+    const lockPath = join(tmpRoot, ".hasna", "project-context.lock");
+    mkdirSync(join(lockPath, ".."), { recursive: true });
+    writeFileSync(lockPath, `${JSON.stringify({
+      schema: "hasna.instructions.project-context-lock/v1",
+      pid: 99_999_999,
+      nonce: "stale-owner",
+    })}\n`);
+    const replacement = `${JSON.stringify({
+      schema: "hasna.instructions.project-context-lock/v1",
+      pid: process.pid,
+      nonce: "new-owner",
+    })}\n`;
+
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "claude",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      test_hooks: {
+        before_stale_lock_remove: (path) => {
+          rmSync(path);
+          writeFileSync(path, replacement);
+        },
+      },
+    }), "PROJECT_CONTEXT_LOCKED");
+    expect(readFileSync(lockPath, "utf8")).toBe(replacement);
+    expect(existsSync(join(tmpRoot, "CLAUDE.md"))).toBe(false);
   });
 
   test("fails without removing a lock file replaced by another renderer", () => {

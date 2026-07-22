@@ -888,6 +888,7 @@ sessionCmd.command("plan")
   .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
   .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
+  .option("--codewith-native-imports", "select the gated Codewith native @ import adapter")
   .option("--allow-empty-sources", "allow an explicit empty render plan")
   .option("--json", "output dry-run JSON")
   .action(async (opts) => {
@@ -904,6 +905,7 @@ sessionCmd.command("plan")
         targetHome: opts.targetHome,
         projectRoot: opts.projectRoot,
         sessionId: opts.sessionId,
+        codewithNativeImports: opts.codewithNativeImports,
         allowEmptySources: opts.allowEmptySources,
         sources,
       });
@@ -944,6 +946,7 @@ sessionCmd.command("apply")
   .option("--config <layer:id-or-slug>", "stored config source by id/slug; repeatable; layer aliases match --source", collectOption, [])
   .option("--identity-export <path>", "OpenIdentities configs instruction export JSON; repeatable", collectOption, [])
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
+  .option("--codewith-native-imports", "select the gated Codewith native @ import adapter")
   .option("--allow-empty-sources", "allow an explicit empty render")
   .option("--dry-run", "preview writes and conflicts without writing")
   .option("--force", "overwrite existing unmanaged files")
@@ -962,6 +965,7 @@ sessionCmd.command("apply")
         targetHome: opts.targetHome,
         projectRoot: opts.projectRoot,
         sessionId: opts.sessionId,
+        codewithNativeImports: opts.codewithNativeImports,
         allowEmptySources: opts.allowEmptySources,
         sources,
       });

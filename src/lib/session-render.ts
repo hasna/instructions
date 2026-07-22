@@ -3,10 +3,24 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import type { Config } from "../types/index.js";
+import {
+  composeProjectContextSessionRender,
+  observeProjectContextSessionGuard,
+  type ProjectContextSessionGuard,
+} from "./project-context.js";
+import {
+  CODEWITH_NATIVE_IMPORTS_ENV,
+  SESSION_INSTRUCTION_LAYERS,
+  SESSION_RENDER_MANAGED_MARKER,
+  SESSION_RENDER_SCHEMA,
+} from "./session-render-contract.js";
 
-export const CODEWITH_NATIVE_IMPORTS_ENV = "HASNA_CONFIGS_CODEWITH_NATIVE_IMPORTS";
-export const SESSION_RENDER_MANAGED_MARKER = "Managed by @hasna/configs session render";
-export const SESSION_RENDER_SCHEMA = "hasna.configs.session-render/v1";
+export {
+  CODEWITH_NATIVE_IMPORTS_ENV,
+  SESSION_INSTRUCTION_LAYERS,
+  SESSION_RENDER_MANAGED_MARKER,
+  SESSION_RENDER_SCHEMA,
+} from "./session-render-contract.js";
 export const RAW_STORE_ROOT_ENV = "HASNA_CONFIGS_HOME";
 export const ANTIGRAVITY_RULE_FILE_CHAR_LIMIT = 12_000;
 
@@ -23,19 +37,6 @@ export const SESSION_RENDER_TOOLS = [
 
 export type SessionRenderTool = (typeof SESSION_RENDER_TOOLS)[number];
 export type SessionRenderMode = "native-imports" | "flattened-markdown" | "cursor-mdc" | "opencode-instructions" | "antigravity-rules";
-export const SESSION_INSTRUCTION_LAYERS = [
-  "global",
-  "tool",
-  "account",
-  "machine",
-  "division",
-  "workspace",
-  "repo",
-  "path",
-  "agent",
-  "session",
-  "local",
-] as const;
 export type SessionInstructionLayer = (typeof SESSION_INSTRUCTION_LAYERS)[number];
 export type SessionInstructionLayerAlias = SessionInstructionLayer | "provider" | "identity" | "project";
 export type SessionInstructionMerge = "append" | "replace";
@@ -195,6 +196,17 @@ export interface SessionRenderManifest {
     sourceIds: string[];
   }>;
   warnings: string[];
+  projectContext?: {
+    schema: string;
+    projectId: string;
+    revision: string;
+    hash: string;
+    status: string;
+    ageSeconds: number;
+    cachePath: string;
+    fragmentPath: string;
+  };
+  compatibility?: Record<string, unknown>;
 }
 
 export interface SessionRenderPlan {
@@ -215,6 +227,7 @@ export interface SessionRenderPlan {
   manifestFile: SessionRenderFile;
   allFiles: SessionRenderFile[];
   warnings: string[];
+  projectContextGuard?: ProjectContextSessionGuard;
 }
 
 const CODEWITH_FLATTENED_ADAPTER: SessionToolAdapter = {
@@ -851,7 +864,27 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
     ...(orderedSources.length === 0 ? ["No instruction sources were provided."] : []),
     ...blockers,
   ];
-  const files = blocked ? [] : buildFiles(targetHome, adapter, input.profile, orderedSources);
+  const baseFiles = blocked ? [] : buildFiles(targetHome, adapter, input.profile, orderedSources);
+  const projectContext = blocked
+    ? null
+    : composeProjectContextSessionRender({
+      tool: input.tool,
+      adapter_mode: adapter.mode,
+      target_home: targetHome,
+      project_root: input.projectRoot,
+      files: baseFiles,
+    });
+  const projectContextGuard = blocked
+    ? null
+    : projectContext?.guard ?? observeProjectContextSessionGuard({
+      tool: input.tool,
+      target_home: targetHome,
+      project_root: input.projectRoot,
+    });
+  if (projectContext && orderedSources.some((source) => source.id === projectContext.source.id)) {
+    throw new Error(`Session source ${projectContext.source.id} is reserved for the durable Instructions project-context renderer.`);
+  }
+  const files = projectContext?.files ?? baseFiles;
   rejectDuplicateRenderPaths(files);
 
   const manifest: SessionRenderManifest = {
@@ -868,37 +901,53 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
     blockers,
     generatedAt,
     env,
-    sourceHash: fingerprint(orderedSources.map((source) => ({
-      id: source.id,
-      layer: source.resolvedLayer,
-      order: source.resolvedOrder,
-      merge: source.resolvedMerge,
-      content: source.content,
-      rules: source.resolvedRules.map((rule) => ({ id: rule.id, path: rule.resolvedPath, content: rule.content })),
-      hash: source.hash ?? null,
-    }))),
-    sources: orderedSources.map((source) => ({
-      id: source.id,
-      label: source.resolvedLabel,
-      layer: source.resolvedLayer,
-      merge: source.resolvedMerge,
-      order: source.resolvedOrder,
-      path: source.path ?? null,
-      targetProviders: source.targetProviders ?? [],
-      owner: source.owner ?? null,
-      sourcePaths: source.sourcePaths ?? [],
-      hash: source.hash ?? null,
-      nonOverridable: source.nonOverridable === true,
-      replacementScope: source.replacementScope ?? null,
-      rules: source.resolvedRules.map((rule) => ({
-        id: rule.id,
-        label: rule.resolvedLabel,
-        path: rule.resolvedPath,
-        globs: rule.globs ?? [],
-        hash: rule.hash ?? null,
+    sourceHash: fingerprint(projectContext
+      ? {
+        sources: orderedSources.map((source) => ({
+          id: source.id,
+          layer: source.resolvedLayer,
+          order: source.resolvedOrder,
+          merge: source.resolvedMerge,
+          content: source.content,
+          rules: source.resolvedRules.map((rule) => ({ id: rule.id, path: rule.resolvedPath, content: rule.content })),
+          hash: source.hash ?? null,
+        })),
+        projectContext: projectContext.project_context,
+      }
+      : orderedSources.map((source) => ({
+        id: source.id,
+        layer: source.resolvedLayer,
+        order: source.resolvedOrder,
+        merge: source.resolvedMerge,
+        content: source.content,
+        rules: source.resolvedRules.map((rule) => ({ id: rule.id, path: rule.resolvedPath, content: rule.content })),
+        hash: source.hash ?? null,
+      }))),
+    sources: [
+      ...orderedSources.map((source) => ({
+        id: source.id,
+        label: source.resolvedLabel,
+        layer: source.resolvedLayer,
+        merge: source.resolvedMerge,
+        order: source.resolvedOrder,
+        path: source.path ?? null,
+        targetProviders: source.targetProviders ?? [],
+        owner: source.owner ?? null,
+        sourcePaths: source.sourcePaths ?? [],
+        hash: source.hash ?? null,
+        nonOverridable: source.nonOverridable === true,
+        replacementScope: source.replacementScope ?? null,
+        rules: source.resolvedRules.map((rule) => ({
+          id: rule.id,
+          label: rule.resolvedLabel,
+          path: rule.resolvedPath,
+          globs: rule.globs ?? [],
+          hash: rule.hash ?? null,
+        })),
+        provenance: source.provenance ?? null,
       })),
-      provenance: source.provenance ?? null,
-    })),
+      ...(projectContext ? [projectContext.source] : []),
+    ],
     skippedSources: [],
     files: files.map((file) => ({
       path: file.path,
@@ -908,6 +957,12 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
       sourceIds: file.sourceIds,
     })),
     warnings,
+    ...(projectContext
+      ? {
+        projectContext: projectContext.project_context,
+        compatibility: projectContext.compatibility,
+      }
+      : {}),
   };
   const manifestFile = makeFile(
     targetHome,
@@ -935,6 +990,7 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
     manifestFile,
     allFiles: [...files, manifestFile],
     warnings,
+    ...(projectContextGuard ? { projectContextGuard } : {}),
   };
 }
 

@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
+import { withProjectContextSessionGuard } from "./project-context.js";
 import {
   SESSION_RENDER_MANAGED_MARKER,
   SESSION_RENDER_SCHEMA,
@@ -75,6 +76,17 @@ export class SessionApplyError extends Error {
 export function applySessionRender(
   plan: SessionRenderPlan,
   options: SessionApplyOptions = {},
+): SessionApplyResult {
+  return withProjectContextSessionGuard(
+    plan.projectContextGuard,
+    () => applySessionRenderUnlocked(plan, options),
+    { dry_run: options.dryRun },
+  );
+}
+
+function applySessionRenderUnlocked(
+  plan: SessionRenderPlan,
+  options: SessionApplyOptions,
 ): SessionApplyResult {
   if (plan.blocked || !plan.writable) {
     throw new SessionApplyError(`Session render plan is blocked: ${plan.blockers.join("; ")}`);

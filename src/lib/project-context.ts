@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { dlopen, FFIType } from "bun:ffi";
 import {
   closeSync,
   constants,
@@ -15,10 +16,11 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join, parse, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { z } from "zod";
 import { scanSecrets } from "./redact.js";
-import { CODEWITH_NATIVE_IMPORTS_ENV, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_SCHEMA } from "./session-render.js";
+import type { SessionRenderFile, SessionRenderManifest, SessionRenderMode, SessionRenderTool } from "./session-render.js";
+import { CODEWITH_NATIVE_IMPORTS_ENV, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_SCHEMA } from "./session-render-contract.js";
 
 export const PROJECT_CONTEXT_SCHEMA = "hasna.projects.project_context_bundle.v1" as const;
 export const PROJECT_CONTEXT_MAX_INPUT_BYTES = 8 * 1024;
@@ -33,6 +35,7 @@ export const PROJECT_CONTEXT_LOCK_PATH = ".hasna/project-context.lock";
 export const PROJECT_CONTEXT_SNAPSHOT_DIR = ".hasna/project-context-snapshots";
 export const PROJECT_CONTEXT_CACHE_SCHEMA = "hasna.instructions.project-context-cache/v1" as const;
 export const PROJECT_CONTEXT_MANAGED_COMMENT = "Managed by @hasna/configs project context";
+const SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
 export const LEGACY_CONFIGS_PACKAGE = "@hasna/configs" as const;
 export const LEGACY_CONFIGS_COMPAT_VERSION = "0.2.45" as const;
 export const LEGACY_CONFIGS_EXECUTABLE = "configs" as const;
@@ -58,7 +61,7 @@ const nullableId = safeId.nullable();
 const producerSlug = z.string().min(1).max(512);
 const producerName = z.string().max(PROJECT_CONTEXT_MAX_INPUT_BYTES);
 const safeOptionalDisplay = z.string().min(1).max(512).refine(isSafeSingleLine, "must be a safe single-line value").nullable();
-const isoTimestamp = z.string().max(40).refine((value) => Number.isFinite(Date.parse(value)), "must be an ISO timestamp");
+const isoTimestamp = z.string().min(20).max(40).refine(isStrictIsoTimestamp, "must be a strict ISO timestamp with timezone");
 const revisionSchema = z.string().min(1).max(512).refine((value) => revisionKey(value) !== null, "must be a monotonic rev-N or timestamp revision");
 const hashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const absolutePath = z.string().min(1).max(4_096).refine((value) => isAbsolute(value), "must be absolute").refine(isSafeSingleLine, "must be safe").nullable();
@@ -145,6 +148,8 @@ const storedManifestFileSchema = z.object({
 const storedManifestObservationSchema = z.object({
   schema: z.literal(SESSION_RENDER_SCHEMA),
   kind: z.literal("project-context"),
+  tool: z.enum(["claude", "codewith", "codex"]),
+  adapterMode: z.enum(["native-import", "managed-block"]),
   projectContext: storedManifestProjectContextSchema,
   files: z.array(storedManifestFileSchema).min(1).max(2),
 }).passthrough().superRefine((value, context) => {
@@ -225,8 +230,11 @@ export interface ProjectContextApplyOptions {
   codewith_native_imports?: boolean;
   test_hooks?: {
     after_lock_open?: () => void;
+    atomic_exchange_unavailable?: boolean;
+    before_stale_lock_remove?: (lockPath: string) => void;
     before_compare?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     after_fragment?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
+    after_target_exchange?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     after_target?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     before_manifest?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
   };
@@ -270,13 +278,41 @@ interface ProjectContextCache {
 }
 
 interface ProjectContextManifestObservation {
+  tool: "claude" | "codewith" | "codex";
+  adapterMode: "native-import" | "managed-block";
   projectContext: z.infer<typeof storedManifestProjectContextSchema>;
   files: Array<z.infer<typeof storedManifestFileSchema>>;
+}
+
+export interface ProjectContextSessionRenderInput {
+  tool: SessionRenderTool;
+  adapter_mode: SessionRenderMode;
+  target_home: string;
+  project_root?: string;
+  files: SessionRenderFile[];
+}
+
+export interface ProjectContextSessionRenderComposition {
+  files: SessionRenderFile[];
+  source: SessionRenderManifest["sources"][number];
+  project_context: NonNullable<SessionRenderManifest["projectContext"]>;
+  compatibility: Record<string, unknown>;
+  guard: ProjectContextSessionGuard;
+}
+
+export interface ProjectContextSessionGuard {
+  workspace_root: string;
+  runtime: ProjectContextRuntime;
+  observed_hashes: Array<{
+    path: string;
+    sha256: string | null;
+  }>;
 }
 
 interface WorkspaceLock {
   fd: number;
   contentHash: string;
+  identity: { dev: number; ino: number };
 }
 
 interface ProjectContextManifest {
@@ -469,7 +505,7 @@ export function planProjectContext(input: ProjectContextPlanInput): ProjectConte
   scanGeneratedContent(managedBlock);
 
   const expectedHashes = new Map<string, string | null>();
-  for (const path of [paths.fragment, paths.target, paths.cache, paths.manifest, paths.legacyManifest]) {
+  for (const path of [paths.fragment, paths.target, paths.cache, paths.manifest, paths.sessionManifest]) {
     if (!path) continue;
     expectedHashes.set(path, currentFileHash(path, workspaceRoot));
   }
@@ -499,11 +535,202 @@ export function planProjectContext(input: ProjectContextPlanInput): ProjectConte
   };
 }
 
+export function composeProjectContextSessionRender(
+  input: ProjectContextSessionRenderInput,
+): ProjectContextSessionRenderComposition | null {
+  const guard = observeProjectContextSessionGuard(input);
+  if (guard === null) return null;
+  const { runtime, workspace_root: workspaceRoot, observed_hashes: observedHashes } = guard;
+  const paths = runtimePaths(workspaceRoot, runtime);
+  if (!existsSync(paths.manifest)) return null;
+  assertCodewithTargetIsConsumed(workspaceRoot, runtime);
+
+  const manifest = readProjectContextManifest(paths.manifest, workspaceRoot);
+  if (!manifest) return null;
+  if (manifest.tool !== manifestTool(runtime)) return null;
+  const nativeImports = input.adapter_mode === "native-imports";
+  const expectedAdapterMode = nativeImports ? "native-import" : "managed-block";
+  if (manifest.adapterMode !== expectedAdapterMode) {
+    throw new ProjectContextError(
+      "PROJECT_CONTEXT_ADAPTER_MISMATCH",
+      "the active project-context adapter mode differs from the selected session runtime mode",
+    );
+  }
+  const targetEntries = manifest.files.filter((file) => file.role === "index");
+  const fragmentEntry = manifest.files.find((file) => file.relativePath === PROJECT_CONTEXT_FRAGMENT_PATH && file.role === "fragment");
+  if (
+    targetEntries.length !== 1 ||
+    targetEntries[0]!.path !== paths.target ||
+    fragmentEntry?.path !== paths.fragment
+  ) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "project-context manifest paths do not match the selected runtime workspace");
+  }
+
+  const cache = readProjectContextCache(paths.cache, workspaceRoot);
+  if (!cache) throw new ProjectContextError("PROJECT_CONTEXT_CACHE_MISSING", "durable project-context cache is missing");
+  if (
+    cache.project_id !== manifest.projectContext.projectId ||
+    cache.revision !== manifest.projectContext.revision ||
+    cache.hash !== manifest.projectContext.hash
+  ) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "project-context manifest and durable cache identities differ");
+  }
+  if (currentFileHash(paths.fragment, workspaceRoot) !== fragmentEntry.sha256 || !fragmentMatchesBundle(paths.fragment, cache.bundle, workspaceRoot)) {
+    throw new ProjectContextError("MANAGED_BLOCK_CONFLICT", "canonical project-context fragment differs from its durable manifest");
+  }
+  const fragment = readUtf8RegularFile(paths.fragment, workspaceRoot, PROJECT_CONTEXT_MAX_RENDERED_BYTES);
+  scanGeneratedContent(fragment);
+
+  if (!existsSync(paths.target)) {
+    throw new ProjectContextError("MANAGED_BLOCK_CONFLICT", "project-context provider target is missing while durable context is active");
+  }
+  const currentTarget = readUtf8RegularFile(paths.target, workspaceRoot);
+  const currentMarkers = parseManagedBlock(currentTarget, false);
+  if (!currentMarkers.block) {
+    throw new ProjectContextError("MANAGED_BLOCK_CONFLICT", "project-context provider target lost its managed block");
+  }
+  if (
+    currentMarkers.block.id !== cache.project_id ||
+    currentMarkers.block.revision !== cache.revision ||
+    currentMarkers.block.hash !== cache.hash
+  ) {
+    throw new ProjectContextError("MANAGED_BLOCK_CONFLICT", "project-context provider markers differ from the durable cache");
+  }
+
+  const plannedIndexes = input.files.filter((file) => file.role === "index" && resolve(file.path) === paths.target);
+  if (plannedIndexes.length !== 1) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "session renderer does not own the selected project-context provider target");
+  }
+  const index = plannedIndexes[0]!;
+  const baseMarkers = parseManagedBlock(index.content, false);
+  const body = nativeImports
+    ? `@${runtime === "codewith" ? "../" : ""}${PROJECT_CONTEXT_FRAGMENT_PATH}`
+    : fragment.trimEnd();
+  const managedBlock = buildManagedBlock(cache.bundle, body, preferredEol(index.content));
+  scanGeneratedContent(managedBlock);
+  const content = ensureTrailingNewline(replaceOrAppendManagedBlock(index.content, managedBlock, baseMarkers, null));
+  const files = input.files.map((file) => file === index
+    ? {
+      ...file,
+      content,
+      sha256: sha256(content),
+      sourceIds: [...new Set([...file.sourceIds, "project-context-bundle"])],
+    }
+    : file);
+  if (observedHashes.some((observed) => currentFileHash(observed.path, workspaceRoot) !== observed.sha256)) {
+    throw new ProjectContextError(
+      "PROJECT_CONTEXT_SESSION_STALE",
+      "durable project context changed while the session plan was being created; create a fresh session render plan",
+    );
+  }
+
+  return {
+    files,
+    source: projectContextManifestSource(paths.cache, runtime, cache.bundle),
+    project_context: {
+      ...manifest.projectContext,
+    },
+    compatibility: manifestCompatibility(),
+    guard,
+  };
+}
+
+export function observeProjectContextSessionGuard(
+  input: Pick<ProjectContextSessionRenderInput, "tool" | "target_home" | "project_root">,
+): ProjectContextSessionGuard | null {
+  const runtime = projectContextRuntimeForSessionTool(input.tool);
+  if (runtime === null) return null;
+  const workspaceRoot = projectContextWorkspaceForSession(input, runtime);
+  if (workspaceRoot === null) return null;
+  const paths = runtimePaths(workspaceRoot, runtime);
+  return {
+    workspace_root: workspaceRoot,
+    runtime,
+    observed_hashes: projectContextSessionGuardPaths(paths, runtime)
+      .map((path) => ({ path, sha256: currentFileHash(path, workspaceRoot) })),
+  };
+}
+
+export function withProjectContextSessionGuard<T>(
+  guard: ProjectContextSessionGuard | undefined,
+  action: () => T,
+  options: { dry_run?: boolean } = {},
+): T {
+  if (!guard) return action();
+  const validated = validateProjectContextSessionGuard(guard);
+  const verify = () => {
+    for (const observed of validated.observed_hashes) {
+      if (currentFileHash(observed.path, validated.workspace_root) !== observed.sha256) {
+        throw new ProjectContextError(
+          "PROJECT_CONTEXT_SESSION_STALE",
+          "durable project context changed after the session plan was created; create a fresh session render plan",
+        );
+      }
+    }
+  };
+  if (options.dry_run) {
+    verify();
+    return action();
+  }
+
+  const lockPath = resolve(validated.workspace_root, ...PROJECT_CONTEXT_LOCK_PATH.split("/"));
+  const lock = acquireWorkspaceLock(validated.workspace_root, lockPath);
+  try {
+    verify();
+    assertWorkspaceLockHeld(lockPath, lock, validated.workspace_root);
+    return action();
+  } finally {
+    releaseWorkspaceLock(lockPath, lock, validated.workspace_root);
+  }
+}
+
+function validateProjectContextSessionGuard(guard: ProjectContextSessionGuard): ProjectContextSessionGuard {
+  const workspaceRoot = assertSafeWorkspaceRoot(guard.workspace_root);
+  if (!(["claude", "codewith", "agents"] as const).includes(guard.runtime)) {
+    throw new ProjectContextError("PROJECT_CONTEXT_SESSION_STALE", "session project-context guard has an invalid runtime");
+  }
+  const paths = runtimePaths(workspaceRoot, guard.runtime);
+  const allowedPaths = new Set(projectContextSessionGuardPaths(paths, guard.runtime));
+  if (!Array.isArray(guard.observed_hashes) || guard.observed_hashes.length !== allowedPaths.size) {
+    throw new ProjectContextError("PROJECT_CONTEXT_SESSION_STALE", "session project-context guard has an incomplete hash inventory");
+  }
+  const observedPaths = new Set<string>();
+  const observedHashes = guard.observed_hashes.map((observed) => {
+    if (!isRecord(observed) || typeof observed.path !== "string") {
+      throw new ProjectContextError("PROJECT_CONTEXT_SESSION_STALE", "session project-context guard contains malformed hash metadata");
+    }
+    const path = resolve(observed.path);
+    if (!allowedPaths.has(path) || observedPaths.has(path)) {
+      throw new ProjectContextError("PROJECT_CONTEXT_SESSION_STALE", "session project-context guard contains an unexpected or duplicate path");
+    }
+    if (observed.sha256 !== null && (typeof observed.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(observed.sha256))) {
+      throw new ProjectContextError("PROJECT_CONTEXT_SESSION_STALE", "session project-context guard contains an invalid hash");
+    }
+    observedPaths.add(path);
+    return { path, sha256: observed.sha256 };
+  });
+  if (observedPaths.size !== allowedPaths.size) {
+    throw new ProjectContextError("PROJECT_CONTEXT_SESSION_STALE", "session project-context guard does not cover every durable context path");
+  }
+  return {
+    workspace_root: workspaceRoot,
+    runtime: guard.runtime,
+    observed_hashes: observedHashes,
+  };
+}
+
 export function applyProjectContext(options: ProjectContextApplyOptions): ProjectContextApplyResult {
   const workspaceRoot = assertSafeWorkspaceRoot(options.workspace_root);
   const now = options.now ?? new Date();
   const lockPath = resolve(workspaceRoot, ...PROJECT_CONTEXT_LOCK_PATH.split("/"));
-  const lock = options.dry_run ? null : acquireWorkspaceLock(workspaceRoot, lockPath, options.test_hooks?.after_lock_open);
+  const lock = options.dry_run
+    ? null
+    : acquireWorkspaceLock(
+      workspaceRoot,
+      lockPath,
+      options.test_hooks?.after_lock_open,
+      options.test_hooks?.before_stale_lock_remove,
+    );
   try {
     const resolved = resolveBundleForApply(options, workspaceRoot, now);
     let raceRetries = 0;
@@ -522,13 +749,11 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
       });
       assertRevisionOrdering(plan, options.force === true);
       const cacheContent = `${JSON.stringify(buildCache(plan, now), null, 2)}\n`;
-      const legacyManifest = buildLegacyCompatibilityManifest(plan, now);
-      const legacyOutput = legacyManifest
-        ? {
-          path: runtimePaths(workspaceRoot, plan.runtime).legacyManifest!,
-          content: `${JSON.stringify(legacyManifest, null, 2)}\n`,
-        }
-        : null;
+      const sessionManifest = buildSessionCompatibilityManifest(plan, now);
+      const sessionOutput = {
+        path: runtimePaths(workspaceRoot, plan.runtime).sessionManifest,
+        content: `${JSON.stringify(sessionManifest, null, 2)}\n`,
+      };
       options.test_hooks?.before_compare?.({ attempt, plan });
       if (!hashesStillMatch(plan.expected_hashes, workspaceRoot)) {
         if (attempt === 0) {
@@ -542,26 +767,64 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
       assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
       try {
         snapshotPath = writeMetadataSnapshot(plan, now);
-        atomicWriteFile(plan.fragment_path, plan.fragment, workspaceRoot, 0o644, expectedPlanHash(plan, plan.fragment_path));
+        atomicWriteFile(
+          plan.fragment_path,
+          plan.fragment,
+          workspaceRoot,
+          0o644,
+          expectedPlanHash(plan, plan.fragment_path),
+          undefined,
+          options.test_hooks?.atomic_exchange_unavailable,
+        );
         options.test_hooks?.after_fragment?.({ attempt, plan });
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
-        atomicWriteFile(plan.target_path, plan.target_content, workspaceRoot, 0o644, expectedPlanHash(plan, plan.target_path));
+        atomicWriteFile(
+          plan.target_path,
+          plan.target_content,
+          workspaceRoot,
+          0o644,
+          expectedPlanHash(plan, plan.target_path),
+          () => options.test_hooks?.after_target_exchange?.({ attempt, plan }),
+          options.test_hooks?.atomic_exchange_unavailable,
+        );
         options.test_hooks?.after_target?.({ attempt, plan });
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
 
-        atomicWriteFile(plan.cache_path, cacheContent, workspaceRoot, 0o600, expectedPlanHash(plan, plan.cache_path));
+        atomicWriteFile(
+          plan.cache_path,
+          cacheContent,
+          workspaceRoot,
+          0o600,
+          expectedPlanHash(plan, plan.cache_path),
+          undefined,
+          options.test_hooks?.atomic_exchange_unavailable,
+        );
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
 
-        if (legacyOutput) {
-          atomicWriteFile(legacyOutput.path, legacyOutput.content, workspaceRoot, 0o600, expectedPlanHash(plan, legacyOutput.path));
-          assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
-        }
+        atomicWriteFile(
+          sessionOutput.path,
+          sessionOutput.content,
+          workspaceRoot,
+          0o600,
+          expectedPlanHash(plan, sessionOutput.path),
+          undefined,
+          options.test_hooks?.atomic_exchange_unavailable,
+        );
+        assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
 
         options.test_hooks?.before_manifest?.({ attempt, plan });
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
-        assertRenderedOutputsStable(plan, cacheContent, legacyOutput);
+        assertRenderedOutputsStable(plan, cacheContent, sessionOutput);
         const manifest = buildManifest(plan, now);
-        atomicWriteFile(plan.manifest_path, `${JSON.stringify(manifest, null, 2)}\n`, workspaceRoot, 0o600, expectedPlanHash(plan, plan.manifest_path));
+        atomicWriteFile(
+          plan.manifest_path,
+          `${JSON.stringify(manifest, null, 2)}\n`,
+          workspaceRoot,
+          0o600,
+          expectedPlanHash(plan, plan.manifest_path),
+          undefined,
+          options.test_hooks?.atomic_exchange_unavailable,
+        );
         return resultForPlan(plan, false, raceRetries, snapshotPath);
       } catch (error) {
         if (error instanceof ProjectContextHashRace && attempt === 0) {
@@ -616,13 +879,13 @@ function expectedPlanHash(plan: ProjectContextPlan, path: string): string | null
 function assertRenderedOutputsStable(
   plan: ProjectContextPlan,
   cacheContent: string,
-  legacyOutput: { path: string; content: string } | null,
+  sessionOutput: { path: string; content: string },
 ): void {
   const outputs = [
     { path: plan.fragment_path, content: plan.fragment },
     { path: plan.target_path, content: plan.target_content },
     { path: plan.cache_path, content: cacheContent },
-    ...(legacyOutput ? [legacyOutput] : []),
+    sessionOutput,
   ];
   for (const output of outputs) {
     if (currentFileHash(output.path, plan.workspace_root) !== sha256(output.content)) {
@@ -860,9 +1123,9 @@ function findLegacyCodewithWorkspaceSection(
   bundle: ProjectContextBundleV1,
 ): { start: number; end: number } | null {
   if (runtime !== "codewith" || !content) return null;
-  const legacyManifestPath = runtimePaths(workspaceRoot, runtime).legacyManifest!;
-  if (!existsSync(legacyManifestPath)) return null;
-  const manifest = readJsonRecord(legacyManifestPath, workspaceRoot);
+  const sessionManifestPath = runtimePaths(workspaceRoot, runtime).sessionManifest;
+  if (!existsSync(sessionManifestPath)) return null;
+  const manifest = readSessionManifestRecord(sessionManifestPath, workspaceRoot);
   if (!manifest || manifest["schema"] !== SESSION_RENDER_SCHEMA) {
     throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "legacy Codewith session manifest is malformed or incompatible");
   }
@@ -988,39 +1251,57 @@ function buildManifest(plan: ProjectContextPlan, now: Date): ProjectContextManif
   };
 }
 
-function buildLegacyCompatibilityManifest(plan: ProjectContextPlan, now: Date): Record<string, unknown> | null {
-  if (plan.runtime !== "codewith") return null;
-  const legacyPath = runtimePaths(plan.workspace_root, plan.runtime).legacyManifest!;
-  if (!existsSync(legacyPath)) return null;
-  const targetHome = resolve(plan.workspace_root, ".codewith");
-  const existing = readJsonRecord(legacyPath, plan.workspace_root);
-  if (!existing || existing["schema"] !== SESSION_RENDER_SCHEMA || (existing["tool"] !== undefined && existing["tool"] !== "codewith")) {
-    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "legacy Codewith session manifest is malformed or incompatible");
+function buildSessionCompatibilityManifest(plan: ProjectContextPlan, now: Date): Record<string, unknown> {
+  const paths = runtimePaths(plan.workspace_root, plan.runtime);
+  const tool = manifestTool(plan.runtime);
+  const targetHome = plan.runtime === "codewith" ? resolve(plan.workspace_root, ".codewith") : plan.workspace_root;
+  const targetRelativePath = sessionTargetRelativePath(plan.runtime);
+  const existing = existsSync(paths.sessionManifest)
+    ? readSessionManifestRecord(paths.sessionManifest, plan.workspace_root)
+    : {
+      schema: SESSION_RENDER_SCHEMA,
+      tool,
+      adapterMode: plan.native_imports ? "native-imports" : "flattened-markdown",
+      profile: "project-context",
+      sessionId: null,
+      targetHome,
+      targetKind: "session-home",
+      targetOwner: {},
+      env: {},
+      sourceHash: null,
+      sources: [],
+      skippedSources: [],
+      files: [],
+      warnings: [],
+    };
+  if (!existing || existing["schema"] !== SESSION_RENDER_SCHEMA || (existing["tool"] !== undefined && existing["tool"] !== tool)) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session manifest is malformed or incompatible");
+  }
+  const existingTargetHome = safeLegacyMetadataString(existing["targetHome"], null);
+  if (existingTargetHome !== null && resolve(existingTargetHome) !== targetHome) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session manifest targets a different workspace");
   }
   const sources = sanitizeLegacySources(existing["sources"])
     .filter((source) => source["id"] !== "project-context-bundle");
   sources.push(manifestSource(plan));
   const files = sanitizeLegacyFiles(existing["files"]);
-  const targetIndexes = files.filter((file) => file["relativePath"] === "CODEWITH.md");
+  const targetIndexes = files.filter((file) => file["relativePath"] === targetRelativePath);
   if (targetIndexes.length > 1) {
-    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "legacy Codewith manifest contains duplicate CODEWITH.md entries");
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", `provider session manifest contains duplicate ${targetRelativePath} entries`);
   }
   const previousSourceIds = targetIndexes[0]?.["sourceIds"] as string[] | undefined;
   const updatedTarget = {
     path: plan.target_path,
-    relativePath: "CODEWITH.md",
+    relativePath: targetRelativePath,
     role: "index",
     sha256: sha256(plan.target_content),
     sourceIds: [...new Set([...(previousSourceIds ?? []), "project-context-bundle"])],
   };
   const targetOwner = isRecord(existing["targetOwner"]) ? existing["targetOwner"] : {};
-  const allowedAdapterModes = new Set(["native-imports", "flattened-markdown", "cursor-mdc", "opencode-instructions", "antigravity-rules"]);
-  const adapterMode = typeof existing["adapterMode"] === "string" && allowedAdapterModes.has(existing["adapterMode"])
-    ? existing["adapterMode"]
-    : plan.native_imports ? "native-imports" : "flattened-markdown";
+  const adapterMode = plan.native_imports ? "native-imports" : "flattened-markdown";
   return {
     schema: SESSION_RENDER_SCHEMA,
-    tool: "codewith",
+    tool,
     adapterMode,
     profile: safeLegacyMetadataString(existing["profile"], "project-context"),
     sessionId: existing["sessionId"] === null ? null : safeLegacyMetadataString(existing["sessionId"], null),
@@ -1028,24 +1309,24 @@ function buildLegacyCompatibilityManifest(plan: ProjectContextPlan, now: Date): 
     targetKind: existing["targetKind"] === "project-root" ? "project-root" : "session-home",
     targetOwner: {
       kind: targetOwner["kind"] === "project" ? "project" : "provider-profile",
-      tool: "codewith",
+      tool,
       profile: safeLegacyMetadataString(targetOwner["profile"], safeLegacyMetadataString(existing["profile"], "project-context")),
       targetHome,
       projectRoot: plan.workspace_root,
       ownedBy: "open-configs",
       canonicalOwner: "instructions",
-      reason: "legacy Codewith session manifest retained for additive Instructions project-context compatibility",
+      reason: "provider session manifest retained for additive Instructions project-context compatibility",
     },
     writable: true,
     blocked: false,
     blockers: [],
     generatedAt: now.toISOString(),
-    env: {},
+    env: sanitizeLegacyEnvironment(existing["env"]),
     sourceHash: sha256(stableStringify({ previous: typeof existing["sourceHash"] === "string" ? existing["sourceHash"] : null, projectContext: plan.bundle.hash })),
     sources,
     skippedSources: sanitizeLegacySkippedSources(existing["skippedSources"]),
-    files: [...files.filter((file) => file["relativePath"] !== "CODEWITH.md"), updatedTarget],
-    warnings: plan.warnings,
+    files: [...files.filter((file) => file["relativePath"] !== targetRelativePath), updatedTarget],
+    warnings: [...new Set([...sanitizeLegacyWarnings(existing["warnings"]), ...plan.warnings])].slice(0, 64),
     projectContext: manifestProjectContext(plan),
     compatibility: manifestCompatibility(),
   };
@@ -1054,7 +1335,7 @@ function buildLegacyCompatibilityManifest(plan: ProjectContextPlan, now: Date): 
 function sanitizeLegacySources(value: unknown): Array<Record<string, unknown>> {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 64 || value.some((entry) => !isRecord(entry))) {
-    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "legacy Codewith source inventory is malformed");
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source inventory is malformed");
   }
   return value.map((entry, index) => {
     const source = entry as Record<string, unknown>;
@@ -1100,24 +1381,98 @@ function sanitizeLegacySources(value: unknown): Array<Record<string, unknown>> {
       nonOverridable: source["nonOverridable"] === true,
       replacementScope: typeof source["replacementScope"] === "string" ? safeLegacyMetadataString(source["replacementScope"], null) : null,
       rules,
-      provenance: null,
+      provenance: sanitizeLegacyProvenance(source["provenance"]),
     };
   });
 }
 
+function sanitizeLegacyEnvironment(value: unknown): Record<string, string> {
+  if (value === undefined) return {};
+  if (!isRecord(value) || Object.keys(value).length > 8) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session environment metadata is malformed");
+  }
+  const result: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(key) || typeof item !== "string" || !isAbsolute(item) || !isSafeSingleLine(item) || item.length > 4_096) {
+      throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session environment metadata contains an unsafe entry");
+    }
+    if (scanSecrets(`${key}=${item}`, "text").length > 0) {
+      throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session environment metadata contains credential-like content");
+    }
+    result[key] = item;
+  }
+  return result;
+}
+
+function sanitizeLegacyWarnings(value: unknown): string[] {
+  return safeLegacyStringArray(value, 64);
+}
+
+function sanitizeLegacyProvenance(value: unknown): Record<string, unknown> | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance is malformed");
+  }
+  const state = { nodes: 0 };
+  const sanitized = sanitizeBoundedJsonMetadata(value, 0, state);
+  if (!isRecord(sanitized)) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance is malformed");
+  }
+  const encoded = JSON.stringify(sanitized);
+  if (Buffer.byteLength(encoded, "utf8") > PROJECT_CONTEXT_MAX_INPUT_BYTES || scanSecrets(encoded, "text").length > 0) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance exceeds its bound or contains credential-like content");
+  }
+  return sanitized;
+}
+
+function sanitizeBoundedJsonMetadata(value: unknown, depth: number, state: { nodes: number }): unknown {
+  state.nodes++;
+  if (state.nodes > 128 || depth > 6) {
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance exceeds its structural bound");
+  }
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance contains an invalid number");
+    return value;
+  }
+  if (typeof value === "string") {
+    if (value.length > 4_096 || !isSafeSingleLine(value)) {
+      throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance contains an unsafe string");
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 64) throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance contains an oversized array");
+    return value.map((item) => sanitizeBoundedJsonMetadata(item, depth + 1, state));
+  }
+  if (isRecord(value)) {
+    const entries = Object.entries(value);
+    if (entries.length > 64) throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance contains an oversized object");
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of entries) {
+      if (key.length === 0 || key.length > 256 || !isSafeSingleLine(key) || key === "__proto__" || key === "constructor" || key === "prototype") {
+        throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance contains an unsafe key");
+      }
+      result[key] = sanitizeBoundedJsonMetadata(item, depth + 1, state);
+    }
+    return result;
+  }
+  throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session source provenance contains an unsupported value");
+}
+
 function sanitizeLegacyFiles(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value) || value.length > 64 || value.some((entry) => !isRecord(entry))) {
-    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "legacy Codewith file inventory is malformed");
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session file inventory is malformed");
   }
   return value.map((entry) => {
     const file = entry as Record<string, unknown>;
     const relativePath = safeLegacyMetadataString(file["relativePath"], "");
     if (!relativePath || isAbsolute(relativePath) || relativePath === ".." || relativePath.startsWith("../") || relativePath.includes("/../")) {
-      throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "legacy Codewith file inventory contains an unsafe relative path");
+      throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session file inventory contains an unsafe relative path");
     }
     const sha = safeLegacyMetadataString(file["sha256"], "");
     if (!/^[a-f0-9]{64}$/.test(sha)) {
-      throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "legacy Codewith file inventory contains an invalid hash");
+      throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session file inventory contains an invalid hash");
     }
     const role = typeof file["role"] === "string" && ["index", "fragment", "rule", "config", "manifest"].includes(file["role"])
       ? file["role"]
@@ -1145,7 +1500,7 @@ function sanitizeLegacySkippedSources(value: unknown): Array<Record<string, unkn
 function safeLegacyStringArray(value: unknown, maxItems: number): string[] {
   if (!Array.isArray(value)) return [];
   if (value.length > maxItems || value.some((item) => typeof item !== "string")) {
-    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "legacy Codewith manifest contains malformed string metadata");
+    throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "provider session manifest contains malformed string metadata");
   }
   return value
     .map((item) => safeLegacyMetadataString(item, ""))
@@ -1160,25 +1515,33 @@ function safeLegacyMetadataString(value: unknown, fallback: string | null): stri
 }
 
 function manifestSource(plan: ProjectContextPlan): ProjectContextManifest["sources"][number] {
+  return projectContextManifestSource(plan.cache_path, plan.runtime, plan.bundle);
+}
+
+function projectContextManifestSource(
+  cachePath: string,
+  runtime: ProjectContextRuntime,
+  bundle: ProjectContextBundleV1,
+): ProjectContextManifest["sources"][number] {
   return {
     id: "project-context-bundle",
     label: "Project Context Bundle",
     layer: "repo",
     merge: "replace",
     order: 0,
-    path: plan.cache_path,
-    targetProviders: [manifestTool(plan.runtime)],
+    path: cachePath,
+    targetProviders: [manifestTool(runtime)],
     owner: { kind: "package", id: "@hasna/projects" },
     sourcePaths: [],
-    hash: plan.bundle.hash,
+    hash: bundle.hash,
     nonOverridable: true,
     replacementScope: "project-context",
     rules: [],
     provenance: {
       schema: PROJECT_CONTEXT_SCHEMA,
-      projectId: plan.bundle.project.id,
-      revision: plan.bundle.revision,
-      hash: plan.bundle.hash,
+      projectId: bundle.project.id,
+      revision: bundle.revision,
+      hash: bundle.hash,
     },
   };
 }
@@ -1236,6 +1599,8 @@ function readProjectContextManifest(path: string, workspaceRoot: string): Projec
     throw new ProjectContextError("PROJECT_CONTEXT_MANIFEST_INVALID", "existing project-context manifest is malformed");
   }
   return {
+    tool: result.data.tool,
+    adapterMode: result.data.adapterMode,
     projectContext: result.data.projectContext,
     files: result.data.files,
   };
@@ -1269,12 +1634,24 @@ function readJsonRecord(path: string, workspaceRoot: string): Record<string, unk
   }
 }
 
+function readSessionManifestRecord(path: string, workspaceRoot: string): Record<string, unknown> | null {
+  const content = readUtf8RegularFile(path, workspaceRoot, SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES);
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function atomicWriteFile(
   path: string,
   content: string,
   workspaceRoot: string,
   defaultMode: number,
   expectedHash?: string | null,
+  afterExchange?: () => void,
+  atomicExchangeUnavailable = false,
 ): void {
   const dir = resolve(path, "..");
   ensureSafeDirectory(dir, workspaceRoot, 0o700);
@@ -1282,80 +1659,286 @@ function atomicWriteFile(
   const previousMode = existsSync(path) ? statSync(path).mode & 0o777 : defaultMode;
   const tempPath = join(dir, `.project-context-${randomUUID()}.tmp`);
   let fd: number | null = null;
+  let preserveTemp = false;
+  let directoryChanged = false;
   try {
     fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, previousMode);
     writeFileSync(fd, content, { encoding: "utf8" });
     fsyncSync(fd);
     closeSync(fd);
     fd = null;
-    if (expectedHash !== undefined && currentFileHash(path, workspaceRoot) !== expectedHash) {
-      throw new ProjectContextHashRace(`managed path changed before replacement: ${relativePosix(workspaceRoot, path)}`);
+    if (expectedHash === undefined) {
+      renameSync(tempPath, path);
+      directoryChanged = true;
+    } else if (expectedHash === null) {
+      try {
+        linkSync(tempPath, path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new ProjectContextHashRace(`managed path appeared before creation: ${relativePosix(workspaceRoot, path)}`);
+        }
+        throw error;
+      }
+      directoryChanged = true;
+      rmSync(tempPath);
+    } else {
+      if (!existsSync(path)) {
+        throw new ProjectContextHashRace(`managed path disappeared before replacement: ${relativePosix(workspaceRoot, path)}`);
+      }
+      if (atomicExchangeUnavailable) {
+        throw new ProjectContextError(
+          "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE",
+          "the platform could not provide an atomic exchange for compare-and-swap replacement",
+        );
+      }
+      atomicExchangePaths(tempPath, path);
+      directoryChanged = true;
+      const desiredHash = sha256(content);
+      let exchanged = true;
+      try {
+        const displacedAtExchange = currentFileHash(tempPath, workspaceRoot);
+        const installedAtExchange = currentFileHash(path, workspaceRoot);
+        if (displacedAtExchange !== expectedHash || installedAtExchange !== desiredHash) {
+          if (installedAtExchange === desiredHash) {
+            atomicExchangePaths(tempPath, path);
+            exchanged = false;
+            throw new ProjectContextHashRace(`managed path changed at atomic replacement: ${relativePosix(workspaceRoot, path)}`);
+          }
+          preserveTemp = true;
+          exchanged = false;
+          throw new ProjectContextHashRace(`managed path changed during atomic replacement: ${relativePosix(workspaceRoot, path)}`);
+        }
+        afterExchange?.();
+        const replacedHash = currentFileHash(tempPath, workspaceRoot);
+        const replacementHash = currentFileHash(path, workspaceRoot);
+        if (replacedHash !== expectedHash) {
+          preserveTemp = true;
+          exchanged = false;
+          throw new ProjectContextError(
+            "PROJECT_CONTEXT_ATOMIC_REPLACE_CONFLICT",
+            `the displaced managed file changed during atomic replacement: ${relativePosix(workspaceRoot, path)}`,
+          );
+        }
+        if (replacementHash !== desiredHash) {
+          rmSync(tempPath);
+          exchanged = false;
+          throw new ProjectContextHashRace(`managed path changed immediately after atomic replacement: ${relativePosix(workspaceRoot, path)}`);
+        }
+        rmSync(tempPath);
+        exchanged = false;
+      } catch (error) {
+        if (exchanged) {
+          try {
+            if (currentFileHash(path, workspaceRoot) === desiredHash) {
+              atomicExchangePaths(tempPath, path);
+            } else {
+              preserveTemp = true;
+            }
+          } catch {
+            preserveTemp = true;
+          }
+        }
+        throw error;
+      }
     }
-    renameSync(tempPath, path);
     fsyncDirectory(dir);
   } catch (error) {
     if (fd !== null) closeSync(fd);
-    if (existsSync(tempPath)) rmSync(tempPath);
+    if (!preserveTemp && existsSync(tempPath)) rmSync(tempPath);
+    if (directoryChanged) fsyncDirectory(dir);
     throw error;
   }
 }
 
-function acquireWorkspaceLock(workspaceRoot: string, lockPath: string, afterOpen?: () => void): WorkspaceLock {
+type AtomicExchange = (left: string, right: string) => boolean;
+
+let atomicExchange: AtomicExchange | null | undefined;
+const atomicExchangeLibraries: Array<ReturnType<typeof dlopen>> = [];
+
+function atomicExchangePaths(left: string, right: string): void {
+  const exchange = resolveAtomicExchange();
+  if (!exchange || !exchange(left, right)) {
+    throw new ProjectContextError(
+      "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE",
+      "the platform could not provide an atomic exchange for compare-and-swap replacement",
+    );
+  }
+}
+
+function resolveAtomicExchange(): AtomicExchange | null {
+  if (atomicExchange !== undefined) return atomicExchange;
+  if (process.platform === "linux") {
+    const muslArch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : null;
+    const candidates = [
+      "libc.so.6",
+      "libc.so",
+      ...(muslArch ? [`/lib/ld-musl-${muslArch}.so.1`, `/lib/libc.musl-${muslArch}.so.1`] : []),
+    ];
+    for (const candidate of candidates) {
+      try {
+        const library = dlopen(candidate, {
+          renameat2: {
+            args: [FFIType.i32, FFIType.cstring, FFIType.i32, FFIType.cstring, FFIType.u32],
+            returns: FFIType.i32,
+          },
+        });
+        atomicExchangeLibraries.push(library);
+        const renameat2 = library.symbols.renameat2;
+        atomicExchange = (left, right) => renameat2(
+          -100,
+          Buffer.from(`${left}\0`),
+          -100,
+          Buffer.from(`${right}\0`),
+          2,
+        ) === 0;
+        return atomicExchange;
+      } catch {
+        // Older glibc and some musl builds expose the kernel call only through syscall(2).
+      }
+    }
+    const renameat2Syscall = process.arch === "arm64" ? 276 : process.arch === "x64" ? 316 : null;
+    if (renameat2Syscall !== null) {
+      for (const candidate of candidates) {
+        try {
+          const library = dlopen(candidate, {
+            syscall: {
+              args: [FFIType.i64, FFIType.i64, FFIType.cstring, FFIType.i64, FFIType.cstring, FFIType.u64],
+              returns: FFIType.i64,
+            },
+          });
+          atomicExchangeLibraries.push(library);
+          const syscall = library.symbols.syscall;
+          atomicExchange = (left, right) => Number(syscall(
+            renameat2Syscall,
+            -100,
+            Buffer.from(`${left}\0`),
+            -100,
+            Buffer.from(`${right}\0`),
+            2,
+          )) === 0;
+          return atomicExchange;
+        } catch {
+          // Try the next libc location before failing closed.
+        }
+      }
+    }
+  }
+  if (process.platform === "darwin") {
+    try {
+      const library = dlopen("/usr/lib/libSystem.B.dylib", {
+        renameatx_np: {
+          args: [FFIType.i32, FFIType.cstring, FFIType.i32, FFIType.cstring, FFIType.u32],
+          returns: FFIType.i32,
+        },
+      });
+      atomicExchangeLibraries.push(library);
+      const renameatx = library.symbols.renameatx_np;
+      atomicExchange = (left, right) => renameatx(
+        -2,
+        Buffer.from(`${left}\0`),
+        -2,
+        Buffer.from(`${right}\0`),
+        2,
+      ) === 0;
+      return atomicExchange;
+    } catch {
+      // Fall through to a fail-closed unsupported result.
+    }
+  }
+  // Windows ReplaceFileW can atomically install the prepared file, but it cannot
+  // atomically materialize the displaced target back at the temp path. Without a
+  // journaled recovery protocol that is not a true exchange, so updates fail closed.
+  atomicExchange = null;
+  return null;
+}
+
+function acquireWorkspaceLock(
+  workspaceRoot: string,
+  lockPath: string,
+  afterOpen?: () => void,
+  beforeStaleRemove?: (lockPath: string) => void,
+): WorkspaceLock {
   const lockDirectory = resolve(lockPath, "..");
   ensureSafeDirectory(lockDirectory, workspaceRoot, 0o700);
   assertNoSymlinkSegments(workspaceRoot, lockPath);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const tempPath = join(lockDirectory, `.project-context-lock-${randomUUID()}.tmp`);
-    let fd: number | null = null;
-    let openedIdentity: { dev: number; ino: number } | null = null;
-    let linked = false;
+  const tempPath = join(lockDirectory, `.project-context-lock-${randomUUID()}.tmp`);
+  let fd: number | null = null;
+  let openedIdentity: { dev: number; ino: number } | null = null;
+  let openedContentHash: string | null = null;
+  let linked = false;
+  let preserveTemp = false;
+  try {
+    fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    const opened = fstatSync(fd);
+    openedIdentity = { dev: opened.dev, ino: opened.ino };
+    const content = `${JSON.stringify({
+      schema: "hasna.instructions.project-context-lock/v1",
+      pid: process.pid,
+      nonce: randomUUID(),
+      created_at: new Date().toISOString(),
+    })}\n`;
+    openedContentHash = sha256(content);
+    writeFileSync(fd, content);
+    fsyncSync(fd);
     try {
-      fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-      const opened = fstatSync(fd);
-      openedIdentity = { dev: opened.dev, ino: opened.ino };
-      const content = `${JSON.stringify({
-        schema: "hasna.instructions.project-context-lock/v1",
-        pid: process.pid,
-        nonce: randomUUID(),
-        created_at: new Date().toISOString(),
-      })}\n`;
-      writeFileSync(fd, content);
-      fsyncSync(fd);
       linkSync(tempPath, lockPath);
       linked = true;
-      fsyncDirectory(lockDirectory);
-      closeSync(fd);
-      fd = null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const takeover = tryTakeoverStaleWorkspaceLock(
+        tempPath,
+        lockPath,
+        workspaceRoot,
+        openedIdentity,
+        openedContentHash,
+        beforeStaleRemove,
+      );
+      if (!takeover) {
+        throw new ProjectContextError("PROJECT_CONTEXT_LOCKED", "another renderer holds the workspace project-context lock");
+      }
+      linked = true;
+    }
+    fsyncDirectory(lockDirectory);
+    if (existsSync(tempPath)) {
       rmSync(tempPath);
       fsyncDirectory(lockDirectory);
-      fd = openSync(lockPath, constants.O_RDONLY);
-      const held = fstatSync(fd);
-      if (held.dev !== openedIdentity.dev || held.ino !== openedIdentity.ino) {
-        throw new ProjectContextError("PROJECT_CONTEXT_LOCK_LOST", "workspace project-context lock changed during initialization");
-      }
-      afterOpen?.();
-      return { fd, contentHash: sha256(content) };
-    } catch (error) {
-      if (fd !== null) {
-        try { closeSync(fd); } catch { /* already closed */ }
-      }
-      if (existsSync(tempPath)) {
-        try { rmSync(tempPath); } catch { /* leave an unreferenced temp for later cleanup */ }
-      }
-      if (linked && openedIdentity) removeOwnedLockByInode(lockPath, openedIdentity);
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (attempt === 0 && removeStaleWorkspaceLock(lockPath, workspaceRoot)) continue;
-      throw new ProjectContextError("PROJECT_CONTEXT_LOCKED", "another renderer holds the workspace project-context lock");
     }
+    const held = lstatSync(lockPath);
+    if (
+      held.isSymbolicLink() ||
+      held.dev !== openedIdentity.dev ||
+      held.ino !== openedIdentity.ino ||
+      currentFileHash(lockPath, workspaceRoot) !== openedContentHash
+    ) {
+      throw new ProjectContextError("PROJECT_CONTEXT_LOCK_LOST", "workspace project-context lock changed during initialization");
+    }
+    afterOpen?.();
+    return { fd, contentHash: openedContentHash, identity: openedIdentity };
+  } catch (error) {
+    preserveTemp = error instanceof ProjectContextError && error.code === "PROJECT_CONTEXT_LOCK_LOST";
+    if (linked && openedIdentity && openedContentHash) {
+      removeOwnedLockByInode(lockPath, openedIdentity, openedContentHash);
+    }
+    if (!preserveTemp && existsSync(tempPath)) {
+      try { rmSync(tempPath); } catch { /* leave an unreferenced temp for later cleanup */ }
+    }
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+    throw error;
   }
-  throw new ProjectContextError("PROJECT_CONTEXT_LOCKED", "workspace project-context lock could not be acquired");
 }
 
-function removeOwnedLockByInode(lockPath: string, identity: { dev: number; ino: number }): void {
+function removeOwnedLockByInode(
+  lockPath: string,
+  identity: { dev: number; ino: number },
+  expectedHash?: string,
+): void {
   try {
     if (!existsSync(lockPath)) return;
     const current = lstatSync(lockPath);
     if (current.isSymbolicLink() || current.dev !== identity.dev || current.ino !== identity.ino) return;
+    if (expectedHash !== undefined && sha256(readFileSync(lockPath, "utf8")) !== expectedHash) return;
     rmSync(lockPath);
     fsyncDirectory(resolve(lockPath, ".."));
   } catch {
@@ -1363,43 +1946,111 @@ function removeOwnedLockByInode(lockPath: string, identity: { dev: number; ino: 
   }
 }
 
-function removeStaleWorkspaceLock(lockPath: string, workspaceRoot: string): boolean {
+function observeStaleWorkspaceLock(
+  lockPath: string,
+  workspaceRoot: string,
+): { identity: { dev: number; ino: number }; contentHash: string } | null {
   let content: string;
+  let observed: ReturnType<typeof lstatSync>;
   try {
     content = readUtf8RegularFile(lockPath, workspaceRoot, 2_048);
+    observed = lstatSync(lockPath);
+    if (observed.isSymbolicLink() || !observed.isFile()) return null;
   } catch {
-    return false;
+    return null;
   }
+  const contentHash = sha256(content);
+  if (currentFileHash(lockPath, workspaceRoot) !== contentHash) return null;
   let pid: number | null = null;
   try {
     const value = JSON.parse(content) as unknown;
     if (isRecord(value) && Number.isSafeInteger(value["pid"]) && Number(value["pid"]) > 0) pid = Number(value["pid"]);
   } catch {
-    return removeMalformedStaleWorkspaceLock(lockPath, content);
+    if (Date.now() - observed.mtimeMs < 5 * 60 * 1_000) return null;
   }
-  if (pid === null) return removeMalformedStaleWorkspaceLock(lockPath, content);
-  if (processIsAlive(pid)) return false;
-  const expected = sha256(content);
-  if (currentFileHash(lockPath, workspaceRoot) !== expected) return false;
-  rmSync(lockPath);
-  fsyncDirectory(resolve(lockPath, ".."));
-  return true;
+  if (pid !== null && processIsAlive(pid)) return null;
+  if (pid === null && Date.now() - observed.mtimeMs < 5 * 60 * 1_000) return null;
+  return {
+    identity: { dev: observed.dev, ino: observed.ino },
+    contentHash,
+  };
 }
 
-function removeMalformedStaleWorkspaceLock(lockPath: string, content: string): boolean {
+function tryTakeoverStaleWorkspaceLock(
+  candidatePath: string,
+  lockPath: string,
+  workspaceRoot: string,
+  candidateIdentity: { dev: number; ino: number },
+  candidateHash: string,
+  beforeTakeover?: (lockPath: string) => void,
+): boolean {
+  const stale = observeStaleWorkspaceLock(lockPath, workspaceRoot);
+  if (!stale) return false;
+  beforeTakeover?.(lockPath);
+  atomicExchangePaths(candidatePath, lockPath);
+  let exchanged = true;
   try {
-    const observed = lstatSync(lockPath);
-    if (observed.isSymbolicLink() || !observed.isFile() || Date.now() - observed.mtimeMs < 5 * 60 * 1_000) return false;
-    if (sha256(readFileSync(lockPath, "utf8")) !== sha256(content)) return false;
-    removeOwnedLockByInode(lockPath, { dev: observed.dev, ino: observed.ino });
-    return !existsSync(lockPath);
-  } catch {
-    return false;
+    const current = lstatSync(lockPath);
+    const displaced = lstatSync(candidatePath);
+    const candidateInstalled = (
+      !current.isSymbolicLink() &&
+      current.dev === candidateIdentity.dev &&
+      current.ino === candidateIdentity.ino &&
+      currentFileHash(lockPath, workspaceRoot) === candidateHash
+    );
+    const staleDisplaced = (
+      !displaced.isSymbolicLink() &&
+      displaced.dev === stale.identity.dev &&
+      displaced.ino === stale.identity.ino &&
+      currentFileHash(candidatePath, workspaceRoot) === stale.contentHash
+    );
+    if (!candidateInstalled || !staleDisplaced) {
+      if (candidateInstalled && existsSync(candidatePath)) {
+        atomicExchangePaths(candidatePath, lockPath);
+        exchanged = false;
+        return false;
+      }
+      throw new ProjectContextError(
+        "PROJECT_CONTEXT_LOCK_LOST",
+        "workspace lock changed during stale-lock takeover and could not be restored safely",
+      );
+    }
+    rmSync(candidatePath);
+    fsyncDirectory(resolve(lockPath, ".."));
+    exchanged = false;
+    return true;
+  } catch (error) {
+    if (exchanged) {
+      try {
+        if (currentFileHash(lockPath, workspaceRoot) === candidateHash && existsSync(candidatePath)) {
+          atomicExchangePaths(candidatePath, lockPath);
+          exchanged = false;
+        }
+      } catch {
+        // Preserve both paths for bounded recovery instead of deleting uncertain ownership.
+      }
+    }
+    if (exchanged) {
+      throw new ProjectContextError(
+        "PROJECT_CONTEXT_LOCK_LOST",
+        "workspace lock takeover could not be completed or rolled back safely",
+      );
+    }
+    throw error;
   }
 }
 
 function assertWorkspaceLockHeld(lockPath: string, lock: WorkspaceLock, workspaceRoot: string): void {
-  if (!existsSync(lockPath) || currentFileHash(lockPath, workspaceRoot) !== lock.contentHash) {
+  if (!existsSync(lockPath)) {
+    throw new ProjectContextError("PROJECT_CONTEXT_LOCK_LOST", "workspace project-context lock changed during render");
+  }
+  const current = lstatSync(lockPath);
+  if (
+    current.isSymbolicLink() ||
+    current.dev !== lock.identity.dev ||
+    current.ino !== lock.identity.ino ||
+    currentFileHash(lockPath, workspaceRoot) !== lock.contentHash
+  ) {
     throw new ProjectContextError("PROJECT_CONTEXT_LOCK_LOST", "workspace project-context lock changed during render");
   }
 }
@@ -1414,17 +2065,83 @@ function processIsAlive(pid: number): boolean {
 }
 
 function releaseWorkspaceLock(lockPath: string, lock: WorkspaceLock, workspaceRoot: string): void {
-  try {
-    closeSync(lock.fd);
-  } finally {
+  if (!resolveAtomicExchange()) {
     try {
-      if (existsSync(lockPath) && currentFileHash(lockPath, workspaceRoot) === lock.contentHash) {
-        rmSync(lockPath);
-        if (existsSync(resolve(lockPath, ".."))) fsyncDirectory(resolve(lockPath, ".."));
-      }
-    } catch {
-      // A replaced or malformed lock is not ours to remove. Leave it fail-closed.
+      removeOwnedLockByInode(lockPath, lock.identity, lock.contentHash);
+    } finally {
+      try { closeSync(lock.fd); } catch { /* already closed */ }
     }
+    return;
+  }
+  const lockDirectory = resolve(lockPath, "..");
+  const releasePath = join(lockDirectory, `.project-context-release-${randomUUID()}.tmp`);
+  let releaseFd: number | null = null;
+  let releaseIdentity: { dev: number; ino: number } | null = null;
+  let releaseHash: string | null = null;
+  let exchanged = false;
+  try {
+    releaseFd = openSync(releasePath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    const opened = fstatSync(releaseFd);
+    releaseIdentity = { dev: opened.dev, ino: opened.ino };
+    const releaseContent = `${JSON.stringify({
+      schema: "hasna.instructions.project-context-lock/v1",
+      pid: process.pid,
+      nonce: randomUUID(),
+      state: "releasing",
+      created_at: new Date().toISOString(),
+    })}\n`;
+    releaseHash = sha256(releaseContent);
+    writeFileSync(releaseFd, releaseContent);
+    fsyncSync(releaseFd);
+    closeSync(releaseFd);
+    releaseFd = null;
+
+    atomicExchangePaths(releasePath, lockPath);
+    exchanged = true;
+    const installed = lstatSync(lockPath);
+    const displaced = lstatSync(releasePath);
+    const releaseInstalled = (
+      !installed.isSymbolicLink() &&
+      installed.dev === releaseIdentity.dev &&
+      installed.ino === releaseIdentity.ino &&
+      currentFileHash(lockPath, workspaceRoot) === releaseHash
+    );
+    const ownedDisplaced = (
+      !displaced.isSymbolicLink() &&
+      displaced.dev === lock.identity.dev &&
+      displaced.ino === lock.identity.ino &&
+      currentFileHash(releasePath, workspaceRoot) === lock.contentHash
+    );
+    if (!releaseInstalled || !ownedDisplaced) {
+      if (releaseInstalled && existsSync(releasePath)) {
+        atomicExchangePaths(releasePath, lockPath);
+        exchanged = false;
+      }
+      return;
+    }
+    rmSync(releasePath);
+    removeOwnedLockByInode(lockPath, releaseIdentity, releaseHash);
+    fsyncDirectory(lockDirectory);
+    exchanged = false;
+  } catch {
+    if (exchanged) {
+      try {
+        if (releaseHash && currentFileHash(lockPath, workspaceRoot) === releaseHash && existsSync(releasePath)) {
+          atomicExchangePaths(releasePath, lockPath);
+          exchanged = false;
+        }
+      } catch {
+        // Leave both paths in place rather than deleting uncertain lock ownership.
+      }
+    }
+  } finally {
+    if (releaseFd !== null) {
+      try { closeSync(releaseFd); } catch { /* already closed */ }
+    }
+    if (!exchanged && existsSync(releasePath)) {
+      try { rmSync(releasePath); } catch { /* preserve an uncertain release marker */ }
+    }
+    try { closeSync(lock.fd); } catch { /* already closed */ }
   }
 }
 
@@ -1495,9 +2212,6 @@ function validateCommands(bundle: ProjectContextBundleV1): void {
 }
 
 function validateIdentityConsistency(bundle: ProjectContextBundleV1): void {
-  if (bundle.links.mementos.project_id?.startsWith("wks_") && bundle.links.mementos.project_id !== bundle.project.id) {
-    throw new ProjectContextError("PROJECT_CONTEXT_INVALID", "Mementos project identity differs from the canonical project ID");
-  }
   if (bundle.project.status !== "active" && bundle.resolution.create_allowed) {
     throw new ProjectContextError("PROJECT_CONTEXT_INVALID", "archived or deleted projects cannot allow creation");
   }
@@ -1528,7 +2242,7 @@ function runtimePaths(workspaceRoot: string, runtime: ProjectContextRuntime): {
   fragment: string;
   manifest: string;
   cache: string;
-  legacyManifest: string | null;
+  sessionManifest: string;
 } {
   const relativeTarget = runtime === "claude" ? "CLAUDE.md" : runtime === "codewith" ? ".codewith/CODEWITH.md" : "AGENTS.md";
   return {
@@ -1536,8 +2250,58 @@ function runtimePaths(workspaceRoot: string, runtime: ProjectContextRuntime): {
     fragment: resolve(workspaceRoot, ...PROJECT_CONTEXT_FRAGMENT_PATH.split("/")),
     manifest: resolve(workspaceRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")),
     cache: resolve(workspaceRoot, ...PROJECT_CONTEXT_CACHE_PATH.split("/")),
-    legacyManifest: runtime === "codewith" ? resolve(workspaceRoot, ".codewith", ".hasna", "session-render-manifest.json") : null,
+    sessionManifest: runtime === "codewith"
+      ? resolve(workspaceRoot, ".codewith", ".hasna", "session-render-manifest.json")
+      : resolve(workspaceRoot, ".hasna", "session-render-manifest.json"),
   };
+}
+
+function projectContextSessionGuardPaths(
+  paths: ReturnType<typeof runtimePaths>,
+  runtime: ProjectContextRuntime,
+): string[] {
+  return [
+    paths.manifest,
+    paths.cache,
+    paths.fragment,
+    paths.target,
+    paths.sessionManifest,
+    ...(runtime === "codewith" ? [resolve(paths.target, "..", "CODEWITH.override.md")] : []),
+  ];
+}
+
+function sessionTargetRelativePath(runtime: ProjectContextRuntime): string {
+  if (runtime === "claude") return "CLAUDE.md";
+  if (runtime === "codewith") return "CODEWITH.md";
+  return "AGENTS.md";
+}
+
+function projectContextRuntimeForSessionTool(tool: SessionRenderTool): ProjectContextRuntime | null {
+  if (tool === "claude") return "claude";
+  if (tool === "codewith") return "codewith";
+  if (tool === "codex") return "agents";
+  return null;
+}
+
+function projectContextWorkspaceForSession(
+  input: Pick<ProjectContextSessionRenderInput, "target_home" | "project_root">,
+  runtime: ProjectContextRuntime,
+): string | null {
+  const targetHome = resolve(input.target_home);
+  if (runtime === "codewith") {
+    const workspaceRoot = basename(targetHome) === ".codewith" ? dirname(targetHome) : null;
+    if (!workspaceRoot) return null;
+    if (input.project_root && resolve(input.project_root) !== workspaceRoot) {
+      throw new ProjectContextError(
+        "PROJECT_CONTEXT_PATH_INVALID",
+        "Codewith project_root must be the parent workspace of target_home",
+      );
+    }
+    if (!existsSync(workspaceRoot) || !lstatSync(workspaceRoot).isDirectory()) return null;
+    return assertSafeWorkspaceRoot(workspaceRoot);
+  }
+  if (!existsSync(targetHome) || !lstatSync(targetHome).isDirectory()) return null;
+  return assertSafeWorkspaceRoot(targetHome);
 }
 
 function assertCodewithTargetIsConsumed(workspaceRoot: string, runtime: ProjectContextRuntime): void {
@@ -1593,7 +2357,11 @@ function readUtf8RegularFile(path: string, workspaceRoot: string, maxBytes = 256
 
 function currentFileHash(path: string, workspaceRoot: string): string | null {
   if (!existsSync(path)) return null;
-  return sha256(readUtf8RegularFile(path, workspaceRoot));
+  const relativePath = relativePosix(workspaceRoot, path);
+  const maxBytes = relativePath === ".hasna/session-render-manifest.json" || relativePath === ".codewith/.hasna/session-render-manifest.json"
+    ? SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES
+    : 256 * 1024;
+  return sha256(readUtf8RegularFile(path, workspaceRoot, maxBytes));
 }
 
 function hashesStillMatch(expected: Map<string, string | null>, workspaceRoot: string): boolean {
@@ -1689,6 +2457,10 @@ function relativePosix(root: string, path: string): string {
   return relative(root, path).split("\\").join("/");
 }
 
+function ensureTrailingNewline(content: string): string {
+  return content.endsWith("\n") ? content : `${content}\n`;
+}
+
 function safeFilename(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "-");
 }
@@ -1708,6 +2480,30 @@ function lineContentEnd(line: { text: string; start: number; end: number }): num
   if (line.text.endsWith("\r\n")) return line.end - 2;
   if (line.text.endsWith("\n") || line.text.endsWith("\r")) return line.end - 1;
   return line.end;
+}
+
+function isStrictIsoTimestamp(value: string): boolean {
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-](\d{2}):(\d{2}))$/,
+  );
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[9] === undefined ? 0 : Number(match[9]);
+  const offsetMinute = match[10] === undefined ? 0 : Number(match[10]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return (
+    month >= 1 && month <= 12 &&
+    day >= 1 && day <= monthDays[month - 1]! &&
+    hour <= 23 && minute <= 59 && second <= 59 &&
+    offsetHour <= 23 && offsetMinute <= 59 &&
+    Number.isFinite(Date.parse(value))
+  );
 }
 
 function isSafeSingleLine(value: string): boolean {
