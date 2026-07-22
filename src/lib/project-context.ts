@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { dlopen, FFIType } from "bun:ffi";
 import {
   closeSync,
@@ -232,6 +233,7 @@ export interface ProjectContextApplyOptions {
   test_hooks?: {
     after_lock_open?: () => void;
     atomic_exchange_unavailable?: boolean;
+    portable_create_only?: boolean;
     before_stale_lock_remove?: (lockPath: string) => void;
     before_compare?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     after_fragment?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
@@ -239,6 +241,7 @@ export interface ProjectContextApplyOptions {
     after_target_exchange?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     after_target?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     before_manifest?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
+    process_start_identity?: (pid: number) => string | null;
   };
 }
 
@@ -309,6 +312,11 @@ export interface ProjectContextSessionGuard {
     path: string;
     sha256: string | null;
   }>;
+}
+
+export interface ProjectContextWriteCoordination {
+  workspace_root: string;
+  assert_held: () => void;
 }
 
 interface WorkspaceLock {
@@ -659,10 +667,10 @@ export function observeProjectContextSessionGuard(
 
 export function withProjectContextSessionGuard<T>(
   guard: ProjectContextSessionGuard | undefined,
-  action: () => T,
+  action: (coordination: ProjectContextWriteCoordination | null) => T,
   options: { dry_run?: boolean } = {},
 ): T {
-  if (!guard) return action();
+  if (!guard) return action(null);
   const validated = validateProjectContextSessionGuard(guard);
   const verify = () => {
     for (const observed of validated.observed_hashes) {
@@ -676,15 +684,16 @@ export function withProjectContextSessionGuard<T>(
   };
   if (options.dry_run) {
     verify();
-    return action();
+    return action(null);
   }
 
   const lockPath = resolve(validated.workspace_root, ...PROJECT_CONTEXT_LOCK_PATH.split("/"));
   const lock = acquireWorkspaceLock(validated.workspace_root, lockPath);
   try {
     verify();
-    assertWorkspaceLockHeld(lockPath, lock, validated.workspace_root);
-    return action();
+    const assertHeld = () => assertWorkspaceLockHeld(lockPath, lock, validated.workspace_root);
+    assertHeld();
+    return action({ workspace_root: validated.workspace_root, assert_held: assertHeld });
   } finally {
     releaseWorkspaceLock(lockPath, lock, validated.workspace_root);
   }
@@ -736,6 +745,7 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
       lockPath,
       options.test_hooks?.after_lock_open,
       options.test_hooks?.before_stale_lock_remove,
+      options.test_hooks?.process_start_identity,
     );
   try {
     const resolved = resolveBundleForApply(options, workspaceRoot, now);
@@ -781,6 +791,8 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
           expectedPlanHash(plan, plan.fragment_path),
           undefined,
           options.test_hooks?.atomic_exchange_unavailable,
+          undefined,
+          options.test_hooks?.portable_create_only,
         );
         options.test_hooks?.after_fragment?.({ attempt, plan });
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
@@ -793,6 +805,7 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
           () => options.test_hooks?.after_target_exchange?.({ attempt, plan }),
           options.test_hooks?.atomic_exchange_unavailable,
           (tempPath) => options.test_hooks?.before_target_install?.({ attempt, plan, temp_path: tempPath }),
+          options.test_hooks?.portable_create_only,
         );
         options.test_hooks?.after_target?.({ attempt, plan });
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
@@ -805,6 +818,8 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
           expectedPlanHash(plan, plan.cache_path),
           undefined,
           options.test_hooks?.atomic_exchange_unavailable,
+          undefined,
+          options.test_hooks?.portable_create_only,
         );
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
 
@@ -816,6 +831,8 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
           expectedPlanHash(plan, sessionOutput.path),
           undefined,
           options.test_hooks?.atomic_exchange_unavailable,
+          undefined,
+          options.test_hooks?.portable_create_only,
         );
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
 
@@ -831,6 +848,8 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
           expectedPlanHash(plan, plan.manifest_path),
           undefined,
           options.test_hooks?.atomic_exchange_unavailable,
+          undefined,
+          options.test_hooks?.portable_create_only,
         );
         return resultForPlan(plan, false, raceRetries, snapshotPath);
       } catch (error) {
@@ -1673,56 +1692,96 @@ function atomicWriteFile(
   afterExchange?: () => void,
   atomicExchangeUnavailable = false,
   beforeInstall?: (tempPath: string) => void,
+  portableCreateOnly = false,
+  maxObservedBytes?: number | null,
+  allowPortableReplacement = false,
 ): void {
   const dir = resolve(path, "..");
   ensureSafeDirectory(dir, workspaceRoot, 0o700);
   assertNoSymlinkSegments(workspaceRoot, path);
-  const previousMode = existsSync(path) ? statSync(path).mode & 0o777 : defaultMode;
-  const tempPath = join(dir, `.project-context-${randomUUID()}.tmp`);
+  const anchoredOps = portableCreateOnly ? null : resolveAnchoredFsOps();
+  if (!anchoredOps) {
+    atomicWritePortable(
+      path,
+      content,
+      workspaceRoot,
+      defaultMode,
+      expectedHash,
+      beforeInstall,
+      maxObservedBytes,
+      allowPortableReplacement,
+    );
+    return;
+  }
+  if (
+    allowPortableReplacement &&
+    typeof expectedHash === "string" &&
+    (atomicExchangeUnavailable || resolveAtomicExchange() === null)
+  ) {
+    atomicWritePortable(
+      path,
+      content,
+      workspaceRoot,
+      defaultMode,
+      expectedHash,
+      beforeInstall,
+      maxObservedBytes,
+      true,
+    );
+    return;
+  }
+  const directory = openAnchoredDirectory(dir, workspaceRoot, anchoredOps, maxObservedBytes);
+  const targetName = basename(path);
+  const previous = anchoredFileObservation(directory, targetName);
+  const previousMode = previous?.mode ?? defaultMode;
+  const tempName = `.project-context-${randomUUID()}.tmp`;
+  const tempPath = join(dir, tempName);
   let fd: number | null = null;
   let preserveTemp = false;
   let directoryChanged = false;
   const desiredHash = sha256(content);
   try {
-    fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, previousMode);
+    fd = anchoredOpenExclusive(directory, tempName, previousMode);
     writeFileSync(fd, content, { encoding: "utf8" });
     fsyncSync(fd);
     closeSync(fd);
     fd = null;
     beforeInstall?.(tempPath);
-    if (preparedTempHash(tempPath) !== desiredHash) {
+    assertManagedDirectoryStable(dir, workspaceRoot, directory.identity);
+    if (anchoredFileHash(directory, tempName) !== desiredHash) {
       throw new ProjectContextHashRace(`prepared bytes changed before installation: ${relativePosix(workspaceRoot, path)}`);
     }
     if (expectedHash === undefined) {
-      renameSync(tempPath, path);
+      if (!directory.ops.renameat(directory.fd, tempName, directory.fd, targetName)) {
+        throw new ProjectContextHashRace(`managed path changed before installation: ${relativePosix(workspaceRoot, path)}`);
+      }
       directoryChanged = true;
     } else if (expectedHash === null) {
-      const prepared = lstatSync(tempPath);
-      try {
-        linkSync(tempPath, path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-          throw new ProjectContextHashRace(`managed path appeared before creation: ${relativePosix(workspaceRoot, path)}`);
-        }
-        throw error;
+      const prepared = anchoredFileObservation(directory, tempName);
+      if (!prepared || anchoredFileObservation(directory, targetName) !== null) {
+        throw new ProjectContextHashRace(`managed path appeared before creation: ${relativePosix(workspaceRoot, path)}`);
+      }
+      if (!directory.ops.linkat(directory.fd, tempName, directory.fd, targetName)) {
+        throw new ProjectContextHashRace(`managed path appeared before creation: ${relativePosix(workspaceRoot, path)}`);
       }
       directoryChanged = true;
-      const installed = lstatSync(path);
+      const installed = anchoredFileObservation(directory, targetName);
       if (
-        installed.isSymbolicLink() ||
+        !installed ||
         installed.dev !== prepared.dev ||
         installed.ino !== prepared.ino ||
-        preparedTempHash(tempPath) !== desiredHash ||
-        currentFileHash(path, workspaceRoot) !== desiredHash
+        anchoredFileHash(directory, tempName) !== desiredHash ||
+        installed.hash !== desiredHash
       ) {
-        if (!installed.isSymbolicLink() && installed.dev === prepared.dev && installed.ino === prepared.ino) {
-          rmSync(path);
-        }
+        // The target may now contain an ordinary concurrent edit. Preserve the
+        // installed path and remove only our extra hard link before retrying.
+        directory.ops.unlinkat(directory.fd, tempName);
+        preserveTemp = true;
         throw new ProjectContextHashRace(`prepared bytes changed during creation: ${relativePosix(workspaceRoot, path)}`);
       }
-      rmSync(tempPath);
+      if (!directory.ops.unlinkat(directory.fd, tempName)) preserveTemp = true;
     } else {
-      if (!existsSync(path)) {
+      if (anchoredFileObservation(directory, targetName) === null) {
         throw new ProjectContextHashRace(`managed path disappeared before replacement: ${relativePosix(workspaceRoot, path)}`);
       }
       if (atomicExchangeUnavailable) {
@@ -1731,18 +1790,18 @@ function atomicWriteFile(
           "the platform could not provide an atomic exchange for compare-and-swap replacement",
         );
       }
-      if (currentFileHash(path, workspaceRoot) !== expectedHash) {
+      if (anchoredFileHash(directory, targetName) !== expectedHash) {
         throw new ProjectContextHashRace(`managed path changed before atomic replacement: ${relativePosix(workspaceRoot, path)}`);
       }
-      if (preparedTempHash(tempPath) !== desiredHash) {
+      if (anchoredFileHash(directory, tempName) !== desiredHash) {
         throw new ProjectContextHashRace(`prepared bytes changed before atomic replacement: ${relativePosix(workspaceRoot, path)}`);
       }
-      atomicExchangePaths(tempPath, path);
+      atomicExchangeEntries(directory.fd, tempName, targetName);
       directoryChanged = true;
       let exchanged = true;
       try {
-        const displacedAtExchange = currentFileHash(tempPath, workspaceRoot);
-        const installedAtExchange = currentFileHash(path, workspaceRoot);
+        const displacedAtExchange = anchoredFileHash(directory, tempName);
+        const installedAtExchange = anchoredFileHash(directory, targetName);
         if (displacedAtExchange !== expectedHash) {
           preserveTemp = true;
           exchanged = false;
@@ -1752,13 +1811,13 @@ function atomicWriteFile(
           );
         }
         if (installedAtExchange !== desiredHash) {
-          atomicExchangePaths(tempPath, path);
+          atomicExchangeEntries(directory.fd, tempName, targetName);
           exchanged = false;
           throw new ProjectContextHashRace(`prepared bytes changed during atomic replacement: ${relativePosix(workspaceRoot, path)}`);
         }
         afterExchange?.();
-        const replacedHash = currentFileHash(tempPath, workspaceRoot);
-        const replacementHash = currentFileHash(path, workspaceRoot);
+        const replacedHash = anchoredFileHash(directory, tempName);
+        const replacementHash = anchoredFileHash(directory, targetName);
         if (replacedHash !== expectedHash) {
           preserveTemp = true;
           exchanged = false;
@@ -1768,20 +1827,20 @@ function atomicWriteFile(
           );
         }
         if (replacementHash !== desiredHash) {
-          rmSync(tempPath);
+          directory.ops.unlinkat(directory.fd, tempName);
           exchanged = false;
           throw new ProjectContextHashRace(`managed path changed immediately after atomic replacement: ${relativePosix(workspaceRoot, path)}`);
         }
-        rmSync(tempPath);
+        if (!directory.ops.unlinkat(directory.fd, tempName)) preserveTemp = true;
         exchanged = false;
       } catch (error) {
         if (exchanged) {
           try {
             if (
-              currentFileHash(path, workspaceRoot) === desiredHash &&
-              currentFileHash(tempPath, workspaceRoot) === expectedHash
+              anchoredFileHash(directory, targetName) === desiredHash &&
+              anchoredFileHash(directory, tempName) === expectedHash
             ) {
-              atomicExchangePaths(tempPath, path);
+              atomicExchangeEntries(directory.fd, tempName, targetName);
               exchanged = false;
             } else {
               preserveTemp = true;
@@ -1793,34 +1852,593 @@ function atomicWriteFile(
         throw error;
       }
     }
+    assertManagedDirectoryStable(dir, workspaceRoot, directory.identity);
+    fsyncSync(directory.fd);
+  } catch (error) {
+    if (fd !== null) closeSync(fd);
+    if (!preserveTemp) directory.ops.unlinkat(directory.fd, tempName);
+    if (directoryChanged) fsyncSync(directory.fd);
+    throw error;
+  } finally {
+    closeSync(directory.fd);
+  }
+}
+
+function atomicWritePortable(
+  path: string,
+  content: string,
+  workspaceRoot: string,
+  defaultMode: number,
+  expectedHash: string | null | undefined,
+  beforeInstall?: (tempPath: string) => void,
+  maxObservedBytes?: number | null,
+  allowReplacement = false,
+): void {
+  const desiredHash = sha256(content);
+  const currentHash = portableFileHash(path, workspaceRoot, maxObservedBytes);
+  if (expectedHash === undefined && currentHash === desiredHash) return;
+  if (typeof expectedHash === "string" && allowReplacement) {
+    atomicWritePortableReplacement(
+      path,
+      content,
+      workspaceRoot,
+      expectedHash,
+      beforeInstall,
+      maxObservedBytes,
+    );
+    return;
+  }
+  if (expectedHash !== null && !(expectedHash === undefined && currentHash === null)) {
+    throw new ProjectContextError(
+      "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE",
+      "the platform can create new managed files but cannot safely replace existing files",
+    );
+  }
+  if (currentHash !== null) {
+    throw new ProjectContextHashRace(`managed path appeared before portable creation: ${relativePosix(workspaceRoot, path)}`);
+  }
+
+  const dir = dirname(path);
+  const directoryIdentity = captureManagedDirectoryIdentity(dir, workspaceRoot);
+  const tempPath = join(dir, `.project-context-${randomUUID()}.tmp`);
+  let fd: number | null = null;
+  let tempIdentity: { dev: number; ino: number } | null = null;
+  try {
+    fd = openSync(
+      tempPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      defaultMode,
+    );
+    const opened = fstatSync(fd);
+    tempIdentity = { dev: opened.dev, ino: opened.ino };
+    writeFileSync(fd, content, { encoding: "utf8" });
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    beforeInstall?.(tempPath);
+    assertManagedDirectoryStable(dir, workspaceRoot, directoryIdentity);
+    assertNoSymlinkSegments(workspaceRoot, tempPath);
+    assertNoSymlinkSegments(workspaceRoot, path);
+    if (portableFileHash(tempPath, workspaceRoot, maxObservedBytes) !== desiredHash || portableFileHash(path, workspaceRoot, maxObservedBytes) !== null) {
+      throw new ProjectContextHashRace(`managed path changed before portable creation: ${relativePosix(workspaceRoot, path)}`);
+    }
+    const prepared = lstatSync(tempPath);
+    try {
+      linkSync(tempPath, path);
+    } catch {
+      throw new ProjectContextHashRace(`managed path appeared during portable creation: ${relativePosix(workspaceRoot, path)}`);
+    }
+    const installed = lstatSync(path);
+    if (
+      installed.isSymbolicLink() ||
+      installed.dev !== prepared.dev ||
+      installed.ino !== prepared.ino ||
+      portableFileHash(path, workspaceRoot, maxObservedBytes) !== desiredHash
+    ) {
+      throw new ProjectContextHashRace(`managed path changed during portable creation: ${relativePosix(workspaceRoot, path)}`);
+    }
+    rmSync(tempPath);
+    tempIdentity = null;
+    assertManagedDirectoryStable(dir, workspaceRoot, directoryIdentity);
     fsyncDirectory(dir);
   } catch (error) {
     if (fd !== null) closeSync(fd);
-    if (!preserveTemp && existsSync(tempPath)) rmSync(tempPath);
-    if (directoryChanged) fsyncDirectory(dir);
+    if (tempIdentity && managedDirectoryMatches(dir, workspaceRoot, directoryIdentity)) {
+      try {
+        const current = lstatSync(tempPath);
+        if (!current.isSymbolicLink() && current.dev === tempIdentity.dev && current.ino === tempIdentity.ino) {
+          rmSync(tempPath);
+        }
+      } catch {
+        // Preserve an uncertain temp rather than following a replaced directory.
+      }
+    }
     throw error;
   }
 }
 
-function preparedTempHash(path: string): string {
+function atomicWritePortableReplacement(
+  path: string,
+  content: string,
+  workspaceRoot: string,
+  expectedHash: string,
+  beforeInstall?: (tempPath: string) => void,
+  maxObservedBytes?: number | null,
+): void {
+  const currentHash = portableFileHash(path, workspaceRoot, maxObservedBytes);
+  if (currentHash !== expectedHash) {
+    throw new ProjectContextHashRace(`managed path changed before portable replacement: ${relativePosix(workspaceRoot, path)}`);
+  }
+  const current = lstatSync(path);
+  if (current.isSymbolicLink() || !current.isFile()) {
+    throw new ProjectContextHashRace(`managed path is not a regular file: ${relativePosix(workspaceRoot, path)}`);
+  }
+
+  const dir = dirname(path);
+  const directoryIdentity = captureManagedDirectoryIdentity(dir, workspaceRoot);
+  const tempPath = join(dir, `.project-context-${randomUUID()}.tmp`);
+  const desiredHash = sha256(content);
+  let fd: number | null = null;
+  let tempIdentity: { dev: number; ino: number } | null = null;
+  try {
+    fd = openSync(
+      tempPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      current.mode & 0o777,
+    );
+    const opened = fstatSync(fd);
+    tempIdentity = { dev: opened.dev, ino: opened.ino };
+    writeFileSync(fd, content, { encoding: "utf8" });
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    beforeInstall?.(tempPath);
+    assertManagedDirectoryStable(dir, workspaceRoot, directoryIdentity);
+    assertNoSymlinkSegments(workspaceRoot, tempPath);
+    assertNoSymlinkSegments(workspaceRoot, path);
+    if (
+      portableFileHash(path, workspaceRoot, maxObservedBytes) !== expectedHash ||
+      portableFileHash(tempPath, workspaceRoot, maxObservedBytes) !== desiredHash
+    ) {
+      throw new ProjectContextHashRace(`managed path changed before portable replacement: ${relativePosix(workspaceRoot, path)}`);
+    }
+    renameSync(tempPath, path);
+    tempIdentity = null;
+    assertManagedDirectoryStable(dir, workspaceRoot, directoryIdentity);
+    if (portableFileHash(path, workspaceRoot, maxObservedBytes) !== desiredHash) {
+      throw new ProjectContextHashRace(`managed path changed during portable replacement: ${relativePosix(workspaceRoot, path)}`);
+    }
+    fsyncDirectory(dir);
+  } catch (error) {
+    if (fd !== null) closeSync(fd);
+    if (tempIdentity && managedDirectoryMatches(dir, workspaceRoot, directoryIdentity)) {
+      try {
+        const candidate = lstatSync(tempPath);
+        if (!candidate.isSymbolicLink() && candidate.dev === tempIdentity.dev && candidate.ino === tempIdentity.ino) {
+          rmSync(tempPath);
+        }
+      } catch {
+        // Preserve an uncertain temp rather than following a replaced directory.
+      }
+    }
+    throw error;
+  }
+}
+
+function portableFileHash(
+  path: string,
+  workspaceRoot: string,
+  maxObservedBytes?: number | null,
+): string | null {
+  if (maxObservedBytes === undefined) return currentFileHash(path, workspaceRoot);
+  if (!existsSync(path)) return null;
+  assertNoSymlinkSegments(workspaceRoot, path);
   const stat = lstatSync(path);
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new ProjectContextHashRace("prepared project-context output is no longer a regular file");
+  if (!stat.isFile()) throw new ProjectContextHashRace("managed output is not a regular file");
+  if (maxObservedBytes !== null && stat.size > maxObservedBytes) {
+    throw new ProjectContextHashRace(`managed output exceeds the safe read limit: ${relativePosix(workspaceRoot, path)}`);
   }
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-type AtomicExchange = (left: string, right: string) => boolean;
+export function writeProjectContextCoordinatedFile(input: {
+  path: string;
+  content: string;
+  workspace_root: string;
+  default_mode?: number;
+  expected_hash: string | null | undefined;
+  max_observed_bytes?: number | null;
+  allow_portable_replacement?: boolean;
+  force_portable_file_ops?: boolean;
+}): void {
+  atomicWriteFile(
+    resolve(input.path),
+    input.content,
+    assertSafeWorkspaceRoot(input.workspace_root),
+    input.default_mode ?? 0o644,
+    input.expected_hash,
+    undefined,
+    false,
+    undefined,
+    input.force_portable_file_ops ?? false,
+    input.max_observed_bytes,
+    input.allow_portable_replacement ?? false,
+  );
+}
+
+export function removeProjectContextCoordinatedFile(input: {
+  path: string;
+  workspace_root: string;
+  expected_hash: string;
+  max_observed_bytes?: number | null;
+  allow_portable_removal?: boolean;
+  force_portable_file_ops?: boolean;
+  test_hooks?: {
+    after_displace?: (displacedPath: string) => void;
+  };
+}): void {
+  const workspaceRoot = assertSafeWorkspaceRoot(input.workspace_root);
+  const path = resolve(input.path);
+  assertNoSymlinkSegments(workspaceRoot, path);
+  const dir = dirname(path);
+  const anchoredOps = input.force_portable_file_ops ? null : resolveAnchoredFsOps();
+  if (!anchoredOps) {
+    if (!input.allow_portable_removal) {
+      throw new ProjectContextError(
+        "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE",
+        "the platform could not provide directory-anchored managed-file removal",
+      );
+    }
+    removePortableCoordinatedFile(
+      path,
+      workspaceRoot,
+      input.expected_hash,
+      input.max_observed_bytes,
+      input.test_hooks?.after_displace,
+    );
+    return;
+  }
+  const directory = openAnchoredDirectory(dir, workspaceRoot, anchoredOps, input.max_observed_bytes);
+  const targetName = basename(path);
+  const displacedName = `.project-context-delete-${randomUUID()}.tmp`;
+  let displaced = false;
+  let expectedObservation: AnchoredFileObservation | null = null;
+  try {
+    const observed = anchoredFileObservation(directory, targetName);
+    if (!observed || observed.hash !== input.expected_hash) {
+      throw new ProjectContextHashRace(`managed path changed before deletion: ${relativePosix(workspaceRoot, path)}`);
+    }
+    expectedObservation = observed;
+    if (!directory.ops.renameat(directory.fd, targetName, directory.fd, displacedName)) {
+      throw new ProjectContextHashRace(`managed path changed during deletion: ${relativePosix(workspaceRoot, path)}`);
+    }
+    displaced = true;
+    input.test_hooks?.after_displace?.(join(dir, displacedName));
+    const moved = anchoredFileObservation(directory, displacedName);
+    if (
+      !moved ||
+      moved.dev !== observed.dev ||
+      moved.ino !== observed.ino ||
+      moved.hash !== input.expected_hash ||
+      anchoredFileObservation(directory, targetName) !== null
+    ) {
+      throw new ProjectContextHashRace(`managed path changed during deletion validation: ${relativePosix(workspaceRoot, path)}`);
+    }
+    if (!directory.ops.unlinkat(directory.fd, displacedName)) {
+      throw new ProjectContextHashRace(`managed path could not be removed safely: ${relativePosix(workspaceRoot, path)}`);
+    }
+    displaced = false;
+    assertManagedDirectoryStable(dir, workspaceRoot, directory.identity);
+    fsyncSync(directory.fd);
+  } catch (error) {
+    if (
+      displaced &&
+      expectedObservation &&
+      restoreAnchoredDisplacedFile(directory, displacedName, targetName, expectedObservation)
+    ) {
+      displaced = false;
+    }
+    throw error;
+  } finally {
+    closeSync(directory.fd);
+  }
+}
+
+function restoreAnchoredDisplacedFile(
+  directory: AnchoredDirectory,
+  displacedName: string,
+  targetName: string,
+  expected: AnchoredFileObservation,
+): boolean {
+  if (!directory.ops.linkat(directory.fd, displacedName, directory.fd, targetName)) return false;
+  try {
+    const displaced = anchoredFileObservation(directory, displacedName);
+    const installed = anchoredFileObservation(directory, targetName);
+    if (
+      !displaced ||
+      !installed ||
+      displaced.dev !== expected.dev ||
+      displaced.ino !== expected.ino ||
+      displaced.dev !== installed.dev ||
+      displaced.ino !== installed.ino ||
+      displaced.hash !== expected.hash ||
+      installed.hash !== expected.hash
+    ) return false;
+    if (!directory.ops.unlinkat(directory.fd, displacedName)) return false;
+    fsyncSync(directory.fd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removePortableCoordinatedFile(
+  path: string,
+  workspaceRoot: string,
+  expectedHash: string,
+  maxObservedBytes?: number | null,
+  afterDisplace?: (displacedPath: string) => void,
+): void {
+  if (portableFileHash(path, workspaceRoot, maxObservedBytes) !== expectedHash) {
+    throw new ProjectContextHashRace(`managed path changed before portable deletion: ${relativePosix(workspaceRoot, path)}`);
+  }
+  const observed = lstatSync(path);
+  if (observed.isSymbolicLink() || !observed.isFile()) {
+    throw new ProjectContextHashRace(`managed path is not a regular file: ${relativePosix(workspaceRoot, path)}`);
+  }
+  const dir = dirname(path);
+  const directoryIdentity = captureManagedDirectoryIdentity(dir, workspaceRoot);
+  const displacedPath = join(dir, `.project-context-delete-${randomUUID()}.tmp`);
+  let displaced = false;
+  try {
+    assertManagedDirectoryStable(dir, workspaceRoot, directoryIdentity);
+    if (portableFileHash(path, workspaceRoot, maxObservedBytes) !== expectedHash) {
+      throw new ProjectContextHashRace(`managed path changed before portable deletion: ${relativePosix(workspaceRoot, path)}`);
+    }
+    renameSync(path, displacedPath);
+    displaced = true;
+    afterDisplace?.(displacedPath);
+    const moved = lstatSync(displacedPath);
+    if (
+      moved.isSymbolicLink() ||
+      !moved.isFile() ||
+      moved.dev !== observed.dev ||
+      moved.ino !== observed.ino ||
+      portableFileHash(displacedPath, workspaceRoot, maxObservedBytes) !== expectedHash ||
+      existsSync(path)
+    ) {
+      throw new ProjectContextHashRace(`managed path changed during portable deletion: ${relativePosix(workspaceRoot, path)}`);
+    }
+    rmSync(displacedPath);
+    displaced = false;
+    assertManagedDirectoryStable(dir, workspaceRoot, directoryIdentity);
+    fsyncDirectory(dir);
+  } catch (error) {
+    if (
+      displaced &&
+      managedDirectoryMatches(dir, workspaceRoot, directoryIdentity) &&
+      restorePortableDisplacedFile(displacedPath, path, workspaceRoot, observed, expectedHash, maxObservedBytes)
+    ) {
+      displaced = false;
+    }
+    throw error;
+  }
+}
+
+function restorePortableDisplacedFile(
+  displacedPath: string,
+  path: string,
+  workspaceRoot: string,
+  expected: { dev: number; ino: number },
+  expectedHash: string,
+  maxObservedBytes?: number | null,
+): boolean {
+  try {
+    linkSync(displacedPath, path);
+  } catch {
+    return false;
+  }
+  try {
+    const displaced = lstatSync(displacedPath);
+    const installed = lstatSync(path);
+    if (
+      displaced.isSymbolicLink() ||
+      installed.isSymbolicLink() ||
+      !displaced.isFile() ||
+      !installed.isFile() ||
+      displaced.dev !== expected.dev ||
+      displaced.ino !== expected.ino ||
+      displaced.dev !== installed.dev ||
+      displaced.ino !== installed.ino ||
+      portableFileHash(displacedPath, workspaceRoot, maxObservedBytes) !== expectedHash ||
+      portableFileHash(path, workspaceRoot, maxObservedBytes) !== expectedHash
+    ) return false;
+    rmSync(displacedPath);
+    fsyncDirectory(dirname(path));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface AnchoredDirectory {
+  fd: number;
+  path: string;
+  workspaceRoot: string;
+  identity: { dev: number; ino: number };
+  ops: AnchoredFsOps;
+  maxObservedBytes: number | null | undefined;
+}
+
+interface AnchoredFileObservation {
+  dev: number;
+  ino: number;
+  hash: string;
+  mode: number;
+}
+
+interface AnchoredFsOps {
+  openat: (directoryFd: number, name: string, flags: number, mode: number) => number;
+  renameat: (leftDirectoryFd: number, left: string, rightDirectoryFd: number, right: string) => boolean;
+  linkat: (leftDirectoryFd: number, left: string, rightDirectoryFd: number, right: string) => boolean;
+  unlinkat: (directoryFd: number, name: string) => boolean;
+}
+
+let anchoredFsOps: AnchoredFsOps | null | undefined;
+
+function openAnchoredDirectory(
+  path: string,
+  workspaceRoot: string,
+  providedOps?: AnchoredFsOps,
+  maxObservedBytes?: number | null,
+): AnchoredDirectory {
+  const ops = providedOps ?? resolveAnchoredFsOps();
+  if (!ops) {
+    throw new ProjectContextError(
+      "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE",
+      "the platform could not provide directory-anchored managed-file operations",
+    );
+  }
+  const identity = captureManagedDirectoryIdentity(path, workspaceRoot);
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch {
+    throw new ProjectContextHashRace(`managed parent directory changed while opening: ${relativePosix(workspaceRoot, path)}`);
+  }
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isDirectory() || opened.dev !== identity.dev || opened.ino !== identity.ino) {
+      throw new ProjectContextHashRace(`managed parent directory changed while opening: ${relativePosix(workspaceRoot, path)}`);
+    }
+    assertManagedDirectoryStable(path, workspaceRoot, identity);
+    return { fd, path, workspaceRoot, identity, ops, maxObservedBytes };
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+function anchoredOpenExclusive(directory: AnchoredDirectory, name: string, mode: number): number {
+  const fd = directory.ops.openat(
+    directory.fd,
+    name,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    mode,
+  );
+  if (fd < 0) throw new ProjectContextHashRace(`could not create prepared managed file in ${relativePosix(directory.workspaceRoot, directory.path)}`);
+  const opened = fstatSync(fd);
+  if (!opened.isFile()) {
+    closeSync(fd);
+    throw new ProjectContextHashRace("prepared managed output is not a regular file");
+  }
+  return fd;
+}
+
+function anchoredFileObservation(directory: AnchoredDirectory, name: string): AnchoredFileObservation | null {
+  const fd = directory.ops.openat(directory.fd, name, constants.O_RDONLY | constants.O_NOFOLLOW, 0);
+  if (fd < 0) return null;
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new ProjectContextHashRace("managed output is not a regular file");
+    const relativePath = relativePosix(directory.workspaceRoot, join(directory.path, name));
+    const maxBytes = directory.maxObservedBytes === undefined
+      ? relativePath === ".hasna/session-render-manifest.json" || relativePath === ".codewith/.hasna/session-render-manifest.json"
+        ? SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES
+        : 256 * 1024
+      : directory.maxObservedBytes;
+    if (maxBytes !== null && stat.size > maxBytes) {
+      throw new ProjectContextHashRace(`managed output exceeds the safe read limit: ${relativePath}`);
+    }
+    return {
+      dev: stat.dev,
+      ino: stat.ino,
+      hash: createHash("sha256").update(readFileSync(fd)).digest("hex"),
+      mode: stat.mode & 0o777,
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function anchoredFileHash(directory: AnchoredDirectory, name: string): string | null {
+  return anchoredFileObservation(directory, name)?.hash ?? null;
+}
+
+function captureManagedDirectoryIdentity(
+  path: string,
+  workspaceRoot: string,
+): { dev: number; ino: number } {
+  assertNoSymlinkSegments(workspaceRoot, join(path, ".project-context-directory-guard"));
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    throw new ProjectContextHashRace(`managed parent directory disappeared: ${relativePosix(workspaceRoot, path)}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new ProjectContextError("PROJECT_CONTEXT_PATH_INVALID", `managed parent is not a stable directory: ${path}`);
+  }
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function assertManagedDirectoryStable(
+  path: string,
+  workspaceRoot: string,
+  expected: { dev: number; ino: number },
+): void {
+  assertNoSymlinkSegments(workspaceRoot, join(path, ".project-context-directory-guard"));
+  let current: ReturnType<typeof lstatSync>;
+  try {
+    current = lstatSync(path);
+  } catch {
+    throw new ProjectContextHashRace(`managed parent directory disappeared during write: ${relativePosix(workspaceRoot, path)}`);
+  }
+  if (current.isSymbolicLink() || !current.isDirectory() || current.dev !== expected.dev || current.ino !== expected.ino) {
+    throw new ProjectContextHashRace(`managed parent directory changed during write: ${relativePosix(workspaceRoot, path)}`);
+  }
+}
+
+function managedDirectoryMatches(
+  path: string,
+  workspaceRoot: string,
+  expected: { dev: number; ino: number },
+): boolean {
+  try {
+    assertManagedDirectoryStable(path, workspaceRoot, expected);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type AtomicExchange = (
+  leftDirectoryFd: number,
+  left: string,
+  rightDirectoryFd: number,
+  right: string,
+) => boolean;
 
 let atomicExchange: AtomicExchange | null | undefined;
 const atomicExchangeLibraries: Array<ReturnType<typeof dlopen>> = [];
 
 function atomicExchangePaths(left: string, right: string): void {
   const exchange = resolveAtomicExchange();
-  if (!exchange || !exchange(left, right)) {
+  const atFdcwd = process.platform === "darwin" ? -2 : -100;
+  if (!exchange || !exchange(atFdcwd, left, atFdcwd, right)) {
     throw new ProjectContextError(
       "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE",
       "the platform could not provide an atomic exchange for compare-and-swap replacement",
+    );
+  }
+}
+
+function atomicExchangeEntries(directoryFd: number, left: string, right: string): void {
+  const exchange = resolveAtomicExchange();
+  if (!exchange || !exchange(directoryFd, left, directoryFd, right)) {
+    throw new ProjectContextError(
+      "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE",
+      "the platform could not provide a directory-anchored atomic exchange",
     );
   }
 }
@@ -1844,10 +2462,10 @@ function resolveAtomicExchange(): AtomicExchange | null {
         });
         atomicExchangeLibraries.push(library);
         const renameat2 = library.symbols.renameat2;
-        atomicExchange = (left, right) => renameat2(
-          -100,
+        atomicExchange = (leftDirectoryFd, left, rightDirectoryFd, right) => renameat2(
+          leftDirectoryFd,
           Buffer.from(`${left}\0`),
-          -100,
+          rightDirectoryFd,
           Buffer.from(`${right}\0`),
           2,
         ) === 0;
@@ -1868,11 +2486,11 @@ function resolveAtomicExchange(): AtomicExchange | null {
           });
           atomicExchangeLibraries.push(library);
           const syscall = library.symbols.syscall;
-          atomicExchange = (left, right) => Number(syscall(
+          atomicExchange = (leftDirectoryFd, left, rightDirectoryFd, right) => Number(syscall(
             renameat2Syscall,
-            -100,
+            leftDirectoryFd,
             Buffer.from(`${left}\0`),
-            -100,
+            rightDirectoryFd,
             Buffer.from(`${right}\0`),
             2,
           )) === 0;
@@ -1893,10 +2511,10 @@ function resolveAtomicExchange(): AtomicExchange | null {
       });
       atomicExchangeLibraries.push(library);
       const renameatx = library.symbols.renameatx_np;
-      atomicExchange = (left, right) => renameatx(
-        -2,
+      atomicExchange = (leftDirectoryFd, left, rightDirectoryFd, right) => renameatx(
+        leftDirectoryFd,
         Buffer.from(`${left}\0`),
-        -2,
+        rightDirectoryFd,
         Buffer.from(`${right}\0`),
         2,
       ) === 0;
@@ -1912,11 +2530,83 @@ function resolveAtomicExchange(): AtomicExchange | null {
   return null;
 }
 
+function resolveAnchoredFsOps(): AnchoredFsOps | null {
+  if (anchoredFsOps !== undefined) return anchoredFsOps;
+  const candidates = process.platform === "linux"
+    ? [
+        "libc.so.6",
+        "libc.so",
+        ...(process.arch === "arm64"
+          ? ["/lib/ld-musl-aarch64.so.1", "/lib/libc.musl-aarch64.so.1"]
+          : process.arch === "x64"
+            ? ["/lib/ld-musl-x86_64.so.1", "/lib/libc.musl-x86_64.so.1"]
+            : []),
+      ]
+    : process.platform === "darwin"
+      ? ["/usr/lib/libSystem.B.dylib"]
+      : [];
+  for (const candidate of candidates) {
+    try {
+      const library = dlopen(candidate, {
+        openat: {
+          args: [FFIType.i32, FFIType.cstring, FFIType.i32, FFIType.u32],
+          returns: FFIType.i32,
+        },
+        renameat: {
+          args: [FFIType.i32, FFIType.cstring, FFIType.i32, FFIType.cstring],
+          returns: FFIType.i32,
+        },
+        linkat: {
+          args: [FFIType.i32, FFIType.cstring, FFIType.i32, FFIType.cstring, FFIType.i32],
+          returns: FFIType.i32,
+        },
+        unlinkat: {
+          args: [FFIType.i32, FFIType.cstring, FFIType.i32],
+          returns: FFIType.i32,
+        },
+      });
+      atomicExchangeLibraries.push(library);
+      anchoredFsOps = {
+        openat: (directoryFd, name, flags, mode) => Number(library.symbols.openat(
+          directoryFd,
+          Buffer.from(`${name}\0`),
+          flags,
+          mode,
+        )),
+        renameat: (leftDirectoryFd, left, rightDirectoryFd, right) => library.symbols.renameat(
+          leftDirectoryFd,
+          Buffer.from(`${left}\0`),
+          rightDirectoryFd,
+          Buffer.from(`${right}\0`),
+        ) === 0,
+        linkat: (leftDirectoryFd, left, rightDirectoryFd, right) => library.symbols.linkat(
+          leftDirectoryFd,
+          Buffer.from(`${left}\0`),
+          rightDirectoryFd,
+          Buffer.from(`${right}\0`),
+          0,
+        ) === 0,
+        unlinkat: (directoryFd, name) => library.symbols.unlinkat(
+          directoryFd,
+          Buffer.from(`${name}\0`),
+          0,
+        ) === 0,
+      };
+      return anchoredFsOps;
+    } catch {
+      // Try the next libc location before failing closed.
+    }
+  }
+  anchoredFsOps = null;
+  return null;
+}
+
 function acquireWorkspaceLock(
   workspaceRoot: string,
   lockPath: string,
   afterOpen?: () => void,
   beforeStaleRemove?: (lockPath: string) => void,
+  processStartIdentityLookup: (pid: number) => string | null = processStartIdentity,
 ): WorkspaceLock {
   const lockDirectory = resolve(lockPath, "..");
   ensureSafeDirectory(lockDirectory, workspaceRoot, 0o700);
@@ -1936,6 +2626,7 @@ function acquireWorkspaceLock(
       pid: process.pid,
       nonce: randomUUID(),
       created_at: new Date().toISOString(),
+      process_start_id: processStartIdentityLookup(process.pid),
     })}\n`;
     openedContentHash = sha256(content);
     writeFileSync(fd, content);
@@ -1952,6 +2643,7 @@ function acquireWorkspaceLock(
         openedIdentity,
         openedContentHash,
         beforeStaleRemove,
+        processStartIdentityLookup,
       );
       if (!takeover) {
         throw new ProjectContextError("PROJECT_CONTEXT_LOCKED", "another renderer holds the workspace project-context lock");
@@ -2009,6 +2701,7 @@ function removeOwnedLockByInode(
 function observeStaleWorkspaceLock(
   lockPath: string,
   workspaceRoot: string,
+  processStartIdentityLookup: (pid: number) => string | null = processStartIdentity,
 ): { identity: { dev: number; ino: number }; contentHash: string } | null {
   let content: string;
   let observed: ReturnType<typeof lstatSync>;
@@ -2023,6 +2716,7 @@ function observeStaleWorkspaceLock(
   if (currentFileHash(lockPath, workspaceRoot) !== contentHash) return null;
   let pid: number | null = null;
   let createdAtMs: number | null = null;
+  let recordedProcessStart: string | null = null;
   try {
     const value = JSON.parse(content) as unknown;
     if (isRecord(value)) {
@@ -2031,13 +2725,24 @@ function observeStaleWorkspaceLock(
         const parsedCreatedAt = Date.parse(value["created_at"]);
         if (parsedCreatedAt <= Date.now()) createdAtMs = parsedCreatedAt;
       }
+      if (typeof value["process_start_id"] === "string" && value["process_start_id"].length <= 512 && isSafeSingleLine(value["process_start_id"])) {
+        recordedProcessStart = value["process_start_id"];
+      }
     }
   } catch {
     if (Date.now() - observed.mtimeMs < PROJECT_CONTEXT_LOCK_STALE_MS) return null;
   }
   const observedStartMs = Math.min(observed.mtimeMs, createdAtMs ?? observed.mtimeMs);
   const staleByAge = Date.now() - observedStartMs >= PROJECT_CONTEXT_LOCK_STALE_MS;
-  if (pid !== null && processIsAlive(pid) && !staleByAge) return null;
+  if (pid !== null && processIsAlive(pid)) {
+    const currentProcessStart = processStartIdentityLookup(pid);
+    if (recordedProcessStart !== null) {
+      if (currentProcessStart === recordedProcessStart) return null;
+      if (currentProcessStart === null && !staleByAge) return null;
+    } else if (!staleByAge) {
+      return null;
+    }
+  }
   if (pid === null && !staleByAge) return null;
   return {
     identity: { dev: observed.dev, ino: observed.ino },
@@ -2052,8 +2757,9 @@ function tryTakeoverStaleWorkspaceLock(
   candidateIdentity: { dev: number; ino: number },
   candidateHash: string,
   beforeTakeover?: (lockPath: string) => void,
+  processStartIdentityLookup: (pid: number) => string | null = processStartIdentity,
 ): boolean {
-  const stale = observeStaleWorkspaceLock(lockPath, workspaceRoot);
+  const stale = observeStaleWorkspaceLock(lockPath, workspaceRoot, processStartIdentityLookup);
   if (!stale) return false;
   beforeTakeover?.(lockPath);
   atomicExchangePaths(candidatePath, lockPath);
@@ -2131,6 +2837,37 @@ function processIsAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+function processStartIdentity(pid: number): string | null {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const close = stat.lastIndexOf(")");
+      if (close < 0) return null;
+      const fields = stat.slice(close + 2).trim().split(/\s+/);
+      const startTicks = fields[19];
+      if (!startTicks || !/^[0-9]+$/.test(startTicks)) return null;
+      const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      return /^[a-f0-9-]{36}$/i.test(bootId) ? `linux:${bootId}:${startTicks}` : null;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "darwin") {
+    try {
+      const started = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 1_000,
+      }).trim();
+      return started ? `darwin:${started}` : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 function releaseWorkspaceLock(lockPath: string, lock: WorkspaceLock, workspaceRoot: string): void {

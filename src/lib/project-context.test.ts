@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -7,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -24,6 +26,7 @@ import {
   computeProjectContextSourceHash,
   parseProjectContextBundle,
   planProjectContext,
+  removeProjectContextCoordinatedFile,
   type ProjectContextBundleV1,
   type ProjectContextRuntime,
 } from "./project-context";
@@ -793,6 +796,35 @@ describe("legacy migration and compatibility", () => {
     expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
   });
 
+  test("preserves an ordinary edit made after session guard validation", () => {
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    });
+    const target = join(tmpRoot, "AGENTS.md");
+    const sessionManifest = join(tmpRoot, ".hasna", "session-render-manifest.json");
+    const manifestBefore = readFileSync(sessionManifest, "utf8");
+    const plan = planSessionRender({
+      tool: "codex",
+      profile: "live-codewith",
+      targetHome: tmpRoot,
+      sources: [{ id: "global-rules", layer: "global", content: "New planned session rules." }],
+    });
+    const concurrentEdit = `${readFileSync(target, "utf8")}ordinary concurrent edit\n`;
+
+    expect(() => applySessionRender(plan, {
+      test_hooks: {
+        before_apply_writes: () => writeFileSync(target, concurrentEdit),
+      },
+    })).toThrow("changed after planning");
+
+    expect(readFileSync(target, "utf8")).toBe(concurrentEdit);
+    expect(readFileSync(sessionManifest, "utf8")).toBe(manifestBefore);
+    expect(existsSync(join(tmpRoot, ".hasna", "project-context.lock"))).toBe(false);
+  });
+
   test("rejects Codewith rerenders when an override shadows the managed target", () => {
     applyProjectContext({
       workspace_root: tmpRoot,
@@ -1300,6 +1332,33 @@ describe("cache, revision, crash, and race safety", () => {
     }
   });
 
+  test("never follows a managed parent replaced by a symlink during installation", () => {
+    const managedParent = join(tmpRoot, ".codewith");
+    const displacedParent = join(tmpRoot, ".codewith-displaced");
+    const outside = join(tmpRoot, "outside");
+    mkdirSync(outside);
+    let swapped = false;
+
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "codewith",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      test_hooks: {
+        before_target_install: () => {
+          if (swapped) return;
+          swapped = true;
+          renameSync(managedParent, displacedParent);
+          symlinkSync(outside, managedParent, "dir");
+        },
+      },
+    }), "PROJECT_CONTEXT_SYMLINK_REJECTED");
+
+    expect(existsSync(join(outside, "CODEWITH.md"))).toBe(false);
+    expect(existsSync(join(displacedParent, "CODEWITH.md"))).toBe(false);
+    expect(existsSync(join(tmpRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")))).toBe(false);
+  });
+
   test("fails closed before replacing an existing target without atomic exchange support", () => {
     const target = join(tmpRoot, "AGENTS.md");
     const original = "existing user target bytes\n";
@@ -1315,6 +1374,55 @@ describe("cache, revision, crash, and race safety", () => {
     expect(readFileSync(target, "utf8")).toBe(original);
     expect(existsSync(join(tmpRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")))).toBe(false);
     expect(existsSync(join(tmpRoot, ".hasna", "project-context.lock"))).toBe(false);
+  });
+
+  test("keeps first-time rendering available on create-only platforms and fails closed on replacement", () => {
+    expect(applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      test_hooks: { portable_create_only: true },
+    }).applied).toBe(true);
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain(PROJECT_CONTEXT_MANAGED_COMMENT);
+
+    const next = makeBundle({ revision: "rev-8" });
+    next.hash = computeProjectContextSourceHash(next);
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(next),
+      source_path: join(tmpRoot, "next.json"),
+      test_hooks: { portable_create_only: true },
+    }), "PROJECT_CONTEXT_ATOMIC_REPLACE_UNAVAILABLE");
+    expect(readFileSync(join(tmpRoot, "AGENTS.md"), "utf8")).toContain("revision=rev-7");
+  });
+
+  test("never overwrites a concurrently recreated target while recovering a displaced deletion", () => {
+    for (const forcePortableFileOps of [false, true]) {
+      const target = join(tmpRoot, forcePortableFileOps ? "portable-delete.md" : "anchored-delete.md");
+      const original = "managed-before-delete\n";
+      const concurrent = "concurrent-recreation\n";
+      let displacedPath = "";
+      writeFileSync(target, original);
+
+      expect(() => removeProjectContextCoordinatedFile({
+        path: target,
+        workspace_root: tmpRoot,
+        expected_hash: createHash("sha256").update(original).digest("hex"),
+        allow_portable_removal: true,
+        force_portable_file_ops: forcePortableFileOps,
+        test_hooks: {
+          after_displace: (path) => {
+            displacedPath = path;
+            writeFileSync(target, concurrent);
+          },
+        },
+      })).toThrow("changed during");
+      expect(readFileSync(target, "utf8")).toBe(concurrent);
+      expect(displacedPath).not.toBe("");
+      expect(readFileSync(displacedPath, "utf8")).toBe(original);
+    }
   });
 
   test("removes only its own lock inode when lock initialization fails", () => {
@@ -1369,6 +1477,62 @@ describe("cache, revision, crash, and race safety", () => {
       runtime: "claude",
       bundle_json: bundleJson(),
       source_path: join(tmpRoot, "bundle.json"),
+    }).applied).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test("does not evict a genuine live renderer solely because its lock is old", () => {
+    const lockPath = join(tmpRoot, ".hasna", "project-context.lock");
+    let processStartId: string | null = null;
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "claude",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      test_hooks: {
+        after_lock_open: () => {
+          const lock = JSON.parse(readFileSync(lockPath, "utf8")) as { process_start_id?: unknown };
+          processStartId = typeof lock.process_start_id === "string" ? lock.process_start_id : null;
+        },
+      },
+    });
+    expect(processStartId).not.toBeNull();
+    writeFileSync(lockPath, `${JSON.stringify({
+      schema: "hasna.instructions.project-context-lock/v1",
+      pid: process.pid,
+      nonce: "genuine-long-running-owner",
+      created_at: new Date(Date.now() - (10 * 60 * 1_000)).toISOString(),
+      process_start_id: processStartId,
+    })}\n`);
+
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "claude",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    }), "PROJECT_CONTEXT_LOCKED");
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  test("falls back to bounded lock age when process-start inspection is unavailable", () => {
+    const lockPath = join(tmpRoot, ".hasna", "project-context.lock");
+    mkdirSync(join(lockPath, ".."), { recursive: true });
+    writeFileSync(lockPath, `${JSON.stringify({
+      schema: "hasna.instructions.project-context-lock/v1",
+      pid: process.pid,
+      nonce: "stale-owner-hidden-by-process-policy",
+      created_at: new Date(Date.now() - (10 * 60 * 1_000)).toISOString(),
+      process_start_id: "recorded-owner-start",
+    })}\n`);
+
+    expect(applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "claude",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      test_hooks: {
+        process_start_identity: () => null,
+      },
     }).applied).toBe(true);
     expect(existsSync(lockPath)).toBe(false);
   });

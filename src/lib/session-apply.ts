@@ -4,12 +4,14 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
-import { withProjectContextSessionGuard } from "./project-context.js";
+import { isAbsolute, join, parse, relative, resolve } from "node:path";
+import {
+  removeProjectContextCoordinatedFile,
+  withProjectContextSessionGuard,
+  writeProjectContextCoordinatedFile,
+  type ProjectContextWriteCoordination,
+} from "./project-context.js";
 import {
   SESSION_RENDER_MANAGED_MARKER,
   SESSION_RENDER_SCHEMA,
@@ -64,6 +66,13 @@ export interface SessionApplyResult {
 export interface SessionApplyOptions {
   dryRun?: boolean;
   force?: boolean;
+  test_hooks?: {
+    before_apply_writes?: (context: {
+      plan: SessionRenderPlan;
+      results: SessionApplyFileResult[];
+    }) => void;
+    force_portable_file_ops?: boolean;
+  };
 }
 
 export class SessionApplyError extends Error {
@@ -79,7 +88,7 @@ export function applySessionRender(
 ): SessionApplyResult {
   return withProjectContextSessionGuard(
     plan.projectContextGuard,
-    () => applySessionRenderUnlocked(plan, options),
+    (coordination) => applySessionRenderUnlocked(plan, options, coordination),
     { dry_run: options.dryRun },
   );
 }
@@ -87,6 +96,7 @@ export function applySessionRender(
 function applySessionRenderUnlocked(
   plan: SessionRenderPlan,
   options: SessionApplyOptions,
+  coordination: ProjectContextWriteCoordination | null,
 ): SessionApplyResult {
   if (plan.blocked || !plan.writable) {
     throw new SessionApplyError(`Session render plan is blocked: ${plan.blockers.join("; ")}`);
@@ -123,18 +133,55 @@ function applySessionRenderUnlocked(
 
   let snapshotPath: string | null = null;
   if (!options.dryRun) {
-    snapshotPath = writeSessionSnapshot(plan, targetHome, manifestPath, results, previousManifest);
-    for (const file of files) {
-      const target = resolvePlannedFilePath(plan, file, targetHome);
-      const existingContent = existsSync(target) ? readFileSync(target, "utf-8") : null;
-      if (existingContent === file.content) continue;
-      writePlannedFile(target, file.content, targetHome);
+    const allowPortableFallback = coordination === null;
+    const forcePortableFileOps = options.test_hooks?.force_portable_file_ops ?? false;
+    ensureSessionTargetHome(targetHome);
+    snapshotPath = writeSessionSnapshot(
+      plan,
+      targetHome,
+      manifestPath,
+      results,
+      previousManifest,
+      coordination,
+      allowPortableFallback,
+      forcePortableFileOps,
+    );
+    options.test_hooks?.before_apply_writes?.({ plan, results });
+    const resultsByPath = new Map(results.map((result) => [result.path, result]));
+    for (const file of plan.files) {
+      applyPlannedFile(
+        plan,
+        file,
+        targetHome,
+        resultsByPath,
+        coordination,
+        allowPortableFallback,
+        forcePortableFileOps,
+      );
     }
     for (const result of results) {
       if (result.action !== "delete") continue;
-      assertNoSymlinkSegments(targetHome, result.path);
-      if (existsSync(result.path)) rmSync(result.path);
+      coordination?.assert_held();
+      assertExpectedSessionFileHash(result.path, targetHome, result.previousSha256);
+      removeProjectContextCoordinatedFile({
+        path: result.path,
+        workspace_root: targetHome,
+        expected_hash: requiredPreviousHash(result),
+        max_observed_bytes: null,
+        allow_portable_removal: allowPortableFallback,
+        force_portable_file_ops: forcePortableFileOps,
+      });
+      coordination?.assert_held();
     }
+    applyPlannedFile(
+      plan,
+      plan.manifestFile,
+      targetHome,
+      resultsByPath,
+      coordination,
+      allowPortableFallback,
+      forcePortableFileOps,
+    );
   }
 
   return {
@@ -148,6 +195,11 @@ function applySessionRenderUnlocked(
     conflicts,
     drift,
   };
+}
+
+function ensureSessionTargetHome(targetHome: string): void {
+  if (!existsSync(targetHome)) mkdirSync(targetHome, { recursive: true, mode: 0o700 });
+  assertSafeTargetHome(targetHome);
 }
 
 export function checkSessionRenderDrift(targetHome: string, manifestPath?: string): SessionDriftCheck {
@@ -400,13 +452,60 @@ function readPreviousManifest(path: string): SessionRenderManifest | null {
   }
 }
 
-function writePlannedFile(path: string, content: string, targetHome: string): void {
-  const dir = dirname(path);
-  mkdirSync(dir, { recursive: true });
+function applyPlannedFile(
+  plan: SessionRenderPlan,
+  file: SessionRenderFile,
+  targetHome: string,
+  resultsByPath: Map<string, SessionApplyFileResult>,
+  coordination: ProjectContextWriteCoordination | null,
+  allowPortableFallback: boolean,
+  forcePortableFileOps: boolean,
+): void {
+  const target = resolvePlannedFilePath(plan, file, targetHome);
+  const result = resultsByPath.get(target);
+  if (!result) throw new SessionApplyError(`Session apply result is missing for ${file.relativePath}`);
+  coordination?.assert_held();
+  assertExpectedSessionFileHash(target, targetHome, result.previousSha256);
+  if (currentSessionFileHash(target, targetHome) === file.sha256) return;
+  writeProjectContextCoordinatedFile({
+    path: target,
+    content: file.content,
+    workspace_root: targetHome,
+    default_mode: 0o644,
+    expected_hash: result.previousSha256,
+    max_observed_bytes: null,
+    allow_portable_replacement: allowPortableFallback,
+    force_portable_file_ops: forcePortableFileOps,
+  });
+  coordination?.assert_held();
+}
+
+function assertExpectedSessionFileHash(
+  path: string,
+  targetHome: string,
+  expectedHash: string | null,
+): void {
+  const actualHash = currentSessionFileHash(path, targetHome);
+  if (actualHash !== expectedHash) {
+    throw new SessionApplyError(`Session apply path changed after planning: ${relative(targetHome, path)}`);
+  }
+}
+
+function currentSessionFileHash(path: string, targetHome: string): string | null {
   assertNoSymlinkSegments(targetHome, path);
-  const tmp = join(dir, `.session-${randomUUID()}.tmp`);
-  writeFileSync(tmp, content, "utf-8");
-  renameSync(tmp, path);
+  if (!existsSync(path)) return null;
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new SessionApplyError(`Session apply path is not a regular file: ${path}`);
+  }
+  return sha256(readFileSync(path, "utf-8"));
+}
+
+function requiredPreviousHash(result: SessionApplyFileResult): string {
+  if (result.previousSha256 === null) {
+    throw new SessionApplyError(`Session delete has no previous hash: ${result.relativePath}`);
+  }
+  return result.previousSha256;
 }
 
 function writeSessionSnapshot(
@@ -415,6 +514,9 @@ function writeSessionSnapshot(
   manifestPath: string,
   results: SessionApplyFileResult[],
   previousManifest: SessionRenderManifest | null,
+  coordination: ProjectContextWriteCoordination | null,
+  allowPortableFallback: boolean,
+  forcePortableFileOps: boolean,
 ): string | null {
   const existingFiles = results
     .filter((result) => result.action === "update" || result.action === "delete")
@@ -448,7 +550,18 @@ function writeSessionSnapshot(
     previousManifest,
     files: existingFiles,
   };
-  writePlannedFile(snapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`, targetHome);
+  coordination?.assert_held();
+  writeProjectContextCoordinatedFile({
+    path: snapshotPath,
+    content: `${JSON.stringify(snapshot, null, 2)}\n`,
+    workspace_root: targetHome,
+    default_mode: 0o600,
+    expected_hash: null,
+    max_observed_bytes: null,
+    allow_portable_replacement: allowPortableFallback,
+    force_portable_file_ops: forcePortableFileOps,
+  });
+  coordination?.assert_held();
   return snapshotPath;
 }
 
