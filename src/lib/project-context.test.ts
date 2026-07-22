@@ -158,6 +158,17 @@ describe("project context bundle validation", () => {
     expectCode(() => parseProjectContextBundle(impossible), "PROJECT_CONTEXT_INVALID");
   });
 
+  test("rejects a future-dated live bundle instead of reporting it as fresh age zero", () => {
+    const future = makeBundle({ generated_at: "2026-07-22T10:03:00.000Z" });
+    future.hash = computeProjectContextSourceHash(future);
+    expectCode(() => planProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle: future,
+      now: new Date("2026-07-22T10:02:00.000Z"),
+    }), "PROJECT_CONTEXT_INVALID");
+  });
+
   test("enforces the 8 KiB encoded input limit before parsing", () => {
     expectCode(() => parseProjectContextBundle(`{"padding":"${"x".repeat(8_192)}"}`), "PROJECT_CONTEXT_INPUT_TOO_LARGE");
   });
@@ -419,7 +430,7 @@ describe("project context adapters and managed edits", () => {
     expect(readFileSync(target, "utf8").match(/project context BEGIN/g)).toHaveLength(1);
   });
 
-  test("rejects a well-formed managed block for another project without force", () => {
+  test("rejects a well-formed managed block for another project even with force", () => {
     const target = join(tmpRoot, "AGENTS.md");
     writeFileSync(target, [
       "before",
@@ -434,6 +445,13 @@ describe("project context adapters and managed edits", () => {
       runtime: "agents",
       bundle_json: bundleJson(),
       source_path: join(tmpRoot, "bundle.json"),
+    }), "MANAGED_BLOCK_CONFLICT");
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      force: true,
     }), "MANAGED_BLOCK_CONFLICT");
   });
 
@@ -589,6 +607,33 @@ describe("legacy migration and compatibility", () => {
     const legacyPath = join(tmpRoot, ".codewith", ".hasna", "session-render-manifest.json");
     mkdirSync(join(tmpRoot, ".codewith", ".hasna"), { recursive: true });
     writeFileSync(legacyPath, "{malformed\n");
+    const next = makeBundle({ revision: "rev-8" });
+    next.hash = computeProjectContextSourceHash(next);
+
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "codewith",
+      bundle_json: bundleJson(next),
+      source_path: join(tmpRoot, "next.json"),
+    }), "PROJECT_CONTEXT_MANIFEST_INVALID");
+    expect([fragmentPath, targetPath, cachePath].map((path) => readFileSync(path, "utf8"))).toEqual(before);
+  });
+
+  test("rejects credential-like metadata retained from a legacy session manifest", () => {
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "codewith",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    });
+    const fragmentPath = join(tmpRoot, ...PROJECT_CONTEXT_FRAGMENT_PATH.split("/"));
+    const targetPath = join(tmpRoot, ".codewith", "CODEWITH.md");
+    const cachePath = join(tmpRoot, ".hasna", "project-context-cache.json");
+    const before = [fragmentPath, targetPath, cachePath].map((path) => readFileSync(path, "utf8"));
+    const sessionManifestPath = join(tmpRoot, ".codewith", ".hasna", "session-render-manifest.json");
+    const sessionManifest = JSON.parse(readFileSync(sessionManifestPath, "utf8")) as Record<string, unknown>;
+    sessionManifest.warnings = [["sk", "ant", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"].join("-")];
+    writeFileSync(sessionManifestPath, `${JSON.stringify(sessionManifest)}\n`);
     const next = makeBundle({ revision: "rev-8" });
     next.hash = computeProjectContextSourceHash(next);
 

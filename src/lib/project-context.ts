@@ -470,7 +470,11 @@ export function planProjectContext(input: ProjectContextPlanInput): ProjectConte
 
   const now = input.now ?? new Date();
   const status = input.status ?? (bundle.freshness === "fresh" ? "fresh" : "stale-source");
-  const ageSeconds = input.age_seconds ?? ageInSeconds(bundle.generated_at, now);
+  const generatedAgeSeconds = ageInSeconds(bundle.generated_at, now);
+  const ageSeconds = input.age_seconds ?? generatedAgeSeconds;
+  if (!Number.isInteger(ageSeconds) || ageSeconds < 0) {
+    throw new ProjectContextError("PROJECT_CONTEXT_INVALID", "project context age must be a non-negative integer");
+  }
   const nativeImports = runtimeUsesNativeImports(input.runtime, input.codewith_native_imports);
   const inlineMarkerOverhead = nativeImports ? 0 : Buffer.byteLength(buildManagedBlock(bundle, "", "\n"), "utf8");
   const generated = buildCanonicalFragment(
@@ -482,7 +486,7 @@ export function planProjectContext(input: ProjectContextPlanInput): ProjectConte
   );
   const previousTargetContent = existsSync(paths.target) ? readUtf8RegularFile(paths.target, workspaceRoot) : null;
   const markerParse = parseManagedBlock(previousTargetContent ?? "", input.force === true);
-  if (markerParse.block && markerParse.block.id !== bundle.project.id && !input.force) {
+  if (markerParse.block && markerParse.block.id !== bundle.project.id) {
     throw new ProjectContextError("MANAGED_BLOCK_CONFLICT", "managed block belongs to a different project");
   }
   const eol = preferredEol(previousTargetContent ?? "");
@@ -1178,8 +1182,7 @@ function assertRevisionOrdering(plan: ProjectContextPlan, force: boolean): void 
 
   for (const observation of observations) {
     if (observation.id !== plan.bundle.project.id) {
-      if (!force) throw new ProjectContextError("PROJECT_CONTEXT_IDENTITY_CONFLICT", `${observation.source} belongs to another project`);
-      continue;
+      throw new ProjectContextError("PROJECT_CONTEXT_IDENTITY_CONFLICT", `${observation.source} belongs to another project`);
     }
     const ordering = compareRevisions(plan.bundle.revision, observation.revision);
     if (ordering < 0) {
@@ -1302,7 +1305,7 @@ function buildSessionCompatibilityManifest(plan: ProjectContextPlan, now: Date):
   };
   const targetOwner = isRecord(existing["targetOwner"]) ? existing["targetOwner"] : {};
   const adapterMode = plan.native_imports ? "native-imports" : "flattened-markdown";
-  return {
+  return credentialSafeSessionManifest({
     schema: SESSION_RENDER_SCHEMA,
     tool,
     adapterMode,
@@ -1332,7 +1335,21 @@ function buildSessionCompatibilityManifest(plan: ProjectContextPlan, now: Date):
     warnings: [...new Set([...sanitizeLegacyWarnings(existing["warnings"]), ...plan.warnings])].slice(0, 64),
     projectContext: manifestProjectContext(plan),
     compatibility: manifestCompatibility(),
-  };
+  });
+}
+
+function credentialSafeSessionManifest(manifest: Record<string, unknown>): Record<string, unknown> {
+  const encoded = JSON.stringify(manifest, null, 2);
+  if (
+    scanSecrets(encoded, "json").length > 0 ||
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret)\s*["']?\s*[:=]|https?:\/\//i.test(encoded)
+  ) {
+    throw new ProjectContextError(
+      "PROJECT_CONTEXT_MANIFEST_INVALID",
+      "provider session manifest contains credential-like metadata",
+    );
+  }
+  return manifest;
 }
 
 function sanitizeLegacySources(value: unknown): Array<Record<string, unknown>> {
@@ -2475,7 +2492,11 @@ function runtimeUsesNativeImports(runtime: ProjectContextRuntime, codewithNative
 }
 
 function ageInSeconds(generatedAt: string, now: Date): number {
-  return Math.max(0, Math.floor((now.getTime() - Date.parse(generatedAt)) / 1_000));
+  const deltaMs = now.getTime() - Date.parse(generatedAt);
+  if (deltaMs < 0) {
+    throw new ProjectContextError("PROJECT_CONTEXT_INVALID", "bundle generated_at is in the future");
+  }
+  return Math.floor(deltaMs / 1_000);
 }
 
 function staleCacheAgeInSeconds(timestamp: string, now: Date, field: string): number {
