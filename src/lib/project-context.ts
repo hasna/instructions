@@ -36,6 +36,7 @@ export const PROJECT_CONTEXT_SNAPSHOT_DIR = ".hasna/project-context-snapshots";
 export const PROJECT_CONTEXT_CACHE_SCHEMA = "hasna.instructions.project-context-cache/v1" as const;
 export const PROJECT_CONTEXT_MANAGED_COMMENT = "Managed by @hasna/configs project context";
 const SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
+const PROJECT_CONTEXT_LOCK_STALE_MS = 5 * 60 * 1_000;
 export const LEGACY_CONFIGS_PACKAGE = "@hasna/configs" as const;
 export const LEGACY_CONFIGS_COMPAT_VERSION = "0.2.45" as const;
 export const LEGACY_CONFIGS_EXECUTABLE = "configs" as const;
@@ -234,6 +235,7 @@ export interface ProjectContextApplyOptions {
     before_stale_lock_remove?: (lockPath: string) => void;
     before_compare?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     after_fragment?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
+    before_target_install?: (context: { attempt: number; plan: ProjectContextPlan; temp_path: string }) => void;
     after_target_exchange?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     after_target?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
     before_manifest?: (context: { attempt: number; plan: ProjectContextPlan }) => void;
@@ -786,6 +788,7 @@ export function applyProjectContext(options: ProjectContextApplyOptions): Projec
           expectedPlanHash(plan, plan.target_path),
           () => options.test_hooks?.after_target_exchange?.({ attempt, plan }),
           options.test_hooks?.atomic_exchange_unavailable,
+          (tempPath) => options.test_hooks?.before_target_install?.({ attempt, plan, temp_path: tempPath }),
         );
         options.test_hooks?.after_target?.({ attempt, plan });
         assertWorkspaceLockHeld(lockPath, lock!, workspaceRoot);
@@ -936,8 +939,8 @@ function resolveBundleForApply(
     throw new ProjectContextError("PROJECT_CONTEXT_CACHE_INVALID", "cached revision or hash metadata is inconsistent");
   }
   const ageSeconds = Math.max(
-    ageInSeconds(bundle.generated_at, now),
-    ageInSeconds(cache.cached_at, now),
+    staleCacheAgeInSeconds(bundle.generated_at, now, "bundle generated_at"),
+    staleCacheAgeInSeconds(cache.cached_at, now, "cache cached_at"),
   );
   const maxAge = normalizeMaxStaleAge(options.max_stale_age_seconds);
   if (ageSeconds > maxAge) {
@@ -1652,6 +1655,7 @@ function atomicWriteFile(
   expectedHash?: string | null,
   afterExchange?: () => void,
   atomicExchangeUnavailable = false,
+  beforeInstall?: (tempPath: string) => void,
 ): void {
   const dir = resolve(path, "..");
   ensureSafeDirectory(dir, workspaceRoot, 0o700);
@@ -1661,16 +1665,22 @@ function atomicWriteFile(
   let fd: number | null = null;
   let preserveTemp = false;
   let directoryChanged = false;
+  const desiredHash = sha256(content);
   try {
     fd = openSync(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, previousMode);
     writeFileSync(fd, content, { encoding: "utf8" });
     fsyncSync(fd);
     closeSync(fd);
     fd = null;
+    beforeInstall?.(tempPath);
+    if (preparedTempHash(tempPath) !== desiredHash) {
+      throw new ProjectContextHashRace(`prepared bytes changed before installation: ${relativePosix(workspaceRoot, path)}`);
+    }
     if (expectedHash === undefined) {
       renameSync(tempPath, path);
       directoryChanged = true;
     } else if (expectedHash === null) {
+      const prepared = lstatSync(tempPath);
       try {
         linkSync(tempPath, path);
       } catch (error) {
@@ -1680,6 +1690,19 @@ function atomicWriteFile(
         throw error;
       }
       directoryChanged = true;
+      const installed = lstatSync(path);
+      if (
+        installed.isSymbolicLink() ||
+        installed.dev !== prepared.dev ||
+        installed.ino !== prepared.ino ||
+        preparedTempHash(tempPath) !== desiredHash ||
+        currentFileHash(path, workspaceRoot) !== desiredHash
+      ) {
+        if (!installed.isSymbolicLink() && installed.dev === prepared.dev && installed.ino === prepared.ino) {
+          rmSync(path);
+        }
+        throw new ProjectContextHashRace(`prepared bytes changed during creation: ${relativePosix(workspaceRoot, path)}`);
+      }
       rmSync(tempPath);
     } else {
       if (!existsSync(path)) {
@@ -1691,22 +1714,30 @@ function atomicWriteFile(
           "the platform could not provide an atomic exchange for compare-and-swap replacement",
         );
       }
+      if (currentFileHash(path, workspaceRoot) !== expectedHash) {
+        throw new ProjectContextHashRace(`managed path changed before atomic replacement: ${relativePosix(workspaceRoot, path)}`);
+      }
+      if (preparedTempHash(tempPath) !== desiredHash) {
+        throw new ProjectContextHashRace(`prepared bytes changed before atomic replacement: ${relativePosix(workspaceRoot, path)}`);
+      }
       atomicExchangePaths(tempPath, path);
       directoryChanged = true;
-      const desiredHash = sha256(content);
       let exchanged = true;
       try {
         const displacedAtExchange = currentFileHash(tempPath, workspaceRoot);
         const installedAtExchange = currentFileHash(path, workspaceRoot);
-        if (displacedAtExchange !== expectedHash || installedAtExchange !== desiredHash) {
-          if (installedAtExchange === desiredHash) {
-            atomicExchangePaths(tempPath, path);
-            exchanged = false;
-            throw new ProjectContextHashRace(`managed path changed at atomic replacement: ${relativePosix(workspaceRoot, path)}`);
-          }
+        if (displacedAtExchange !== expectedHash) {
           preserveTemp = true;
           exchanged = false;
-          throw new ProjectContextHashRace(`managed path changed during atomic replacement: ${relativePosix(workspaceRoot, path)}`);
+          throw new ProjectContextError(
+            "PROJECT_CONTEXT_ATOMIC_REPLACE_CONFLICT",
+            `the displaced managed file changed before exchange validation: ${relativePosix(workspaceRoot, path)}`,
+          );
+        }
+        if (installedAtExchange !== desiredHash) {
+          atomicExchangePaths(tempPath, path);
+          exchanged = false;
+          throw new ProjectContextHashRace(`prepared bytes changed during atomic replacement: ${relativePosix(workspaceRoot, path)}`);
         }
         afterExchange?.();
         const replacedHash = currentFileHash(tempPath, workspaceRoot);
@@ -1729,8 +1760,12 @@ function atomicWriteFile(
       } catch (error) {
         if (exchanged) {
           try {
-            if (currentFileHash(path, workspaceRoot) === desiredHash) {
+            if (
+              currentFileHash(path, workspaceRoot) === desiredHash &&
+              currentFileHash(tempPath, workspaceRoot) === expectedHash
+            ) {
               atomicExchangePaths(tempPath, path);
+              exchanged = false;
             } else {
               preserveTemp = true;
             }
@@ -1748,6 +1783,14 @@ function atomicWriteFile(
     if (directoryChanged) fsyncDirectory(dir);
     throw error;
   }
+}
+
+function preparedTempHash(path: string): string {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new ProjectContextHashRace("prepared project-context output is no longer a regular file");
+  }
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 type AtomicExchange = (left: string, right: string) => boolean;
@@ -1962,14 +2005,23 @@ function observeStaleWorkspaceLock(
   const contentHash = sha256(content);
   if (currentFileHash(lockPath, workspaceRoot) !== contentHash) return null;
   let pid: number | null = null;
+  let createdAtMs: number | null = null;
   try {
     const value = JSON.parse(content) as unknown;
-    if (isRecord(value) && Number.isSafeInteger(value["pid"]) && Number(value["pid"]) > 0) pid = Number(value["pid"]);
+    if (isRecord(value)) {
+      if (Number.isSafeInteger(value["pid"]) && Number(value["pid"]) > 0) pid = Number(value["pid"]);
+      if (typeof value["created_at"] === "string" && isStrictIsoTimestamp(value["created_at"])) {
+        const parsedCreatedAt = Date.parse(value["created_at"]);
+        if (parsedCreatedAt <= Date.now()) createdAtMs = parsedCreatedAt;
+      }
+    }
   } catch {
-    if (Date.now() - observed.mtimeMs < 5 * 60 * 1_000) return null;
+    if (Date.now() - observed.mtimeMs < PROJECT_CONTEXT_LOCK_STALE_MS) return null;
   }
-  if (pid !== null && processIsAlive(pid)) return null;
-  if (pid === null && Date.now() - observed.mtimeMs < 5 * 60 * 1_000) return null;
+  const observedStartMs = Math.min(observed.mtimeMs, createdAtMs ?? observed.mtimeMs);
+  const staleByAge = Date.now() - observedStartMs >= PROJECT_CONTEXT_LOCK_STALE_MS;
+  if (pid !== null && processIsAlive(pid) && !staleByAge) return null;
+  if (pid === null && !staleByAge) return null;
   return {
     identity: { dev: observed.dev, ino: observed.ino },
     contentHash,
@@ -2424,6 +2476,14 @@ function runtimeUsesNativeImports(runtime: ProjectContextRuntime, codewithNative
 
 function ageInSeconds(generatedAt: string, now: Date): number {
   return Math.max(0, Math.floor((now.getTime() - Date.parse(generatedAt)) / 1_000));
+}
+
+function staleCacheAgeInSeconds(timestamp: string, now: Date, field: string): number {
+  const deltaMs = now.getTime() - Date.parse(timestamp);
+  if (deltaMs < 0) {
+    throw new ProjectContextError("PROJECT_CONTEXT_CACHE_INVALID", `${field} is in the future`);
+  }
+  return Math.floor(deltaMs / 1_000);
 }
 
 function statusLabel(status: ProjectContextStatus, ageSeconds: number): string {

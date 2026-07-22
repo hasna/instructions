@@ -933,6 +933,52 @@ describe("cache, revision, crash, and race safety", () => {
     }), "PROJECT_CONTEXT_CACHE_EXPIRED");
   });
 
+  test("rejects future-dated cache metadata and bundle timestamps", () => {
+    applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+      now: new Date("2026-07-22T10:00:30.000Z"),
+    });
+
+    const cachePath = join(tmpRoot, ".hasna", "project-context-cache.json");
+    const original = readFileSync(cachePath, "utf8");
+    const futureCache = JSON.parse(original) as {
+      cached_at: string;
+      hash: string;
+      bundle: ProjectContextBundleV1;
+    };
+    futureCache.cached_at = "2026-07-22T10:03:00.000Z";
+    writeFileSync(cachePath, `${JSON.stringify(futureCache)}\n`);
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      allow_stale_cache: true,
+      expected_project_id: "wks_ZXg7liK4CFJ1KZjC_Fg_b",
+      max_stale_age_seconds: 300,
+      now: new Date("2026-07-22T10:02:00.000Z"),
+    }), "PROJECT_CONTEXT_CACHE_INVALID");
+
+    const futureBundleCache = JSON.parse(original) as {
+      cached_at: string;
+      hash: string;
+      bundle: ProjectContextBundleV1;
+    };
+    futureBundleCache.bundle.generated_at = "2026-07-22T10:03:00.000Z";
+    futureBundleCache.bundle.hash = computeProjectContextSourceHash(futureBundleCache.bundle);
+    futureBundleCache.hash = futureBundleCache.bundle.hash;
+    writeFileSync(cachePath, `${JSON.stringify(futureBundleCache)}\n`);
+    expectCode(() => applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "agents",
+      allow_stale_cache: true,
+      expected_project_id: "wks_ZXg7liK4CFJ1KZjC_Fg_b",
+      max_stale_age_seconds: 300,
+      now: new Date("2026-07-22T10:02:00.000Z"),
+    }), "PROJECT_CONTEXT_CACHE_INVALID");
+  });
+
   test("fails closed on malformed manifests and cache metadata", () => {
     applyProjectContext({
       workspace_root: tmpRoot,
@@ -1183,6 +1229,32 @@ describe("cache, revision, crash, and race safety", () => {
     expect(readdirSync(tmpRoot).some((entry) => /^\.project-context-.*\.tmp$/.test(entry))).toBe(true);
   });
 
+  test("rejects prepared temp tampering before creating or replacing a target", () => {
+    for (const existingTarget of [false, true]) {
+      const workspaceRoot = join(tmpRoot, existingTarget ? "existing" : "new");
+      mkdirSync(workspaceRoot, { recursive: true });
+      const target = join(workspaceRoot, "AGENTS.md");
+      const original = "authoritative existing bytes\n";
+      if (existingTarget) writeFileSync(target, original);
+
+      expectCode(() => applyProjectContext({
+        workspace_root: workspaceRoot,
+        runtime: "agents",
+        bundle_json: bundleJson(),
+        source_path: join(workspaceRoot, "bundle.json"),
+        test_hooks: {
+          before_target_install: ({ temp_path: tempPath }) => {
+            writeFileSync(tempPath, "tampered prepared bytes\n");
+          },
+        },
+      }), "PROJECT_CONTEXT_HASH_RACE");
+
+      if (existingTarget) expect(readFileSync(target, "utf8")).toBe(original);
+      else expect(existsSync(target)).toBe(false);
+      expect(existsSync(join(workspaceRoot, ...PROJECT_CONTEXT_MANIFEST_PATH.split("/")))).toBe(false);
+    }
+  });
+
   test("fails closed before replacing an existing target without atomic exchange support", () => {
     const target = join(tmpRoot, "AGENTS.md");
     const original = "existing user target bytes\n";
@@ -1228,6 +1300,25 @@ describe("cache, revision, crash, and race safety", () => {
     writeFileSync(lockPath, "");
     const stale = new Date(Date.now() - (10 * 60 * 1_000));
     utimesSync(lockPath, stale, stale);
+    expect(applyProjectContext({
+      workspace_root: tmpRoot,
+      runtime: "claude",
+      bundle_json: bundleJson(),
+      source_path: join(tmpRoot, "bundle.json"),
+    }).applied).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test("recovers an old lock whose PID has been reused by a live process", () => {
+    const lockPath = join(tmpRoot, ".hasna", "project-context.lock");
+    mkdirSync(join(lockPath, ".."), { recursive: true });
+    writeFileSync(lockPath, `${JSON.stringify({
+      schema: "hasna.instructions.project-context-lock/v1",
+      pid: process.pid,
+      nonce: "crashed-owner-with-reused-pid",
+      created_at: new Date(Date.now() - (10 * 60 * 1_000)).toISOString(),
+    })}\n`);
+
     expect(applyProjectContext({
       workspace_root: tmpRoot,
       runtime: "claude",
