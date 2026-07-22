@@ -192,6 +192,52 @@ manifests for drift, refuses unmanaged file conflicts unless `--force` is
 passed, removes stale managed mirrors only when safe, and writes local snapshots
 before mutating managed files.
 
+### Managed project context
+
+`instructions project-context plan|apply` is the sole writer for the strict
+`hasna.projects.project_context_bundle.v1` contract emitted by Projects. It
+accepts bounded structured JSON from a regular file or stdin and never invokes
+Projects, Todos, Conversations, or Mementos while rendering:
+
+```bash
+projects context-bundle <project-id> --json > ./project-context.json
+instructions project-context plan \
+  --runtime codewith \
+  --workspace-root /absolute/workspace \
+  --bundle ./project-context.json \
+  --json
+instructions project-context apply \
+  --runtime codewith \
+  --workspace-root /absolute/workspace \
+  --bundle ./project-context.json \
+  --json
+```
+
+The renderer writes one canonical `.hasna/instructions/project-context.md`
+fragment, then a managed import in `CLAUDE.md`, a managed inline block in
+`AGENTS.md`, and a managed inline block in `.codewith/CODEWITH.md` by default.
+Codewith uses an import only when its existing
+`HASNA_CONFIGS_CODEWITH_NATIVE_IMPORTS=1` capability gate is active or
+`--codewith-native-imports` explicitly selects that supported runtime mode.
+Bytes outside the managed marker pair are preserved. Codewith's
+`.codewith/CODEWITH.override.md` takes precedence and causes the stable
+`PROJECT_CONTEXT_SHADOWED` failure instead of an ignored write.
+
+Input is limited to 8 KiB, output to 4 KiB and six allowlisted argv commands.
+The writer rejects unknown fields, hash/revision inconsistencies, credentials,
+URLs, symlinks, malformed or conflicting markers, and older revisions. Applies
+use a per-workspace lock, compare-and-swap hashes, same-directory fsynced temp
+files and renames, and a metadata-only manifest written last. A same-project,
+compatible last-known-good cache can be selected explicitly with
+`--allow-stale-cache --expected-project-id <id>`; its bounded age/status is
+visible in the rendered context.
+
+Compatibility remains additive: project-context manifests keep
+`hasna.configs.session-render/v1`, `Managed by @hasna/configs`, and
+`ownedBy: open-configs`, while recording `canonicalOwner: instructions`. The
+legacy `@hasna/configs` 0.2.45 `configs` executable remains available as a bin
+alias; no separate Configs repository or flag-day manifest v2 is introduced.
+
 `instructions init` and `bun run seed` also seed
 `global-agent-rules-standard`, the managed global/system prompt source for
 session renaming, task-scoped worktrees, PR-first landing, protected-branch
