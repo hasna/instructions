@@ -282,8 +282,15 @@ export async function applyConfigsWithReport(
   opts: ApplyOptions = {},
 ): Promise<ConfigApplyPreview> {
   const prepared = prepareConfigBatch(configs, opts);
+  if (prepared.failures.length > 0) {
+    return {
+      results: [],
+      skipped: prepared.skipped,
+      failures: prepared.failures,
+    };
+  }
   const results: ApplyResult[] = [];
-  const failures = [...prepared.failures];
+  const failures: ConfigApplyPreviewFailure[] = [];
   for (const config of prepared.configs) {
     if (config.kind === "reference" || isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
     try {

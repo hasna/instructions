@@ -65,6 +65,28 @@ function materializeLegacyV1SnapshotFixture(snapshotPath: string): void {
   writeFileSync(snapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`);
 }
 
+function materializePreRollbackLegacyV1SnapshotFixture(snapshotPath: string): void {
+  const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as {
+    createdAt: string;
+    tool: string;
+    profile: string;
+    targetHome: string;
+    manifestPath: string;
+    previousManifest: unknown;
+    files: unknown[];
+  };
+  writeFileSync(snapshotPath, `${JSON.stringify({
+    schema: "hasna.configs.session-render-snapshot/v1",
+    createdAt: snapshot.createdAt,
+    tool: snapshot.tool,
+    profile: snapshot.profile,
+    targetHome: snapshot.targetHome,
+    manifestPath: snapshot.manifestPath,
+    previousManifest: snapshot.previousManifest,
+    files: snapshot.files,
+  }, null, 2)}\n`);
+}
+
 describe("session apply writer", () => {
   test("dry-run reports creates without writing files", () => {
     const targetHome = targetFor("codex");
@@ -351,6 +373,103 @@ describe("session apply writer", () => {
     expect(readFileSync(deletedFragmentPath, "utf8")).toBe(deletedFragment);
     expect(existsSync(createdFragmentPath)).toBe(false);
     expect(readFileSync(unchangedFilePath, "utf8")).toBe("human-owned unchanged notes\n");
+  });
+
+  test("restores a genuine pre-rollback legacy v1 snapshot when all intent is provable", () => {
+    const targetHome = targetFor("codex-restore-pre-rollback-v1");
+    applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    }));
+    const agentsPath = join(targetHome, "AGENTS.md");
+    const previousAgents = readFileSync(agentsPath, "utf8");
+    const applied = applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Updated managed content." }],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    }));
+    materializePreRollbackLegacyV1SnapshotFixture(applied.snapshotPath!);
+    const legacySnapshot = JSON.parse(readFileSync(applied.snapshotPath!, "utf8")) as Record<string, unknown>;
+    expect(Object.keys(legacySnapshot).sort()).toEqual([
+      "createdAt",
+      "files",
+      "manifestPath",
+      "previousManifest",
+      "profile",
+      "schema",
+      "targetHome",
+      "tool",
+    ]);
+
+    const restored = restoreSessionRenderSnapshot(applied.snapshotPath!);
+
+    expect(restored.restored).toBe(true);
+    expect(readFileSync(agentsPath, "utf8")).toBe(previousAgents);
+  });
+
+  test("fails closed before writes when a pre-rollback legacy v1 snapshot has ambiguous unchanged intent", () => {
+    const targetHome = targetFor("claude-restore-pre-rollback-v1-ambiguous");
+    applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity, agentIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    }));
+    const applied = applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Updated managed content." }, agentIdentity],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    }));
+    materializePreRollbackLegacyV1SnapshotFixture(applied.snapshotPath!);
+    const updatedPath = join(targetHome, ".hasna", "instructions", "01-global-codewith.md");
+    const unchangedPath = join(targetHome, ".hasna", "instructions", "02-agent-marcus.md");
+    const updatedContent = readFileSync(updatedPath, "utf8");
+    const unchangedContent = readFileSync(unchangedPath, "utf8");
+
+    expect(() => restoreSessionRenderSnapshot(applied.snapshotPath!)).toThrow(
+      "Cannot infer pre-rollback legacy v1 unchanged versus recreated file",
+    );
+    expect(readFileSync(updatedPath, "utf8")).toBe(updatedContent);
+    expect(readFileSync(unchangedPath, "utf8")).toBe(unchangedContent);
+  });
+
+  test("fails closed when a pre-rollback legacy v1 snapshot predates a newer applied snapshot", () => {
+    const targetHome = targetFor("codex-restore-pre-rollback-v1-stale");
+    applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity],
+    }));
+    const legacy = applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "First managed update." }],
+    }));
+    materializePreRollbackLegacyV1SnapshotFixture(legacy.snapshotPath!);
+    const latest = applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Second managed update." }],
+    }));
+    const agentsPath = join(targetHome, "AGENTS.md");
+    const latestContent = readFileSync(agentsPath, "utf8");
+
+    expect(() => restoreSessionRenderSnapshot(legacy.snapshotPath!)).toThrow(
+      "after a newer session snapshot exists",
+    );
+    expect(readFileSync(agentsPath, "utf8")).toBe(latestContent);
+    expect(existsSync(latest.snapshotPath!)).toBe(true);
   });
 
   test("keeps legacy v1 snapshot restore all-or-nothing when an applied file drifted", () => {
