@@ -4,10 +4,13 @@ import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 export const GLOBAL_AGENT_RULES_STANDARD_SLUG = "global-agent-rules-standard";
 
 export const AGENT_OPERATING_RULES_SOURCE_SET_ID = "hasna-global-agent-rules-standard" as const;
+export const AGENT_OPERATING_RULES_SOURCE_ID = "hasna-agent-operating-rules" as const;
 export const AGENT_OPERATING_RULES_VERSION = "1.1.6" as const;
 export const AGENT_OPERATING_RULES_SOURCE_SET_VERSION = "2026-07-23" as const;
 export const AGENT_OPERATING_RULES_SENTINEL = "<!-- hasna:agent-operating-rules v=1.1.6 -->" as const;
-export const AGENT_OPERATING_RULES_CONTENT_SHA256 = "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420" as const;
+export const AGENT_OPERATING_RULES_PAYLOAD_SHA256 = "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420" as const;
+export const AGENT_OPERATING_RULES_CONTENT_SHA256 = AGENT_OPERATING_RULES_PAYLOAD_SHA256;
+export const AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256 = "b8e89cdb49e207e5b497ac51384d67022b94fe5645cc9273db60384eb2c2fb32" as const;
 export const SCOPED_OPERATIONAL_CONTROL_POLICY_REFERENCE = "hasna-agent-operating-rules/scoped-operational-control/v1" as const;
 
 export const AGENT_OPERATING_RULES_UPSTREAM = {
@@ -30,7 +33,10 @@ export const AGENT_OPERATING_RULES_PROVENANCE = {
   upstreamRepository: AGENT_OPERATING_RULES_UPSTREAM.repository,
   upstreamCommit: AGENT_OPERATING_RULES_UPSTREAM.commit,
   upstreamPath: AGENT_OPERATING_RULES_UPSTREAM.path,
-  upstreamContentSha256: AGENT_OPERATING_RULES_CONTENT_SHA256,
+  upstreamFileSha256: AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256,
+  upstreamExportId: AGENT_OPERATING_RULES_SOURCE_SET_ID,
+  upstreamSourceId: AGENT_OPERATING_RULES_SOURCE_ID,
+  selectedPayloadSha256: AGENT_OPERATING_RULES_PAYLOAD_SHA256,
   rulesVersion: AGENT_OPERATING_RULES_VERSION,
   sourceSetVersion: AGENT_OPERATING_RULES_SOURCE_SET_VERSION,
   policyReference: SCOPED_OPERATIONAL_CONTROL_POLICY_REFERENCE,
@@ -42,7 +48,11 @@ export const AGENT_OPERATING_RULES_METADATA = {
   rulesVersion: AGENT_OPERATING_RULES_VERSION,
   sourceSetVersion: AGENT_OPERATING_RULES_SOURCE_SET_VERSION,
   plan: GLOBAL_AGENT_RULES_STANDARD_SLUG,
-  contentSha256: AGENT_OPERATING_RULES_CONTENT_SHA256,
+  contentSha256: AGENT_OPERATING_RULES_PAYLOAD_SHA256,
+  selectedPayloadSha256: AGENT_OPERATING_RULES_PAYLOAD_SHA256,
+  upstreamFileSha256: AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256,
+  upstreamExportId: AGENT_OPERATING_RULES_SOURCE_SET_ID,
+  upstreamSourceId: AGENT_OPERATING_RULES_SOURCE_ID,
   sentinel: "hasna:agent-operating-rules",
   policyReferences: {
     incidentRecovery: SCOPED_OPERATIONAL_CONTROL_POLICY_REFERENCE,

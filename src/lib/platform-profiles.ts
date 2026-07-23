@@ -1,4 +1,4 @@
-import type { CreateProfileInput, Profile } from "../types/index.js";
+import type { CreateProfileInput, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { PROJECT_DASHBOARD_PROFILE_VARIABLES } from "./project-dashboard-standard.js";
 
@@ -14,7 +14,7 @@ export const PLATFORM_PROFILE_PRESETS: CreateProfileInput[] = [
   {
     name: "linux-arm64",
     description: "Default Linux arm64 profile for linux-node-a/linux-node-b-style machines",
-    selectors: { os: ["linux"], arch: ["arm64"], hostnames: ["linux-node-a", "linux-node-b"] },
+    selectors: { os: ["linux"], arch: ["arm64"], hostnames: ["linux-node-a", "linux-node-b", "station01"] },
     variables: {
       WORKSPACE_ROOT: "{{HOME_DIR}}/workspace",
       BUN_BIN_DIR: "{{HOME_DIR}}/.bun/bin",
@@ -45,11 +45,16 @@ export async function ensurePlatformProfiles(store: ConfigStore = resolveConfigS
     let profile: Profile;
     try {
       profile = await store.getProfile(preset.name);
-      if (!profileHasSelectors(profile) || Object.keys(profile.variables).length === 0) {
+      const selectors = mergeProfileSelectors(preset.selectors, profile.selectors);
+      const variables = mergeProfileVariables(preset.variables, profile.variables);
+      if (
+        JSON.stringify(selectors) !== JSON.stringify(profile.selectors)
+        || JSON.stringify(variables) !== JSON.stringify(profile.variables)
+      ) {
         profile = await store.updateProfile(profile.id, {
           description: profile.description ?? preset.description,
-          selectors: profileHasSelectors(profile) ? profile.selectors : preset.selectors,
-          variables: Object.keys(profile.variables).length > 0 ? profile.variables : preset.variables,
+          selectors,
+          variables,
         });
       }
     } catch {
@@ -63,4 +68,34 @@ export async function ensurePlatformProfiles(store: ConfigStore = resolveConfigS
   }
 
   return ensured;
+}
+
+function mergeProfileSelectors(
+  preset: ProfileSelector | undefined,
+  existing: ProfileSelector,
+): ProfileSelector {
+  if (!profileHasSelectors({ selectors: existing })) return preset ?? {};
+  return {
+    os: mergeUnique(preset?.os, existing.os),
+    arch: mergeUnique(preset?.arch, existing.arch),
+    hostnames: mergeUnique(preset?.hostnames, existing.hostnames),
+  };
+}
+
+function mergeProfileVariables(
+  preset: ProfileVariables | undefined,
+  existing: ProfileVariables,
+): ProfileVariables {
+  return {
+    ...(preset ?? {}),
+    ...existing,
+  };
+}
+
+function mergeUnique(
+  preset: string[] | undefined,
+  existing: string[] | undefined,
+): string[] | undefined {
+  const values = [...new Set([...(preset ?? []), ...(existing ?? [])])];
+  return values.length > 0 ? values : undefined;
 }

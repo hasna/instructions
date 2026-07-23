@@ -231,6 +231,7 @@ export interface ApplyResult {
   agent?: ConfigAgent;
   transform?: ConfigTransform;
   outputs?: ApplyResult[];
+  unresolved_template_vars?: string[];
 }
 
 // Sync result

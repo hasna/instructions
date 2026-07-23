@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { existsSync, lstatSync, readFileSync, readSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { applyConfig, applyConfigs, expandPath } from "../lib/apply.js";
+import { applyConfig, applyConfigs, expandPath, previewConfigs } from "../lib/apply.js";
 import { diffConfig, syncKnown, syncToDisk, syncProject, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS } from "../lib/sync.js";
 import { syncFromDir } from "../lib/sync-dir.js";
 import { redactContent, scanSecrets } from "../lib/redact.js";
@@ -13,7 +13,7 @@ import { exportConfigs } from "../lib/export.js";
 import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
-import { applySessionRender } from "../lib/session-apply.js";
+import { applySessionRender, restoreSessionRenderSnapshot } from "../lib/session-apply.js";
 import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
@@ -737,12 +737,30 @@ profileCmd.command("apply [id]").description("Apply all configs in a profile to 
       }
       const configs = await store.getProfileConfigs(selected.id);
       const vars = resolveProfileVariables(selected, machine);
-      const results = await applyConfigs(configs, { dryRun: opts.dryRun, vars, store });
+      const preview = opts.dryRun
+        ? await previewConfigs(configs, { vars, store })
+        : null;
+      const results = preview
+        ? preview.results
+        : await applyConfigs(configs, { vars, store });
       let changed = 0;
       for (const r of results) {
         const status = opts.dryRun ? chalk.yellow("[dry-run]") : (r.changed ? chalk.green("✓") : chalk.dim("="));
         console.log(`${status} ${r.path}`);
         if (r.changed) changed++;
+      }
+      if (preview) {
+        for (const skipped of preview.skipped) {
+          console.log(`${chalk.dim("[owned]")} ${skipped.path} ${chalk.dim(skipped.owner)}`);
+        }
+        const unresolved = [...new Set(results.flatMap((result) => result.unresolved_template_vars ?? []))];
+        if (unresolved.length > 0) {
+          console.log(chalk.yellow(`Unresolved secret/runtime template references preserved in preview: ${unresolved.join(", ")}`));
+        }
+        for (const failure of preview.failures) {
+          console.error(chalk.red(`[failed] ${failure.config_slug}: ${failure.message}`));
+        }
+        if (preview.failures.length > 0) process.exitCode = 1;
       }
       console.log(chalk.dim(`\n${changed}/${results.length} changed (${selected.slug} on ${machine.hostname} ${machine.os_family}/${machine.arch})`));
     } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
@@ -997,6 +1015,38 @@ sessionCmd.command("apply")
       }
     } catch (e) {
       console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+      process.exit(1);
+    }
+  });
+
+sessionCmd.command("restore <snapshot>")
+  .description("Restore a session render snapshot only when applied files have not drifted")
+  .option("--dry-run", "preview restore actions and conflicts without writing")
+  .option("--json", "output restore JSON")
+  .action(async (snapshot, opts) => {
+    try {
+      const result = restoreSessionRenderSnapshot(resolveSessionPath(snapshot), {
+        dryRun: opts.dryRun,
+      });
+      if (opts.json) {
+        printJson(result);
+        if (result.conflicts.length > 0) process.exitCode = 1;
+        return;
+      }
+      const prefix = opts.dryRun ? chalk.yellow("[dry-run]") : chalk.green("OK");
+      console.log(`${prefix} session snapshot restore`);
+      console.log(`${chalk.cyan("snapshot:")} ${result.snapshotPath}`);
+      console.log(`${chalk.cyan("target:")} ${result.targetHome}`);
+      for (const file of result.files) {
+        const status = file.action === "unchanged" ? chalk.dim(file.action) : chalk.green(file.action);
+        console.log(`  ${status.padEnd(18)} ${file.relativePath}`);
+      }
+      if (result.conflicts.length > 0) {
+        console.error(chalk.red(`Conflicts: ${result.conflicts.length}. Restore stopped without writing.`));
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      console.error(chalk.red(error instanceof Error ? error.message : String(error)));
       process.exit(1);
     }
   });

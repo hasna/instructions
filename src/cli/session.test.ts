@@ -190,6 +190,63 @@ describe("configs session CLI", () => {
     }
   });
 
+  test("restores an unchanged applied snapshot through the session CLI", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    try {
+      const sourcePath = join(home, "global.md");
+      const targetHome = join(home, "session-home");
+      const env = {
+        HOME: home,
+        HASNA_CONFIGS_HOME: join(home, ".hasna", "configs"),
+      };
+      writeFileSync(sourcePath, "Original CLI source");
+      const applyArgs = [
+        "session",
+        "apply",
+        "--tool",
+        "codex",
+        "--profile",
+        "account999",
+        "--target-home",
+        targetHome,
+        "--source",
+        `global:global-cli=${sourcePath}`,
+        "--json",
+      ];
+      expect(runCli(applyArgs, env).status).toBe(0);
+
+      writeFileSync(sourcePath, "Updated CLI source");
+      const update = runCli(applyArgs, env);
+      expect(update.status).toBe(0);
+      const updateResult = JSON.parse(update.stdout) as { snapshotPath: string | null };
+      expect(updateResult.snapshotPath).not.toBeNull();
+      expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toContain("Updated CLI source");
+
+      const preview = runCli([
+        "session",
+        "restore",
+        updateResult.snapshotPath!,
+        "--dry-run",
+        "--json",
+      ], env);
+      expect(preview.status).toBe(0);
+      expect((JSON.parse(preview.stdout) as { restored: boolean }).restored).toBe(false);
+      expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toContain("Updated CLI source");
+
+      const restore = runCli([
+        "session",
+        "restore",
+        updateResult.snapshotPath!,
+        "--json",
+      ], env);
+      expect(restore.status).toBe(0);
+      expect((JSON.parse(restore.stdout) as { restored: boolean }).restored).toBe(true);
+      expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toContain("Original CLI source");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("loads OpenIdentities configs exports and provider layer aliases", () => {
     const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
     try {

@@ -364,6 +364,7 @@ interface ProjectContextManifest {
     nonOverridable: true;
     replacementScope: "project-context";
     rules: [];
+    renderedPayloadSha256: string;
     provenance: {
       schema: typeof PROJECT_CONTEXT_SCHEMA;
       projectId: string;
@@ -1576,6 +1577,7 @@ function projectContextManifestSource(
     nonOverridable: true,
     replacementScope: "project-context",
     rules: [],
+    renderedPayloadSha256: sha256(JSON.stringify(bundle)),
     provenance: {
       schema: PROJECT_CONTEXT_SCHEMA,
       projectId: bundle.project.id,

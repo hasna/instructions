@@ -5,6 +5,7 @@ import { createConfig, getConfig } from "../db/configs";
 import { getDatabase, resetDatabase } from "../db/database";
 import { getProfileConfigs } from "../db/profiles";
 import { ensurePlatformProfiles, PLATFORM_PROFILE_PRESETS } from "./platform-profiles";
+import { detectMachineContext } from "./machine";
 import {
   PROJECT_DASHBOARD_PROFILE_VARIABLES,
   PROJECT_DASHBOARD_STANDARD_CONTENT,
@@ -64,5 +65,30 @@ describe("project dashboard standard", () => {
       expect(profile.variables).toMatchObject(PROJECT_DASHBOARD_PROFILE_VARIABLES);
       expect(getProfileConfigs(profile.id, db).map((config) => config.id)).toContain(standard.id);
     }
+  });
+
+  test("reconciles station01 selectors and preset variables without dropping custom values", async () => {
+    const store = new LocalConfigStore(db);
+    const existing = await store.createProfile({
+      name: "linux-arm64",
+      selectors: { os: ["linux"], arch: ["arm64"], hostnames: ["custom-linux"] },
+      variables: { CUSTOM_VALUE: "preserved" },
+    });
+
+    const profiles = await ensurePlatformProfiles(store);
+    const linux = profiles.find((profile) => profile.id === existing.id)!;
+    const resolved = await store.resolveProfileForMachine(detectMachineContext({
+      hostname: "station01",
+      os: "linux",
+      arch: "arm64",
+      home_dir: "/home/hasna",
+    }));
+
+    expect(linux.selectors.hostnames).toEqual(expect.arrayContaining(["custom-linux", "station01"]));
+    expect(linux.variables).toMatchObject({
+      CUSTOM_VALUE: "preserved",
+      BUN_BIN_DIR: "{{HOME_DIR}}/.bun/bin",
+    });
+    expect(resolved?.slug).toBe("linux-arm64");
   });
 });

@@ -6,11 +6,13 @@ import { join } from "node:path";
 import { LocalConfigStore } from "../data/config-store";
 import { getDatabase, resetDatabase } from "../db/database";
 import { getProfileConfigs } from "../db/profiles";
+import { previewConfigs } from "./apply";
 import { applySessionRender } from "./session-apply";
 import { ensureGlobalAgentRulesStandardConfig } from "./global-agent-rules-standard";
 import { ensurePlatformProfiles } from "./platform-profiles";
 import {
   planSessionRender,
+  selectProfileConfigsForSessionRender,
   sourceFromConfig,
   sourcesFromIdentityExport,
   type SessionInstructionSource,
@@ -50,6 +52,8 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(tmpRoot, { recursive: true, force: true });
+  delete process.env["CONFIGS_HOME"];
+  delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
 });
 
 function renderedContent(files: Array<{ content: string }>): string {
@@ -73,6 +77,70 @@ async function ensureManagedProfile(
   return profile;
 }
 
+async function linkFullProfileFixtures(
+  store: LocalConfigStore,
+  profileId: string,
+  standardContent: string,
+): Promise<void> {
+  const fixtures = [
+    await store.createConfig({
+      name: "Codex Authorization",
+      category: "mcp",
+      agent: "codex",
+      format: "toml",
+      target_path: "~/.codex/config.toml",
+      content: 'authorization = "{{AUTHORIZATION}}"',
+      is_template: true,
+    }),
+    await store.createConfig({
+      name: "OpenCode Settings",
+      category: "agent",
+      agent: "opencode",
+      format: "json",
+      target_path: "~/.config/opencode/opencode.json",
+      content: JSON.stringify({
+        $schema: "https://opencode.ai/config.json",
+        model: "fixture-model",
+        mcp: { fixture: { type: "local", command: ["fixture"] } },
+        instructions: ["manual.md"],
+      }, null, 2),
+    }),
+    await store.createConfig({
+      name: "Claude Legacy Writer",
+      category: "agent",
+      agent: "claude",
+      format: "markdown",
+      target_path: "~/.claude/CLAUDE.md",
+      content: "# Legacy writer\n",
+    }),
+    await store.createConfig({
+      name: "Claude Canonical Writer",
+      category: "agent",
+      agent: "claude",
+      format: "markdown",
+      target_path: "~/.claude/CLAUDE.md",
+      content: "# Legacy writer\n",
+    }),
+    await store.createConfig({
+      name: "Workspace Reference",
+      category: "workspace",
+      agent: "global",
+      format: "markdown",
+      kind: "reference",
+      content: "# Workspace reference\n",
+    }),
+    await store.createConfig({
+      name: "Noncanonical Policy Duplicate",
+      category: "rules",
+      agent: "global",
+      format: "markdown",
+      target_path: "~/.codex/AGENTS.md",
+      content: standardContent,
+    }),
+  ];
+  for (const config of fixtures) await store.addConfigToProfile(profileId, config.id);
+}
+
 describe("agent operating rules managed render integration", () => {
   for (const profileSlug of MANAGED_PROFILE_SLUGS) {
     for (const renderer of RENDERERS) {
@@ -81,23 +149,45 @@ describe("agent operating rules managed render integration", () => {
         const standard = await ensureGlobalAgentRulesStandardConfig(store);
         const profile = await ensureManagedProfile(store, profileSlug, standard.id);
         expect(profile).toBeDefined();
-        const linkedStandards = getProfileConfigs(profile!.id, db).filter(
-          (config) => config.slug === standard.slug,
-        );
-        expect(linkedStandards).toHaveLength(1);
+        await linkFullProfileFixtures(store, profile!.id, standard.content);
+        const profileConfigs = getProfileConfigs(profile!.id, db);
+        expect(profileConfigs.some((config) => config.slug === standard.slug)).toBe(true);
         const targetHome = join(tmpRoot, profileSlug, renderer.tool);
+        process.env["CONFIGS_HOME"] = targetHome;
+        const preview = await previewConfigs(profileConfigs, {
+          vars: profile!.variables ?? {},
+          store,
+        });
+        expect(preview.failures).toEqual([]);
+        expect(preview.results.some((result) =>
+          result.unresolved_template_vars?.includes("AUTHORIZATION")
+        )).toBe(true);
+        expect(preview.skipped.filter((item) =>
+          item.owner === "instructions-session-renderer"
+          && item.path.endsWith(".claude/CLAUDE.md")
+        )).toHaveLength(2);
+        const selection = selectProfileConfigsForSessionRender(profileConfigs, renderer.tool);
+        const accountedConfigIds = new Set([
+          ...selection.sources.map((source) => source.id),
+          ...selection.skippedSources.map((source) => source.id),
+          ...(selection.providerConfig ? [selection.providerConfig.sourceId] : []),
+        ]);
+        expect(accountedConfigIds.size).toBe(profileConfigs.length);
         const plan = planSessionRender({
           tool: renderer.tool,
           profile: profileSlug,
           targetHome,
           projectRoot: renderer.tool === "cursor" ? targetHome : undefined,
           generatedAt: "2026-07-23T00:00:00.000Z",
-          sources: linkedStandards.map((config, index) => sourceFromConfig(config, index)),
+          sources: selection.sources,
+          skippedSources: selection.skippedSources,
+          providerConfig: selection.providerConfig,
         });
         const content = renderedContent(plan.files);
 
         expect(plan.files.map((file) => file.relativePath)).toEqual(renderer.expectedFiles);
         expect(plan.manifest.sources.map((source) => source.id)).toEqual([standard.slug]);
+        expect(plan.manifest.skippedSources).toEqual(selection.skippedSources);
         expect(content).toContain(ACCEPTED_SENTINEL);
         expect(content).toContain("Only a verified, authorized, scope-matching control");
         expect(content).toContain("Different identifier types never match each other");
@@ -112,7 +202,10 @@ describe("agent operating rules managed render integration", () => {
           upstreamRepository: ACCEPTED_UPSTREAM_REPOSITORY,
           upstreamCommit: ACCEPTED_UPSTREAM_COMMIT,
           upstreamPath: ACCEPTED_UPSTREAM_PATH,
-          upstreamContentSha256: "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420",
+          upstreamFileSha256: "b8e89cdb49e207e5b497ac51384d67022b94fe5645cc9273db60384eb2c2fb32",
+          upstreamExportId: "hasna-global-agent-rules-standard",
+          upstreamSourceId: "hasna-agent-operating-rules",
+          selectedPayloadSha256: "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420",
           rulesVersion: ACCEPTED_RULES_VERSION,
           sourceSetVersion: ACCEPTED_SOURCE_SET_VERSION,
           policyReference: ACCEPTED_POLICY_REFERENCE,
@@ -131,6 +224,12 @@ describe("agent operating rules managed render integration", () => {
           ownedBy: "open-configs",
           canonicalOwner: "instructions",
         });
+        if (renderer.tool === "opencode") {
+          const providerConfig = plan.files.find((file) => file.relativePath === "opencode.json");
+          expect(providerConfig?.content).toContain('"mcp"');
+          expect(providerConfig?.content).toContain('"fixture-model"');
+          expect(providerConfig?.content).toContain('"manual.md"');
+        }
       });
     }
   }

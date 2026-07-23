@@ -4,9 +4,11 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  statSync,
 } from "node:fs";
 import { isAbsolute, join, parse, relative, resolve } from "node:path";
 import {
+  observeProjectContextSessionGuard,
   removeProjectContextCoordinatedFile,
   withProjectContextSessionGuard,
   writeProjectContextCoordinatedFile,
@@ -73,6 +75,61 @@ export interface SessionApplyOptions {
     }) => void;
     force_portable_file_ops?: boolean;
   };
+}
+
+export interface SessionRestoreOptions {
+  dryRun?: boolean;
+  test_hooks?: {
+    force_portable_file_ops?: boolean;
+  };
+}
+
+export interface SessionRestoreConflict {
+  path: string;
+  relativePath: string;
+  expectedSha256: string | null;
+  actualSha256: string | null;
+}
+
+export interface SessionRestoreFileResult {
+  path: string;
+  relativePath: string;
+  action: "create" | "update" | "delete" | "unchanged";
+  previousSha256: string | null;
+  restoredSha256: string | null;
+}
+
+export interface SessionRestoreResult {
+  dryRun: boolean;
+  restored: boolean;
+  snapshotPath: string;
+  targetHome: string;
+  conflicts: SessionRestoreConflict[];
+  files: SessionRestoreFileResult[];
+}
+
+interface SessionRenderSnapshotV1 {
+  schema: "hasna.configs.session-render-snapshot/v1";
+  createdAt: string;
+  tool: SessionRenderPlan["tool"];
+  profile: string;
+  targetHome: string;
+  targetKind: SessionRenderPlan["targetKind"];
+  manifestPath: string;
+  previousManifest: SessionRenderManifest | null;
+  files: Array<{
+    path: string;
+    relativePath: string;
+    role: SessionRenderFileRole;
+    sha256: string;
+    content: string;
+  }>;
+  afterFiles: Array<{
+    path: string;
+    relativePath: string;
+    role: SessionRenderFileRole;
+    sha256: string | null;
+  }>;
 }
 
 export class SessionApplyError extends Error {
@@ -254,6 +311,217 @@ export function checkSessionRenderDrift(targetHome: string, manifestPath?: strin
     missing,
     drifted,
   };
+}
+
+export function restoreSessionRenderSnapshot(
+  snapshotPath: string,
+  options: SessionRestoreOptions = {},
+): SessionRestoreResult {
+  const snapshot = readSessionRenderSnapshot(snapshotPath);
+  const targetHome = assertSafeTargetHome(snapshot.targetHome);
+  const resolvedSnapshotPath = resolve(snapshotPath);
+  const snapshotRelativePath = relative(targetHome, resolvedSnapshotPath);
+  if (
+    snapshotRelativePath === ""
+    || snapshotRelativePath === ".."
+    || snapshotRelativePath.startsWith("../")
+    || isAbsolute(snapshotRelativePath)
+  ) {
+    throw new SessionApplyError("Session snapshot must be stored inside its target home.");
+  }
+  assertNoSymlinkSegments(targetHome, resolvedSnapshotPath);
+  const guard = observeProjectContextSessionGuard({
+    tool: snapshot.tool,
+    target_home: targetHome,
+    project_root: snapshot.targetKind === "project-root" ? targetHome : undefined,
+  });
+  return withProjectContextSessionGuard(
+    guard ?? undefined,
+    (coordination) => restoreSessionRenderSnapshotUnlocked(
+      snapshot,
+      resolvedSnapshotPath,
+      targetHome,
+      options,
+      coordination,
+    ),
+    { dry_run: options.dryRun },
+  );
+}
+
+function restoreSessionRenderSnapshotUnlocked(
+  snapshot: SessionRenderSnapshotV1,
+  snapshotPath: string,
+  targetHome: string,
+  options: SessionRestoreOptions,
+  coordination: ProjectContextWriteCoordination | null,
+): SessionRestoreResult {
+  const previousFiles = new Map(snapshot.files.map((file) => [file.relativePath, file]));
+  const conflicts: SessionRestoreConflict[] = [];
+  for (const file of snapshot.afterFiles) {
+    const path = resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
+    const actualSha256 = currentSessionFileHash(path, targetHome);
+    if (actualSha256 !== file.sha256) {
+      conflicts.push({
+        path,
+        relativePath: file.relativePath,
+        expectedSha256: file.sha256,
+        actualSha256,
+      });
+    }
+  }
+
+  const files = snapshot.afterFiles.map((file): SessionRestoreFileResult => {
+    const previous = previousFiles.get(file.relativePath);
+    const path = resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
+    const current = currentSessionFileHash(path, targetHome);
+    if (previous) {
+      return {
+        path,
+        relativePath: file.relativePath,
+        action: current === previous.sha256 ? "unchanged" : current === null ? "create" : "update",
+        previousSha256: current,
+        restoredSha256: previous.sha256,
+      };
+    }
+    return {
+      path,
+      relativePath: file.relativePath,
+      action: current === null ? "unchanged" : "delete",
+      previousSha256: current,
+      restoredSha256: null,
+    };
+  });
+
+  if (conflicts.length > 0 || options.dryRun) {
+    return {
+      dryRun: options.dryRun ?? false,
+      restored: false,
+      snapshotPath,
+      targetHome,
+      conflicts,
+      files,
+    };
+  }
+
+  const forcePortableFileOps = options.test_hooks?.force_portable_file_ops ?? false;
+  const ordered = [...files].sort((left, right) =>
+    Number(left.relativePath === ".hasna/session-render-manifest.json")
+    - Number(right.relativePath === ".hasna/session-render-manifest.json")
+  );
+  for (const file of ordered) {
+    if (file.action === "unchanged") continue;
+    coordination?.assert_held();
+    assertExpectedSessionFileHash(file.path, targetHome, file.previousSha256);
+    const previous = previousFiles.get(file.relativePath);
+    if (file.action === "delete") {
+      removeProjectContextCoordinatedFile({
+        path: file.path,
+        workspace_root: targetHome,
+        expected_hash: requiredRestoreHash(file),
+        max_observed_bytes: null,
+        allow_portable_removal: coordination === null,
+        force_portable_file_ops: forcePortableFileOps,
+      });
+    } else if (previous) {
+      writeProjectContextCoordinatedFile({
+        path: file.path,
+        content: previous.content,
+        workspace_root: targetHome,
+        default_mode: 0o644,
+        expected_hash: file.previousSha256,
+        max_observed_bytes: null,
+        allow_portable_replacement: coordination === null,
+        force_portable_file_ops: forcePortableFileOps,
+      });
+    }
+    coordination?.assert_held();
+  }
+
+  return {
+    dryRun: false,
+    restored: true,
+    snapshotPath,
+    targetHome,
+    conflicts: [],
+    files,
+  };
+}
+
+function requiredRestoreHash(file: SessionRestoreFileResult): string {
+  if (file.previousSha256 === null) {
+    throw new SessionApplyError(`Session restore delete has no current hash: ${file.relativePath}`);
+  }
+  return file.previousSha256;
+}
+
+function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshotV1 {
+  const resolved = resolve(snapshotPath);
+  if (!existsSync(resolved)) throw new SessionApplyError(`Session snapshot not found: ${snapshotPath}`);
+  const stat = lstatSync(resolved);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new SessionApplyError(`Session snapshot is not a regular file: ${snapshotPath}`);
+  }
+  if (statSync(resolved).size > 32 * 1024 * 1024) {
+    throw new SessionApplyError(`Session snapshot exceeds the 32 MiB restore limit: ${snapshotPath}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(resolved, "utf8"));
+  } catch {
+    throw new SessionApplyError(`Session snapshot is not valid JSON: ${snapshotPath}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new SessionApplyError(`Session snapshot must contain an object: ${snapshotPath}`);
+  }
+  const snapshot = parsed as Partial<SessionRenderSnapshotV1>;
+  if (snapshot.schema !== "hasna.configs.session-render-snapshot/v1") {
+    throw new SessionApplyError(`Unsupported session snapshot schema: ${String(snapshot.schema)}`);
+  }
+  if (
+    typeof snapshot.targetHome !== "string"
+    || typeof snapshot.manifestPath !== "string"
+    || !Array.isArray(snapshot.files)
+    || !Array.isArray(snapshot.afterFiles)
+    || typeof snapshot.tool !== "string"
+    || typeof snapshot.profile !== "string"
+    || (snapshot.targetKind !== "session-home" && snapshot.targetKind !== "project-root")
+  ) {
+    throw new SessionApplyError(`Session snapshot is incomplete: ${snapshotPath}`);
+  }
+  const targetHome = assertSafeTargetHome(snapshot.targetHome);
+  for (const file of snapshot.files) {
+    if (
+      !file
+      || typeof file.relativePath !== "string"
+      || typeof file.path !== "string"
+      || typeof file.sha256 !== "string"
+      || typeof file.content !== "string"
+      || sha256(file.content) !== file.sha256
+    ) {
+      throw new SessionApplyError(`Session snapshot previous file metadata is invalid: ${snapshotPath}`);
+    }
+    resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
+  }
+  for (const file of snapshot.afterFiles) {
+    if (
+      !file
+      || typeof file.relativePath !== "string"
+      || typeof file.path !== "string"
+      || (typeof file.sha256 !== "string" && file.sha256 !== null)
+    ) {
+      throw new SessionApplyError(`Session snapshot applied file metadata is invalid: ${snapshotPath}`);
+    }
+    resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
+  }
+  return snapshot as SessionRenderSnapshotV1;
+}
+
+function resolveSnapshotFilePath(relativePath: string, recordedPath: string, targetHome: string): string {
+  const path = resolveManifestRelativePath(relativePath, targetHome);
+  if (resolve(recordedPath) !== path) {
+    throw new SessionApplyError(`Session snapshot file path mismatch for ${relativePath}`);
+  }
+  return path;
 }
 
 function planFileResult(
@@ -546,9 +814,16 @@ function writeSessionSnapshot(
     tool: plan.tool,
     profile: plan.profile,
     targetHome,
+    targetKind: plan.targetKind,
     manifestPath,
     previousManifest,
     files: existingFiles,
+    afterFiles: results.map((result) => ({
+      path: result.path,
+      relativePath: result.relativePath,
+      role: result.role,
+      sha256: result.action === "delete" ? null : result.newSha256,
+    })),
   };
   coordination?.assert_held();
   writeProjectContextCoordinatedFile({

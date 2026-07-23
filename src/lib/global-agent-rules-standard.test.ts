@@ -8,6 +8,9 @@ import { getProfileConfigs } from "../db/profiles";
 import { ensurePlatformProfiles } from "./platform-profiles";
 import { planSessionRender, sourceFromConfig } from "./session-render";
 import {
+  AGENT_OPERATING_RULES_PAYLOAD_SHA256,
+  AGENT_OPERATING_RULES_SOURCE_ID,
+  AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256,
   GLOBAL_AGENT_RULES_STANDARD_CONTENT,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
   NO_BRITTLE_HARDCODING_RULE,
@@ -76,8 +79,13 @@ describe("global agent rules standard", () => {
     expect(content).not.toContain("# Non-Overridable Global Coding Agent Rules");
     expect(content).not.toContain("#blockers");
     expect(createHash("sha256").update(content).digest("hex")).toBe(
-      "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420",
+      AGENT_OPERATING_RULES_PAYLOAD_SHA256,
     );
+    expect(AGENT_OPERATING_RULES_SOURCE_ID).toBe("hasna-agent-operating-rules");
+    expect(AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256).toBe(
+      "b8e89cdb49e207e5b497ac51384d67022b94fe5645cc9273db60384eb2c2fb32",
+    );
+    expect(AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256).not.toBe(AGENT_OPERATING_RULES_PAYLOAD_SHA256);
   });
 
   test("updates stale seeded global rules instead of creating a duplicate", async () => {
@@ -131,8 +139,13 @@ describe("global agent rules standard", () => {
     expect(plan.files[0]?.content).not.toContain("freezes are not a stop signal");
     expect(plan.manifest.sources[0]?.provenance).toMatchObject({
       upstreamCommit: "48168c549cc2945053a4498a9a2b11888419bc94",
+      upstreamFileSha256: AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256,
+      upstreamExportId: "hasna-global-agent-rules-standard",
+      upstreamSourceId: AGENT_OPERATING_RULES_SOURCE_ID,
+      selectedPayloadSha256: AGENT_OPERATING_RULES_PAYLOAD_SHA256,
       rulesVersion: "1.1.6",
     });
+    expect(plan.manifest.sources[0]?.renderedPayloadSha256).toBe(AGENT_OPERATING_RULES_PAYLOAD_SHA256);
   });
 
   test("renders the seeded global rules when used as a session source", async () => {

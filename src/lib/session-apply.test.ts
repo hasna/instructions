@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applySessionRender, checkSessionRenderDrift } from "./session-apply";
+import { applySessionRender, checkSessionRenderDrift, restoreSessionRenderSnapshot } from "./session-apply";
 import { planSessionRender, sourcesFromIdentityExport, type SessionInstructionSource, type SessionRenderTool } from "./session-render";
 
 let tmpRoot = "";
@@ -188,6 +188,63 @@ describe("session apply writer", () => {
     expect(readFileSync(result.snapshotPath!, "utf-8")).toContain("Use the shared Hasna engineering rules.");
     expect(result.files.find((file) => file.relativePath === "AGENTS.md")?.action).toBe("update");
     expect(readFileSync(join(targetHome, "AGENTS.md"), "utf-8")).toContain("Updated managed content.");
+  });
+
+  test("restores a session snapshot only when the applied files are unchanged", () => {
+    const targetHome = targetFor("codex-restore");
+    const first = planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    });
+    applySessionRender(first);
+    const previousAgents = readFileSync(join(targetHome, "AGENTS.md"), "utf8");
+    const previousManifest = readFileSync(join(targetHome, ".hasna", "session-render-manifest.json"), "utf8");
+
+    const second = planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Updated managed content." }],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    });
+    const applied = applySessionRender(second);
+    expect(applied.snapshotPath).not.toBeNull();
+
+    const preview = restoreSessionRenderSnapshot(applied.snapshotPath!, { dryRun: true });
+    expect(preview.restored).toBe(false);
+    expect(preview.conflicts).toEqual([]);
+    expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toContain("Updated managed content.");
+
+    const restored = restoreSessionRenderSnapshot(applied.snapshotPath!);
+    expect(restored.restored).toBe(true);
+    expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toBe(previousAgents);
+    expect(readFileSync(join(targetHome, ".hasna", "session-render-manifest.json"), "utf8")).toBe(previousManifest);
+  });
+
+  test("refuses snapshot restore after post-apply drift", () => {
+    const targetHome = targetFor("codex-restore-drift");
+    applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity],
+    }));
+    const applied = applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Updated managed content." }],
+    }));
+    writeFileSync(join(targetHome, "AGENTS.md"), "post-apply drift\n");
+
+    const restored = restoreSessionRenderSnapshot(applied.snapshotPath!);
+
+    expect(restored.restored).toBe(false);
+    expect(restored.conflicts.map((conflict) => conflict.relativePath)).toContain("AGENTS.md");
+    expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toBe("post-apply drift\n");
   });
 
   test("preserves portable session updates and removals when no project-context guard is active", () => {
