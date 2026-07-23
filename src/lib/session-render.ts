@@ -50,6 +50,11 @@ export const SESSION_RENDER_PROFILE_ENTRYPOINTS = [
   ".codewith/CODEWITH.md",
   ".config/opencode/AGENTS.md",
 ] as const;
+export const SESSION_RENDER_OWNED_CONFIG_TARGETS = [
+  ...SESSION_RENDER_PROFILE_ENTRYPOINTS,
+  ".gemini/GEMINI.md",
+  ".gemini/ANTIGRAVITY.md",
+] as const;
 
 export type SessionRenderTool = (typeof SESSION_RENDER_TOOLS)[number];
 export type SessionRenderMode = "native-imports" | "flattened-markdown" | "cursor-mdc" | "opencode-instructions" | "antigravity-rules";
@@ -504,7 +509,7 @@ function normalizeSources(
   tool: SessionRenderTool,
   allowEmptySources: boolean,
 ): OrderedSessionInstructionSource[] {
-  const ordered = sources
+  const normalized = sources
     .map((source, index) => {
       if (!source.id.trim()) throw new Error("Session instruction source id is required.");
       const content = filterProviderOnlyBlocks(source.content ?? "", tool);
@@ -523,7 +528,8 @@ function normalizeSources(
         throw new Error(`Session instruction source "${source.id}" is empty. Pass --allow-empty-sources only for explicit empty renders.`);
       }
       return normalized;
-    })
+    });
+  const ordered = deduplicateSemanticPolicySources(normalized)
     .sort((a, b) =>
       SESSION_LAYER_RANK[a.resolvedLayer] - SESSION_LAYER_RANK[b.resolvedLayer] ||
       a.resolvedOrder - b.resolvedOrder ||
@@ -532,6 +538,46 @@ function normalizeSources(
   rejectDuplicateSourceSlugs(ordered);
   rejectDuplicateRulePaths(ordered);
   return ordered;
+}
+
+function deduplicateSemanticPolicySources(
+  sources: OrderedSessionInstructionSource[],
+): OrderedSessionInstructionSource[] {
+  const selected: OrderedSessionInstructionSource[] = [];
+  const policySources = new Map<string, { index: number; normalizedContent: string }>();
+  for (const source of sources) {
+    const sentinel = source.content.match(/<!--\s*hasna:agent-operating-rules\s+v=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/i);
+    if (!sentinel) {
+      selected.push(source);
+      continue;
+    }
+    const key = `hasna:agent-operating-rules/v${sentinel[1]}`;
+    const normalizedContent = source.content.replace(/\r\n/g, "\n").trim();
+    const existing = policySources.get(key);
+    if (!existing) {
+      policySources.set(key, { index: selected.length, normalizedContent });
+      selected.push(source);
+      continue;
+    }
+    if (existing.normalizedContent !== normalizedContent) {
+      throw new Error(`Conflicting semantic policy sources declare ${key} with different content.`);
+    }
+    const current = selected[existing.index]!;
+    if (semanticPolicySourcePriority(source) <= semanticPolicySourcePriority(current)) continue;
+    selected[existing.index] = {
+      ...source,
+      resolvedOrder: current.resolvedOrder,
+    };
+  }
+  return selected;
+}
+
+function semanticPolicySourcePriority(source: OrderedSessionInstructionSource): number {
+  let priority = 0;
+  if (source.nonOverridable) priority += 4;
+  if (source.id === GLOBAL_AGENT_RULES_STANDARD_SLUG) priority += 2;
+  if (source.metadata?.["role"] === "agent-operating-rules") priority += 1;
+  return priority;
 }
 
 function filterProviderOnlyBlocks(content: string, tool: SessionRenderTool): string {

@@ -543,6 +543,22 @@ describe("session render planner", () => {
     expect(plan.manifest.sources[1]?.owner).toMatchObject({ kind: "project" });
   });
 
+  test("rejects conflicting policy content that reuses one semantic sentinel", () => {
+    expect(() => planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: join(tmpRoot, "policy-version-collision"),
+      sources: [
+        globalRulesStandard,
+        {
+          ...globalRulesStandard,
+          id: "conflicting-agent-rules",
+          content: `${GLOBAL_AGENT_RULES_STANDARD_CONTENT.trim()}\nConflicting same-version payload.\n`,
+        },
+      ],
+    })).toThrow("Conflicting semantic policy sources");
+  });
+
   test("accepts canonical OpenIdentities exports without the configs contract field", () => {
     const sources = sourcesFromIdentityExport({
       version: 1,

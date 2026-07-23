@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { existsSync, lstatSync, readFileSync, readSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { applyConfig, applyConfigs, expandPath, previewConfigs } from "../lib/apply.js";
+import { applyConfigsWithReport, expandPath } from "../lib/apply.js";
 import { diffConfig, syncKnown, syncToDisk, syncProject, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS } from "../lib/sync.js";
 import { syncFromDir } from "../lib/sync-dir.js";
 import { redactContent, scanSecrets } from "../lib/redact.js";
@@ -440,14 +440,22 @@ program
     try {
       const store = resolveConfigStore();
       const config = await store.getConfig(id);
-      const result = await applyConfig(config, { dryRun: opts.dryRun, store });
-      const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.changed ? chalk.green("✓") : chalk.dim("="));
-      const change = result.changed ? "changed" : "unchanged";
-      console.log(`${status} ${result.path} ${chalk.dim(`(${change})`)}`);
-      for (const output of result.outputs ?? []) {
-        const outputStatus = opts.dryRun ? chalk.yellow("[dry-run]") : (output.changed ? chalk.green("✓") : chalk.dim("="));
-        const outputChange = output.changed ? "changed" : "unchanged";
-        console.log(`  ${outputStatus} ${output.path} ${chalk.dim(`[${output.agent}/${output.transform}] (${outputChange})`)}`);
+      const report = await applyConfigsWithReport([config], { dryRun: opts.dryRun, store });
+      if (report.failures.length > 0) {
+        throw new Error(report.failures.map((failure) => failure.message).join("; "));
+      }
+      for (const result of report.results) {
+        const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.changed ? chalk.green("✓") : chalk.dim("="));
+        const change = result.changed ? "changed" : "unchanged";
+        console.log(`${status} ${result.path} ${chalk.dim(`(${change})`)}`);
+        for (const output of result.outputs ?? []) {
+          const outputStatus = opts.dryRun ? chalk.yellow("[dry-run]") : (output.changed ? chalk.green("✓") : chalk.dim("="));
+          const outputChange = output.changed ? "changed" : "unchanged";
+          console.log(`  ${outputStatus} ${output.path} ${chalk.dim(`[${output.agent}/${output.transform}] (${outputChange})`)}`);
+        }
+      }
+      for (const skipped of report.skipped) {
+        console.log(`${chalk.dim("[owned]")} ${skipped.path} ${chalk.dim(skipped.owner)}`);
       }
     } catch (e) {
       console.error(chalk.red(e instanceof Error ? e.message : String(e)));
@@ -737,31 +745,31 @@ profileCmd.command("apply [id]").description("Apply all configs in a profile to 
       }
       const configs = await store.getProfileConfigs(selected.id);
       const vars = resolveProfileVariables(selected, machine);
-      const preview = opts.dryRun
-        ? await previewConfigs(configs, { vars, store })
-        : null;
-      const results = preview
-        ? preview.results
-        : await applyConfigs(configs, { vars, store });
+      const report = await applyConfigsWithReport(configs, {
+        dryRun: opts.dryRun,
+        vars,
+        store,
+      });
+      const results = report.results;
       let changed = 0;
       for (const r of results) {
         const status = opts.dryRun ? chalk.yellow("[dry-run]") : (r.changed ? chalk.green("✓") : chalk.dim("="));
         console.log(`${status} ${r.path}`);
         if (r.changed) changed++;
       }
-      if (preview) {
-        for (const skipped of preview.skipped) {
-          console.log(`${chalk.dim("[owned]")} ${skipped.path} ${chalk.dim(skipped.owner)}`);
-        }
+      for (const skipped of report.skipped) {
+        console.log(`${chalk.dim("[owned]")} ${skipped.path} ${chalk.dim(skipped.owner)}`);
+      }
+      if (opts.dryRun) {
         const unresolved = [...new Set(results.flatMap((result) => result.unresolved_template_vars ?? []))];
         if (unresolved.length > 0) {
           console.log(chalk.yellow(`Unresolved secret/runtime template references preserved in preview: ${unresolved.join(", ")}`));
         }
-        for (const failure of preview.failures) {
-          console.error(chalk.red(`[failed] ${failure.config_slug}: ${failure.message}`));
-        }
-        if (preview.failures.length > 0) process.exitCode = 1;
       }
+      for (const failure of report.failures) {
+        console.error(chalk.red(`[failed] ${failure.config_slug}: ${failure.message}`));
+      }
+      if (report.failures.length > 0) process.exitCode = 1;
       console.log(chalk.dim(`\n${changed}/${results.length} changed (${selected.slug} on ${machine.hostname} ${machine.os_family}/${machine.arch})`));
     } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : String(e))); process.exit(1); }
   });
@@ -1135,16 +1143,24 @@ templateCmd.command("render <id>")
 
       if (opts.apply || opts.dryRun) {
         if (!c.target_path) { console.error(chalk.red("No target_path — cannot apply reference configs")); process.exit(1); }
-        if (opts.dryRun) {
-          console.log(chalk.yellow("[dry-run]") + ` Would write to ${expandPath(c.target_path)}`);
-          console.log(rendered);
-        } else {
-          const { writeFileSync, mkdirSync } = await import("node:fs");
-          const { dirname } = await import("node:path");
-          const path = expandPath(c.target_path);
-          mkdirSync(dirname(path), { recursive: true });
-          writeFileSync(path, rendered, "utf-8");
-          console.log(chalk.green("✓") + ` Rendered and applied to ${path}`);
+        const report = await applyConfigsWithReport([{
+          ...c,
+          content: rendered,
+          is_template: false,
+        }], {
+          dryRun: opts.dryRun,
+          store: resolveConfigStore(),
+        });
+        if (report.failures.length > 0) {
+          throw new Error(report.failures.map((failure) => failure.message).join("; "));
+        }
+        for (const result of report.results) {
+          const status = opts.dryRun ? chalk.yellow("[dry-run]") : chalk.green("✓");
+          console.log(`${status} Rendered ${opts.dryRun ? "preview for" : "and applied to"} ${result.path}`);
+          if (opts.dryRun) console.log(result.new_content);
+        }
+        for (const skipped of report.skipped) {
+          console.log(`${chalk.dim("[owned]")} ${skipped.path} ${chalk.dim(skipped.owner)}`);
         }
       } else {
         console.log(rendered);

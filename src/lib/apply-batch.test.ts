@@ -118,6 +118,109 @@ describe("applyConfigs (batch)", () => {
     ]));
   });
 
+  test("skips Claude and Antigravity legacy writers while preserving OpenCode settings", async () => {
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const db = getDatabase();
+    const configs = [
+      createConfig({
+        name: "Claude Legacy Writer",
+        category: "rules",
+        agent: "claude",
+        content: "legacy claude",
+        target_path: "~/.claude/CLAUDE.md",
+      }, db),
+      createConfig({
+        name: "Antigravity Gemini Legacy Writer",
+        category: "rules",
+        agent: "antigravity",
+        content: "legacy antigravity gemini",
+        target_path: "~/.gemini/GEMINI.md",
+      }, db),
+      createConfig({
+        name: "Antigravity Named Legacy Writer",
+        category: "rules",
+        agent: "antigravity",
+        content: "legacy antigravity named",
+        target_path: "~/.gemini/ANTIGRAVITY.md",
+      }, db),
+      createConfig({
+        name: "OpenCode Settings",
+        category: "agent",
+        agent: "opencode",
+        format: "json",
+        content: JSON.stringify({ model: "preserved-model", mcp: { preserved: true } }),
+        target_path: "~/.config/opencode/opencode.json",
+      }, db),
+    ];
+
+    const preview = await previewConfigs(configs, {
+      store: new LocalConfigStore(db),
+    });
+
+    expect(preview.failures).toEqual([]);
+    expect(preview.results).toHaveLength(1);
+    expect(preview.results[0]?.path).toBe(join(tmpDir, ".config", "opencode", "opencode.json"));
+    expect(preview.results[0]?.new_content).toContain("preserved-model");
+    expect(new Set(preview.skipped.map((entry) => entry.path))).toEqual(new Set([
+      join(tmpDir, ".claude", "CLAUDE.md"),
+      join(tmpDir, ".gemini", "GEMINI.md"),
+      join(tmpDir, ".gemini", "ANTIGRAVITY.md"),
+    ]));
+    expect(preview.skipped.every((entry) => entry.owner === "instructions-session-renderer")).toBe(true);
+  });
+
+  test("checks session ownership after rendering machine-aware target paths", async () => {
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const renderedHome = join(tmpDir, "remote-home");
+    const db = getDatabase();
+    const configs = [
+      createConfig({
+        name: "Rendered Claude Writer",
+        category: "rules",
+        agent: "claude",
+        content: "legacy claude",
+        target_path: "{{HOME_DIR}}/.claude/CLAUDE.md",
+      }, db),
+      createConfig({
+        name: "OpenCode Settings With Rendered Legacy Output",
+        category: "mcp",
+        agent: "opencode",
+        content: "{}",
+        target_path: "{{HOME_DIR}}/.config/opencode/opencode.json",
+        outputs: [{
+          agent: "antigravity",
+          target_path: "{{HOME_DIR}}/.gemini/GEMINI.md",
+          transform: "codex-flat",
+        }, {
+          agent: "antigravity",
+          target_path: "{{HOME_DIR}}/.gemini/config/mcp_config.json",
+          transform: "codex-flat",
+        }],
+      }, db),
+    ];
+
+    const preview = await previewConfigs(configs, {
+      vars: { HOME_DIR: renderedHome },
+      store: new LocalConfigStore(db),
+    });
+
+    expect(preview.failures).toEqual([]);
+    expect(preview.results).toHaveLength(1);
+    expect(preview.results[0]?.path).toBe(join(renderedHome, ".config", "opencode", "opencode.json"));
+    expect(preview.results[0]?.outputs?.map((output) => output.path)).toEqual([
+      join(renderedHome, ".gemini", "config", "mcp_config.json"),
+    ]);
+    expect(new Set(preview.skipped.map((entry) => entry.path))).toEqual(new Set([
+      join(renderedHome, ".claude", "CLAUDE.md"),
+      join(renderedHome, ".gemini", "GEMINI.md"),
+    ]));
+    expect(preview.skipped.every((entry) => entry.owner === "instructions-session-renderer")).toBe(true);
+    expect(existsSync(join(renderedHome, ".claude", "CLAUDE.md"))).toBe(false);
+    expect(existsSync(join(renderedHome, ".gemini", "GEMINI.md"))).toBe(false);
+    expect(existsSync(join(renderedHome, ".gemini", "config", "mcp_config.json"))).toBe(false);
+    expect(existsSync(join(renderedHome, ".config", "opencode", "opencode.json"))).toBe(false);
+  });
+
   test("excludes retired Gemini and project-scoped Antigravity writers before validation", async () => {
     const db = getDatabase();
     const canonical = createConfig({

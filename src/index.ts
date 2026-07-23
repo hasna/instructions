@@ -25,7 +25,7 @@ export type { ConfigsStatusContract } from "./status.js";
 export { PG_MIGRATIONS } from "./db/pg-migrations.js";
 
 // Lib — apply
-export { applyConfig, applyConfigs, expandPath, previewConfigs } from "./lib/apply.js";
+export { applyConfig, applyConfigs, applyConfigsWithReport, expandPath, previewConfigs } from "./lib/apply.js";
 export type {
   ApplyOptions,
   ConfigApplyPreview,

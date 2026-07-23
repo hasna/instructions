@@ -224,6 +224,63 @@ describe("session apply writer", () => {
     expect(readFileSync(join(targetHome, ".hasna", "session-render-manifest.json"), "utf8")).toBe(previousManifest);
   });
 
+  test("restores an updated fragment without deleting an unchanged fragment", () => {
+    const targetHome = targetFor("claude-restore-unchanged-fragment");
+    applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity, agentIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    }));
+    const unchangedFragmentPath = join(targetHome, ".hasna", "instructions", "02-agent-marcus.md");
+    const unchangedFragment = readFileSync(unchangedFragmentPath, "utf8");
+
+    const applied = applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Updated managed content." }, agentIdentity],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    }));
+    expect(applied.snapshotPath).not.toBeNull();
+
+    const preview = restoreSessionRenderSnapshot(applied.snapshotPath!, { dryRun: true });
+    expect(preview.files.find((file) => file.relativePath === ".hasna/instructions/02-agent-marcus.md")?.action).toBe("unchanged");
+
+    const restored = restoreSessionRenderSnapshot(applied.snapshotPath!);
+    expect(restored.restored).toBe(true);
+    expect(readFileSync(unchangedFragmentPath, "utf8")).toBe(unchangedFragment);
+  });
+
+  test("refuses restore when an unchanged fragment drifted after apply", () => {
+    const targetHome = targetFor("claude-restore-unchanged-fragment-drift");
+    applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity, agentIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    }));
+
+    const applied = applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Updated managed content." }, agentIdentity],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    }));
+    const unchangedFragmentPath = join(targetHome, ".hasna", "instructions", "02-agent-marcus.md");
+    writeFileSync(unchangedFragmentPath, "drifted unchanged fragment\n");
+
+    const restored = restoreSessionRenderSnapshot(applied.snapshotPath!);
+
+    expect(restored.restored).toBe(false);
+    expect(restored.conflicts.map((conflict) => conflict.relativePath)).toContain(".hasna/instructions/02-agent-marcus.md");
+    expect(readFileSync(join(targetHome, ".hasna", "instructions", "01-global-codewith.md"), "utf8")).toContain("Updated managed content.");
+    expect(readFileSync(unchangedFragmentPath, "utf8")).toBe("drifted unchanged fragment\n");
+  });
+
   test("refuses snapshot restore after post-apply drift", () => {
     const targetHome = targetFor("codex-restore-drift");
     applySessionRender(planSessionRender({

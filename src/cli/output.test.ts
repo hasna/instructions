@@ -1,22 +1,26 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createConfig } from "../db/configs";
 import { getDatabase, resetDatabase } from "../db/database";
+import { addConfigToProfile, createProfile } from "../db/profiles";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const tempDirs: string[] = [];
 
-function runCli(args: string[], dbPath: string) {
+function runCli(args: string[], dbPath: string, home?: string) {
   return spawnSync("bun", ["src/cli/index.tsx", ...args], {
     cwd: repoRoot,
     encoding: "utf8",
     env: {
       ...process.env,
       HASNA_INSTRUCTIONS_DB_PATH: dbPath,
+      HASNA_INSTRUCTIONS_API_URL: "",
+      HASNA_INSTRUCTIONS_API_KEY: "",
+      ...(home ? { HOME: home, CONFIGS_HOME: home } : {}),
       NO_COLOR: "1",
       FORCE_COLOR: "0",
     },
@@ -87,5 +91,72 @@ describe("configs list output", () => {
     expect(records).toHaveLength(4);
     expect(records[0]?.content).toContain("xxx");
     expect(records[0]?.outputs).toHaveLength(1);
+  });
+});
+
+describe("configs apply ownership output", () => {
+  test("CLI direct and profile dry-runs report owned instructions and preserve OpenCode settings", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-configs-apply-cli-"));
+    tempDirs.push(home);
+    const dbPath = join(home, "configs.db");
+    process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
+    resetDatabase();
+    const db = getDatabase();
+    const claude = createConfig({
+      name: "Claude Legacy Writer",
+      category: "rules",
+      agent: "claude",
+      content: "legacy claude",
+      target_path: "~/.claude/CLAUDE.md",
+    }, db);
+    const antigravity = createConfig({
+      name: "Antigravity Legacy Writer",
+      category: "rules",
+      agent: "antigravity",
+      content: "legacy antigravity",
+      target_path: "~/.gemini/GEMINI.md",
+    }, db);
+    const opencode = createConfig({
+      name: "OpenCode Settings",
+      category: "agent",
+      agent: "opencode",
+      format: "json",
+      content: JSON.stringify({ model: "preserved-model", mcp: { preserved: true } }),
+      target_path: "~/.config/opencode/opencode.json",
+    }, db);
+    const profile = createProfile({ name: "Ownership Preview" }, db);
+    for (const config of [claude, antigravity, opencode]) addConfigToProfile(profile.id, config.id, db);
+    resetDatabase();
+    delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+
+    const claudePreview = runCli(["apply", claude.slug, "--dry-run"], dbPath, home);
+    const antigravityPreview = runCli(["apply", antigravity.slug, "--dry-run"], dbPath, home);
+    const profilePreview = runCli([
+      "profile",
+      "apply",
+      profile.slug,
+      "--dry-run",
+      "--hostname",
+      "station01",
+      "--os",
+      "linux",
+      "--arch",
+      "arm64",
+    ], dbPath, home);
+
+    expect(claudePreview.status).toBe(0);
+    expect(claudePreview.stdout).toContain("[owned]");
+    expect(claudePreview.stdout).toContain("instructions-session-renderer");
+    expect(antigravityPreview.status).toBe(0);
+    expect(antigravityPreview.stdout).toContain("[owned]");
+    expect(antigravityPreview.stdout).toContain(".gemini/GEMINI.md");
+    expect(profilePreview.status).toBe(0);
+    expect(profilePreview.stdout).toContain(".claude/CLAUDE.md");
+    expect(profilePreview.stdout).toContain(".gemini/GEMINI.md");
+    expect(profilePreview.stdout).toContain("[dry-run]");
+    expect(profilePreview.stdout).toContain(".config/opencode/opencode.json");
+    expect(existsSync(join(home, ".claude", "CLAUDE.md"))).toBe(false);
+    expect(existsSync(join(home, ".gemini", "GEMINI.md"))).toBe(false);
+    expect(existsSync(join(home, ".config", "opencode", "opencode.json"))).toBe(false);
   });
 });

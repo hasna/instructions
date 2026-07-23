@@ -128,6 +128,7 @@ interface SessionRenderSnapshotV1 {
     path: string;
     relativePath: string;
     role: SessionRenderFileRole;
+    action: "create" | "update" | "delete" | "unchanged";
     sha256: string | null;
   }>;
 }
@@ -374,6 +375,24 @@ function restoreSessionRenderSnapshotUnlocked(
     const previous = previousFiles.get(file.relativePath);
     const path = resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
     const current = currentSessionFileHash(path, targetHome);
+    if (file.action === "unchanged") {
+      return {
+        path,
+        relativePath: file.relativePath,
+        action: "unchanged",
+        previousSha256: current,
+        restoredSha256: current,
+      };
+    }
+    if (file.action === "create") {
+      return {
+        path,
+        relativePath: file.relativePath,
+        action: current === null ? "unchanged" : "delete",
+        previousSha256: current,
+        restoredSha256: null,
+      };
+    }
     if (previous) {
       return {
         path,
@@ -383,13 +402,7 @@ function restoreSessionRenderSnapshotUnlocked(
         restoredSha256: previous.sha256,
       };
     }
-    return {
-      path,
-      relativePath: file.relativePath,
-      action: current === null ? "unchanged" : "delete",
-      previousSha256: current,
-      restoredSha256: null,
-    };
+    throw new SessionApplyError(`Session snapshot is missing a before-image for ${file.action} file: ${file.relativePath}`);
   });
 
   if (conflicts.length > 0 || options.dryRun) {
@@ -507,6 +520,7 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshotV
       !file
       || typeof file.relativePath !== "string"
       || typeof file.path !== "string"
+      || (file.action !== "create" && file.action !== "update" && file.action !== "delete" && file.action !== "unchanged")
       || (typeof file.sha256 !== "string" && file.sha256 !== null)
     ) {
       throw new SessionApplyError(`Session snapshot applied file metadata is invalid: ${snapshotPath}`);
@@ -808,7 +822,19 @@ function writeSessionSnapshot(
     "session-render-snapshots",
     `${timestamp}-${randomUUID()}.json`,
   );
-  const snapshot = {
+  const afterFiles: SessionRenderSnapshotV1["afterFiles"] = results.map((result) => {
+    if (result.action === "conflict") {
+      throw new SessionApplyError(`Cannot snapshot unresolved conflict: ${result.relativePath}`);
+    }
+    return {
+      path: result.path,
+      relativePath: result.relativePath,
+      role: result.role,
+      action: result.action,
+      sha256: result.action === "delete" ? null : result.newSha256,
+    };
+  });
+  const snapshot: SessionRenderSnapshotV1 = {
     schema: "hasna.configs.session-render-snapshot/v1",
     createdAt: new Date().toISOString(),
     tool: plan.tool,
@@ -818,12 +844,7 @@ function writeSessionSnapshot(
     manifestPath,
     previousManifest,
     files: existingFiles,
-    afterFiles: results.map((result) => ({
-      path: result.path,
-      relativePath: result.relativePath,
-      role: result.role,
-      sha256: result.action === "delete" ? null : result.newSha256,
-    })),
+    afterFiles,
   };
   coordination?.assert_held();
   writeProjectContextCoordinatedFile({
