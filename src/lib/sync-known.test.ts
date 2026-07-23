@@ -329,7 +329,7 @@ describe("syncToDisk", () => {
     expect(result.updated).toBe(0);
   });
 
-  test("does not let stale generated target rows overwrite canonical fan-out outputs", async () => {
+  test("does not let syncToDisk recreate session-owned fan-out outputs", async () => {
     const db = getDatabase();
     process.env["CONFIGS_HOME"] = tmpDir;
     mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
@@ -362,13 +362,15 @@ describe("syncToDisk", () => {
 
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
     await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
-    await syncToDisk({ store: new LocalConfigStore(db) });
+    const result = await syncToDisk({ store: new LocalConfigStore(db) });
 
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
-    expect(readFileSync(join(tmpDir, ".codewith", "CODEWITH.md"), "utf-8")).toContain("Version 2");
+    expect(existsSync(join(tmpDir, ".codex", "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(tmpDir, ".codewith", "CODEWITH.md"))).toBe(false);
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).toContain("Version 2");
+    expect(result.skipped.some((entry) => entry.includes("instructions-session-renderer"))).toBe(true);
   });
 
-  test("agent-filtered syncToDisk applies canonical outputs for that agent", async () => {
+  test("agent-filtered syncToDisk skips session-owned outputs for that agent", async () => {
     const db = getDatabase();
     process.env["CONFIGS_HOME"] = tmpDir;
     mkdirSync(join(tmpDir, ".claude", "rules"), { recursive: true });
@@ -376,15 +378,18 @@ describe("syncToDisk", () => {
 
     const { syncToDisk } = await import("./sync");
     await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
-    await syncToDisk({ store: new LocalConfigStore(db), agent: "codex" });
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 1");
+    const firstResult = await syncToDisk({ store: new LocalConfigStore(db), agent: "codex" });
+    expect(firstResult.updated).toBe(0);
+    expect(firstResult.skipped.some((entry) => entry.includes("instructions-session-renderer"))).toBe(true);
+    expect(existsSync(join(tmpDir, ".codex", "AGENTS.md"))).toBe(false);
 
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
     await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
     const result = await syncToDisk({ store: new LocalConfigStore(db), agent: "codex" });
 
-    expect(result.updated).toBe(1);
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
+    expect(result.updated).toBe(0);
+    expect(result.skipped.some((entry) => entry.includes("instructions-session-renderer"))).toBe(true);
+    expect(existsSync(join(tmpDir, ".codex", "AGENTS.md"))).toBe(false);
     expect(existsSync(join(tmpDir, ".codewith", "CODEWITH.md"))).toBe(false);
   });
 
@@ -399,20 +404,20 @@ describe("syncToDisk", () => {
     await syncToDisk({ store: new LocalConfigStore(db) });
 
     createConfig({
-      name: "zz-stale-codex-generated-absolute",
+      name: "zz-stale-aicopilot-generated-absolute",
       category: "rules",
-      agent: "codex",
+      agent: "aicopilot",
       format: "markdown",
       content: "# absolute stale",
-      target_path: join(tmpDir, ".codex", "AGENTS.md"),
+      target_path: join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"),
     }, db);
 
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
     await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
     await syncToDisk({ store: new LocalConfigStore(db) });
 
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("absolute stale");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).toContain("Version 2");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).not.toContain("absolute stale");
   });
 
   test("syncToDisk skips stale generated rows through equivalent symlink target paths", async () => {
@@ -428,20 +433,20 @@ describe("syncToDisk", () => {
     await syncToDisk({ store: new LocalConfigStore(db) });
 
     createConfig({
-      name: "zz-stale-codex-generated-symlink",
+      name: "zz-stale-aicopilot-generated-symlink",
       category: "rules",
-      agent: "codex",
+      agent: "aicopilot",
       format: "markdown",
       content: "# symlink stale",
-      target_path: join(linkHome, ".codex", "AGENTS.md"),
+      target_path: join(linkHome, ".config", "aicopilot", "AICOPILOT.md"),
     }, db);
 
     writeFileSync(join(tmpDir, ".claude", "CLAUDE.md"), "# Claude\n\nVersion 2");
     await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
     await syncToDisk({ store: new LocalConfigStore(db) });
 
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Version 2");
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("symlink stale");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).toContain("Version 2");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).not.toContain("symlink stale");
   });
 
   test("syncToDisk skips symlink stale rows before generated output directory exists", async () => {
@@ -454,19 +459,19 @@ describe("syncToDisk", () => {
     await syncKnown({ store: new LocalConfigStore(db), agent: "claude" });
 
     createConfig({
-      name: "zz-stale-codex-generated-symlink-before-dir",
+      name: "zz-stale-aicopilot-generated-symlink-before-dir",
       category: "rules",
-      agent: "codex",
+      agent: "aicopilot",
       format: "markdown",
       content: "# symlink stale",
-      target_path: join(linkHome, ".codex", "AGENTS.md"),
+      target_path: join(linkHome, ".config", "aicopilot", "AICOPILOT.md"),
     }, db);
 
     const { syncToDisk } = await import("./sync");
     await syncToDisk({ store: new LocalConfigStore(db) });
 
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Generated");
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("symlink stale");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).toContain("Generated");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).not.toContain("symlink stale");
   });
 });
 

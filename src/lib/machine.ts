@@ -2,7 +2,7 @@ import { arch as currentArch, homedir, hostname as currentHostname, type as curr
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { MachineContext, Profile, ProfileVariables } from "../types/index.js";
-import { isTemplate, renderTemplate } from "./template.js";
+import { isTemplate, renderTemplate, renderTemplatePreview } from "./template.js";
 
 export interface MachineContextOverrides {
   hostname?: string;
@@ -133,4 +133,13 @@ export function renderMachineAwareContent(
   variables: ProfileVariables
 ): string {
   return isTemplate(content) ? renderTemplate(content, variables) : content;
+}
+
+export function renderMachineAwareContentPreview(
+  content: string,
+  variables: ProfileVariables,
+): { content: string; unresolved: string[] } {
+  return isTemplate(content)
+    ? renderTemplatePreview(content, variables)
+    : { content, unresolved: [] };
 }

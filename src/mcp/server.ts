@@ -3,7 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { resolveConfigStore } from "../data/config-store.js";
-import { applyConfig, applyConfigs } from "../lib/apply.js";
+import { applyConfigsWithReport } from "../lib/apply.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { pagedPayload, summarizeApplyResult, summarizeConfig, summarizeProfile } from "../lib/compact-output.js";
@@ -15,10 +15,10 @@ const TOOL_DOCS: Record<string, string> = {
   get_config: "Get a config by id or slug. Returns full config including content.",
   create_config: "Create a new config. Required: name, content, category. Optional: agent, target_path, outputs, kind, format, tags, description, is_template.",
   update_config: "Update a config by id or slug. Optional: content, name, tags, description, category, agent, target_path, outputs.",
-  apply_config: "Apply a config to its target_path on disk. Params: id_or_slug, dry_run?, verbose?. Defaults to a compact result without previous/new content.",
+  apply_config: "Apply a config through the shared ownership gate. Params: id_or_slug, dry_run?, verbose?. Returns results plus session-renderer-owned targets that were skipped.",
   sync_directory: "Sync a directory with the DB. Params: dir, direction ('from_disk'|'to_disk'). Returns sync result.",
   list_profiles: "List profiles. Params: limit?, cursor?, verbose?. Defaults to a paged compact envelope.",
-  apply_profile: "Apply all configs in a profile to disk. Params: id_or_slug? or auto=true, dry_run?, hostname?, os?, arch?, verbose?. Defaults to compact apply results without content.",
+  apply_profile: "Apply all configs in a profile through the shared ownership gate. Params: id_or_slug? or auto=true, dry_run?, hostname?, os?, arch?, verbose?. Returns results plus owned targets that were skipped.",
   get_snapshot: "Get snapshot(s) for a config. Params: config_id_or_slug, version?. Returns latest snapshot or specific version.",
   get_status: "Single-call orientation. Returns: total configs, counts by category, templates, DB path.",
   render_template: "Render a template config with variable substitution. Params: id_or_slug, vars? (object of KEY:VALUE), use_env? (fill from env vars). Returns rendered content.",
@@ -144,8 +144,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "apply_config": {
         const config = await store.getConfig(args["id_or_slug"] as string);
-        const result = await applyConfig(config, { dryRun: args["dry_run"] as boolean, store });
-        return ok(args["verbose"] ? result : summarizeApplyResult(result));
+        const report = await applyConfigsWithReport([config], {
+          dryRun: args["dry_run"] as boolean,
+          store,
+        });
+        if (report.failures.length > 0) return err(report.failures.map((failure) => failure.message).join("; "));
+        return ok({
+          ...report,
+          results: args["verbose"] ? report.results : report.results.map(summarizeApplyResult),
+        });
       }
       case "sync_directory": {
         const dir = args["dir"] as string;
@@ -176,7 +183,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (!profile) return err("No matching machine-aware profile found");
         const configs = await store.getProfileConfigs(profile.id);
         const vars = resolveProfileVariables(profile, machine);
-        const results = await applyConfigs(configs, { dryRun: args["dry_run"] as boolean, vars, store });
+        const report = await applyConfigsWithReport(configs, {
+          dryRun: args["dry_run"] as boolean,
+          vars,
+          store,
+        });
+        if (report.failures.length > 0) return err(report.failures.map((failure) => failure.message).join("; "));
+        const results = report.results;
         return ok({
           profile: summarizeProfile(profile, { verbose: Boolean(args["verbose"]) }),
           machine: {
@@ -185,6 +198,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             arch: machine.arch,
           },
           results: args["verbose"] ? results : results.map(summarizeApplyResult),
+          skipped: report.skipped,
           total: results.length,
           changed: results.filter((result) => result.changed).length,
           hint: "Set verbose=true to include previous_content/new_content in apply results.",

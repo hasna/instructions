@@ -25,8 +25,13 @@ export type { ConfigsStatusContract } from "./status.js";
 export { PG_MIGRATIONS } from "./db/pg-migrations.js";
 
 // Lib — apply
-export { applyConfig, applyConfigs, expandPath } from "./lib/apply.js";
-export type { ApplyOptions } from "./lib/apply.js";
+export { applyConfig, applyConfigs, applyConfigsWithReport, expandPath, previewConfigs } from "./lib/apply.js";
+export type {
+  ApplyOptions,
+  ConfigApplyPreview,
+  ConfigApplyPreviewFailure,
+  ConfigApplySkippedTarget,
+} from "./lib/apply.js";
 
 // Lib — session render/apply
 export {
@@ -42,6 +47,7 @@ export {
   planSessionRender,
   resolveSessionPath,
   resolveSessionTargetOwnership,
+  selectProfileConfigsForSessionRender,
   sourceFromConfig,
   sourceFromFilePath,
   sourcesFromIdentityExport,
@@ -53,6 +59,8 @@ export type {
   SessionInstructionRule,
   SessionInstructionSource,
   SessionInstructionSourcePath,
+  SessionProfileRenderSelection,
+  SessionProviderConfig,
   SessionRenderFile,
   SessionRenderFileRole,
   SessionRenderInput,
@@ -61,6 +69,7 @@ export type {
   SessionRenderPlan,
   SessionRenderTargetKind,
   SessionRenderTool,
+  SessionSkippedSource,
   SessionTargetOwner,
   SessionTargetOwnerKind,
   SessionToolAdapter,
@@ -68,6 +77,7 @@ export type {
 export {
   applySessionRender,
   checkSessionRenderDrift,
+  restoreSessionRenderSnapshot,
   SessionApplyError,
 } from "./lib/session-apply.js";
 
@@ -107,14 +117,17 @@ export type {
   SessionApplyResult,
   SessionDriftCheck,
   SessionDriftEntry,
+  SessionRestoreConflict,
+  SessionRestoreFileResult,
+  SessionRestoreOptions,
+  SessionRestoreResult,
 } from "./lib/session-apply.js";
-
 // Lib — transforms
 export { applyTransform, buildCodexAgentsMd, buildCursorMdc, buildOpenCodeAgentsMd, stripClaudeOnlySections, transformSkillContent } from "./lib/transforms.js";
 export type { TransformContext } from "./lib/transforms.js";
 
 // Lib — machine
-export { detectMachineContext, normalizeOsFamily, machineContextToVariables, resolveProfileVariables, templateizeMachineContent, renderMachineAwareContent } from "./lib/machine.js";
+export { detectMachineContext, normalizeOsFamily, machineContextToVariables, resolveProfileVariables, templateizeMachineContent, renderMachineAwareContent, renderMachineAwareContentPreview } from "./lib/machine.js";
 export type { MachineContextOverrides } from "./lib/machine.js";
 
 // Lib — platform profile presets
@@ -149,7 +162,7 @@ export type { ExportOptions } from "./lib/export.js";
 export type { ImportOptions, ImportResult } from "./lib/import.js";
 
 // Lib — template
-export { parseTemplateVars, extractTemplateVars, renderTemplate, isTemplate } from "./lib/template.js";
+export { parseTemplateVars, extractTemplateVars, renderTemplate, renderTemplatePreview, isTemplate } from "./lib/template.js";
 export type { TemplateVar } from "./lib/template.js";
 
 // Lib — redact
