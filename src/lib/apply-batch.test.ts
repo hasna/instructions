@@ -138,6 +138,137 @@ describe("applyConfigs (batch)", () => {
     expect(readFileSync(independentTarget, "utf8")).toBe("independent before");
   });
 
+  test("deduplicates templated and literal configs after rendering their complete behavior", async () => {
+    const db = getDatabase();
+    const sharedTarget = join(tmpDir, "shared.txt");
+    const sharedOutput = join(tmpDir, "shared-output.txt");
+    const templated = createConfig({
+      name: "Templated Writer",
+      category: "tools",
+      agent: "claude",
+      content: "home={{HOME_DIR}}",
+      target_path: "{{HOME_DIR}}/shared.txt",
+      outputs: [{
+        agent: "codex",
+        target_path: "{{HOME_DIR}}/shared-output.txt",
+        transform: "passthrough",
+      }],
+    }, db);
+    const literal = createConfig({
+      name: "Literal Writer",
+      category: "tools",
+      agent: "claude",
+      content: `home=${tmpDir}`,
+      target_path: sharedTarget,
+      outputs: [{
+        agent: "codex",
+        target_path: sharedOutput,
+        transform: "passthrough",
+      }],
+    }, db);
+
+    const report = await previewConfigs([templated, literal], {
+      vars: { HOME_DIR: tmpDir },
+      store: new LocalConfigStore(db),
+    });
+
+    expect(report.failures).toEqual([]);
+    expect(report.results).toHaveLength(1);
+    expect(report.results[0]?.path).toBe(sharedTarget);
+    expect(report.results[0]?.new_content).toBe(`home=${tmpDir}`);
+    expect(report.results[0]?.outputs?.map((output) => output.path)).toEqual([sharedOutput]);
+    expect(report.skipped).toHaveLength(2);
+    expect(report.skipped.every((entry) => entry.owner === "equivalent-profile-config")).toBe(true);
+  });
+
+  test("does not deduplicate configs that differ by a unique output", async () => {
+    const db = getDatabase();
+    const sharedTarget = join(tmpDir, "shared.txt");
+    const firstOutput = join(tmpDir, "first-output.txt");
+    const secondOutput = join(tmpDir, "second-output.txt");
+    const first = createConfig({
+      name: "First Complete Writer",
+      category: "tools",
+      agent: "claude",
+      content: "same content",
+      target_path: sharedTarget,
+      outputs: [{
+        agent: "codex",
+        target_path: firstOutput,
+        transform: "passthrough",
+      }],
+    }, db);
+    const second = createConfig({
+      name: "Second Complete Writer",
+      category: "tools",
+      agent: "claude",
+      content: "same content",
+      target_path: sharedTarget,
+      outputs: [{
+        agent: "codewith",
+        target_path: secondOutput,
+        transform: "passthrough",
+      }],
+    }, db);
+
+    const report = await applyConfigsWithReport(
+      [first, second],
+      { store: new LocalConfigStore(db) },
+    );
+
+    expect(report.results).toEqual([]);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0]?.message).toContain(`Multiple profile writers target ${sharedTarget}`);
+    expect(report.skipped).toEqual([]);
+    expect(existsSync(sharedTarget)).toBe(false);
+    expect(existsSync(firstOutput)).toBe(false);
+    expect(existsSync(secondOutput)).toBe(false);
+  });
+
+  test("does not deduplicate configs whose transform metadata changes output content", async () => {
+    const db = getDatabase();
+    const sharedTarget = join(tmpDir, "shared.md");
+    const sharedOutput = join(tmpDir, "shared.mdc");
+    const first = createConfig({
+      name: "First Cursor Description",
+      category: "rules",
+      agent: "claude",
+      content: "# Same content\n",
+      target_path: sharedTarget,
+      outputs: [{
+        agent: "cursor",
+        target_path: sharedOutput,
+        transform: "cursor-mdc",
+      }],
+    }, db);
+    const second = createConfig({
+      name: "Second Cursor Description",
+      category: "rules",
+      agent: "claude",
+      content: "# Same content\n",
+      target_path: sharedTarget,
+      outputs: [{
+        agent: "cursor",
+        target_path: sharedOutput,
+        transform: "cursor-mdc",
+      }],
+    }, db);
+
+    const report = await applyConfigsWithReport(
+      [first, second],
+      { store: new LocalConfigStore(db) },
+    );
+
+    expect(report.results).toEqual([]);
+    expect(report.failures.map((failure) => failure.message)).toEqual([
+      expect.stringContaining(`Multiple profile writers target ${sharedTarget}`),
+      expect.stringContaining(`Multiple profile writers target ${sharedOutput}`),
+    ]);
+    expect(report.skipped).toEqual([]);
+    expect(existsSync(sharedTarget)).toBe(false);
+    expect(existsSync(sharedOutput)).toBe(false);
+  });
+
   test("handles empty array", async () => {
     const results = await applyConfigs([]);
     expect(results.length).toBe(0);

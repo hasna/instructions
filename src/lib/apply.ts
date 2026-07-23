@@ -83,6 +83,26 @@ interface PreparedConfigBatch {
   failures: ConfigApplyPreviewFailure[];
 }
 
+interface CanonicalConfigPrimary {
+  path: string;
+  agent: Config["agent"];
+  content: string;
+}
+
+interface CanonicalConfigOutput {
+  sourceIndex: number;
+  path: string;
+  agent: ConfigOutput["agent"];
+  transform: ConfigOutput["transform"];
+  content: string;
+}
+
+interface CanonicalConfigApplyBehavior {
+  primary: CanonicalConfigPrimary | null;
+  outputs: CanonicalConfigOutput[];
+  equivalenceKey: string;
+}
+
 async function writeConfigResult(
   config: Config,
   targetPath: string,
@@ -160,12 +180,16 @@ function isAntigravityRuleTarget(agent: Config["agent"] | undefined, targetPath:
   return agent === "antigravity" && /\.(md|mdc|markdown)$/i.test(targetPath);
 }
 
-function isGeneratedOutputTarget(config: Config, configs: Config[]): boolean {
-  if (!config.target_path) return false;
-  const targetPath = normalizeTargetPath(config.target_path);
+function isGeneratedOutputTarget(
+  config: Config,
+  configs: Config[],
+  opts: ApplyOptions,
+): boolean {
+  const primary = canonicalConfigApplyBehavior(config, opts, configs).primary;
+  if (!primary) return false;
   return configs.some((candidate) =>
     candidate.id !== config.id &&
-    candidate.outputs.some((output) => normalizeTargetPath(output.target_path) === targetPath)
+    canonicalConfigApplyBehavior(candidate, opts, configs).outputs.some((output) => output.path === primary.path)
   );
 }
 
@@ -217,7 +241,7 @@ async function applyPreparedConfig(
 
   const store = opts.store ?? resolveConfigStore();
   const contextConfigs = selectedOutputs.length > 0 || config.target_path ? await store.listConfigs() : [config];
-  if (isGeneratedOutputTarget(config, contextConfigs)) {
+  if (isGeneratedOutputTarget(config, contextConfigs, opts)) {
     throw new ConfigApplyError(
       `Config "${config.name}" targets a generated output path. Apply the canonical source config instead.`
     );
@@ -330,7 +354,7 @@ function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConf
   );
   const activeConfigs = selectedConfigs.filter((config) => {
     if (!isRetiredOrUnsupportedConfigAgent(config.agent)) return true;
-    for (const target of configTargets(config)) {
+    for (const target of configTargets(config, opts, selectedConfigs)) {
       skipped.push({
         config_id: config.id,
         config_slug: config.slug,
@@ -341,17 +365,17 @@ function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConf
     }
     return false;
   });
-  const { configs: deduplicated, duplicates } = deduplicateEquivalentProfileConfigs(activeConfigs);
+  const { configs: deduplicated, duplicates } = deduplicateEquivalentProfileConfigs(activeConfigs, opts);
   for (const duplicate of duplicates) {
-    for (const target of configTargets(duplicate)) {
+    for (const target of configTargets(duplicate, opts, activeConfigs)) {
       skipped.push({
         config_id: duplicate.id,
         config_slug: duplicate.slug,
-        path: normalizeApplyTargetPath(target.path, opts),
-        owner: sessionRendererOwnsTarget(target.path, opts)
+        path: target.path,
+        owner: sessionRendererOwnsCanonicalTarget(target.path, opts)
           ? SESSION_RENDERER_OWNER_ID
           : "equivalent-profile-config",
-        reason: sessionRendererOwnsTarget(target.path, opts)
+        reason: sessionRendererOwnsCanonicalTarget(target.path, opts)
           ? "provider instruction entrypoint is owned by the Instructions session renderer"
           : "equivalent profile config is superseded by the newer identical source",
       });
@@ -359,15 +383,19 @@ function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConf
   }
 
   const prepared = deduplicated.flatMap((config) => {
-    const primaryOwned = config.target_path ? sessionRendererOwnsTarget(config.target_path, opts) : false;
-    const outputs = config.outputs.filter((output) => {
+    const behavior = canonicalConfigApplyBehavior(config, opts, activeConfigs);
+    const primaryOwned = behavior.primary
+      ? sessionRendererOwnsCanonicalTarget(behavior.primary.path, opts)
+      : false;
+    const outputs = config.outputs.filter((output, sourceIndex) => {
+      const canonicalOutput = behavior.outputs.find((candidate) => candidate.sourceIndex === sourceIndex)!;
       const retiredOutput = isRetiredOrUnsupportedConfigAgent(output.agent);
-      const sessionOwned = sessionRendererOwnsTarget(output.target_path, opts);
+      const sessionOwned = sessionRendererOwnsCanonicalTarget(canonicalOutput.path, opts);
       if (!retiredOutput && !sessionOwned) return true;
       skipped.push({
         config_id: config.id,
         config_slug: config.slug,
-        path: normalizeApplyTargetPath(output.target_path, opts),
+        path: canonicalOutput.path,
         owner: retiredOutput ? "retired-provider-config" : SESSION_RENDERER_OWNER_ID,
         reason: retiredOutput
           ? `retired or unsupported provider output "${output.agent}" is excluded from profile apply`
@@ -381,7 +409,7 @@ function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConf
       skipped.push({
         config_id: config.id,
         config_slug: config.slug,
-        path: normalizeApplyTargetPath(config.target_path, opts),
+        path: behavior.primary!.path,
         owner: SESSION_RENDERER_OWNER_ID,
         reason: "provider instruction entrypoint is owned by the Instructions session renderer",
       });
@@ -399,26 +427,27 @@ function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConf
   return { configs: prepared, skipped, failures };
 }
 
-function deduplicateEquivalentProfileConfigs(configs: Config[]): {
+function deduplicateEquivalentProfileConfigs(
+  configs: Config[],
+  opts: ApplyOptions,
+): {
   configs: Config[];
   duplicates: Config[];
 } {
   const groups = new Map<string, Config[]>();
-  const withoutPrimary: Config[] = [];
+  const withoutTargets: Config[] = [];
   for (const config of configs) {
-    if (!config.target_path) {
-      withoutPrimary.push(config);
+    const behavior = canonicalConfigApplyBehavior(config, opts, configs);
+    if (!behavior.primary && behavior.outputs.length === 0) {
+      withoutTargets.push(config);
       continue;
     }
-    const key = JSON.stringify([
-      normalizeTargetPath(config.target_path),
-      config.agent,
-      config.category,
-      config.content,
+    groups.set(behavior.equivalenceKey, [
+      ...(groups.get(behavior.equivalenceKey) ?? []),
+      config,
     ]);
-    groups.set(key, [...(groups.get(key) ?? []), config]);
   }
-  const kept = [...withoutPrimary];
+  const kept = [...withoutTargets];
   const duplicates: Config[] = [];
   for (const group of groups.values()) {
     const ordered = [...group].sort((left, right) =>
@@ -432,16 +461,56 @@ function deduplicateEquivalentProfileConfigs(configs: Config[]): {
   return { configs: kept, duplicates };
 }
 
+function canonicalConfigApplyBehavior(
+  config: Config,
+  opts: ApplyOptions,
+  contextConfigs: Config[],
+): CanonicalConfigApplyBehavior {
+  const primary = config.target_path
+    ? {
+      path: canonicalApplyTargetPath(config.target_path, opts),
+      agent: config.agent,
+      content: canonicalApplyContent(config.content, opts),
+    }
+    : null;
+  const outputs = config.outputs
+    .map((output, sourceIndex) => ({
+      sourceIndex,
+      path: canonicalApplyTargetPath(output.target_path, opts),
+      agent: output.agent,
+      transform: output.transform,
+      content: canonicalApplyContent(
+        applyTransform(config, output, { configs: contextConfigs }),
+        opts,
+      ),
+    }))
+    .sort((left, right) =>
+      left.path.localeCompare(right.path)
+      || left.agent.localeCompare(right.agent)
+      || left.transform.localeCompare(right.transform)
+      || left.content.localeCompare(right.content)
+    );
+  const equivalenceKey = JSON.stringify({
+    kind: config.kind,
+    category: config.category,
+    primary,
+    outputs: outputs.map(({ sourceIndex: _sourceIndex, ...output }) => output),
+  });
+  return { primary, outputs, equivalenceKey };
+}
+
 function configTargets(
   config: Config,
-  normalizePath: (path: string) => string = normalizeTargetPath,
+  opts: ApplyOptions,
+  contextConfigs: Config[],
 ): Array<{ path: string; owner: string }> {
+  const behavior = canonicalConfigApplyBehavior(config, opts, contextConfigs);
   return [
-    ...(config.target_path
-      ? [{ path: normalizePath(config.target_path), owner: `${config.slug}:primary` }]
+    ...(behavior.primary
+      ? [{ path: behavior.primary.path, owner: `${config.slug}:primary` }]
       : []),
-    ...config.outputs.map((output) => ({
-      path: normalizePath(output.target_path),
+    ...behavior.outputs.map((output) => ({
+      path: output.path,
       owner: `${config.slug}:output:${output.agent}`,
     })),
   ];
@@ -453,10 +522,7 @@ function duplicateTargetFailures(
 ): ConfigApplyPreviewFailure[] {
   const targets = new Map<string, Array<{ config: Config; owner: string }>>();
   for (const config of configs) {
-    for (const target of configTargets(
-      config,
-      (path) => normalizeApplyTargetPath(path, opts),
-    )) {
+    for (const target of configTargets(config, opts, configs)) {
       targets.set(target.path, [
         ...(targets.get(target.path) ?? []),
         { config, owner: target.owner },
@@ -472,7 +538,13 @@ function duplicateTargetFailures(
     }));
 }
 
-function normalizeApplyTargetPath(targetPath: string, opts: ApplyOptions): string {
+function canonicalApplyContent(content: string, opts: ApplyOptions): string {
+  return opts.vars
+    ? renderMachineAwareContentPreview(content, opts.vars).content
+    : content;
+}
+
+function canonicalApplyTargetPath(targetPath: string, opts: ApplyOptions): string {
   const renderedTargetPath = opts.vars
     ? renderMachineAwareContentPreview(targetPath, opts.vars).content
     : targetPath;
@@ -480,7 +552,10 @@ function normalizeApplyTargetPath(targetPath: string, opts: ApplyOptions): strin
 }
 
 function sessionRendererOwnsTarget(targetPath: string, opts: ApplyOptions): boolean {
-  const normalized = normalizeApplyTargetPath(targetPath, opts);
+  return sessionRendererOwnsCanonicalTarget(canonicalApplyTargetPath(targetPath, opts), opts);
+}
+
+function sessionRendererOwnsCanonicalTarget(normalized: string, opts: ApplyOptions): boolean {
   const homes = new Set([
     getConfigHome(),
     opts.vars?.["HOME_DIR"],
