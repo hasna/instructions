@@ -297,6 +297,34 @@ describe("applyConfig", () => {
     expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).not.toContain("absolute stale");
   });
 
+  test("refuses generated output rows after rendering machine-aware target paths", async () => {
+    const db = getDatabase();
+    const generatedTarget = join(tmpDir, "generated.md");
+    createConfig({
+      name: "Canonical Source",
+      category: "rules",
+      agent: "claude",
+      content: "# Canonical\n",
+      target_path: join(tmpDir, "canonical.md"),
+      outputs: [
+        { agent: "codex", target_path: generatedTarget, transform: "codex-flat" },
+      ],
+    }, db);
+    const stale = createConfig({
+      name: "Rendered Stale Writer",
+      category: "rules",
+      agent: "codex",
+      content: "# stale\n",
+      target_path: "{{HOME_DIR}}/generated.md",
+    }, db);
+
+    await expect(applyConfig(stale, {
+      store: new LocalConfigStore(db),
+      vars: { HOME_DIR: tmpDir },
+    })).rejects.toThrow("generated output");
+    expect(existsSync(generatedTarget)).toBe(false);
+  });
+
   test("refuses generated output rows when target path reaches the same file through a symlink", async () => {
     const db = getDatabase();
     process.env["CONFIGS_HOME"] = tmpDir;
