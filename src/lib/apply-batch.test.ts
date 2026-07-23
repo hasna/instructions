@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig } from "../db/configs";
 import type { Config } from "../types/index";
-import { applyConfigs, previewConfigs } from "./apply";
+import { applyConfigs, applyConfigsWithReport, previewConfigs } from "./apply";
 
 let tmpDir: string;
 
@@ -50,6 +50,43 @@ describe("applyConfigs (batch)", () => {
     expect(results.length).toBe(1);
     expect(results[0]!.dry_run).toBe(true);
     expect(existsSync(join(tmpDir, "dry.txt"))).toBe(false);
+  });
+
+  test("aborts the entire batch before writes when multiple configs target one file", async () => {
+    const db = getDatabase();
+    const sharedTarget = join(tmpDir, "shared.txt");
+    const independentTarget = join(tmpDir, "independent.txt");
+    writeFileSync(sharedTarget, "shared before");
+    writeFileSync(independentTarget, "independent before");
+    const first = createConfig({
+      name: "First Writer",
+      category: "tools",
+      content: "first",
+      target_path: sharedTarget,
+    }, db);
+    const second = createConfig({
+      name: "Second Writer",
+      category: "tools",
+      content: "second",
+      target_path: sharedTarget,
+    }, db);
+    const independent = createConfig({
+      name: "Independent Writer",
+      category: "tools",
+      content: "independent",
+      target_path: independentTarget,
+    }, db);
+
+    const report = await applyConfigsWithReport(
+      [first, independent, second],
+      { store: new LocalConfigStore(db) },
+    );
+
+    expect(report.results).toEqual([]);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0]?.message).toContain("Multiple profile writers target");
+    expect(readFileSync(sharedTarget, "utf8")).toBe("shared before");
+    expect(readFileSync(independentTarget, "utf8")).toBe("independent before");
   });
 
   test("handles empty array", async () => {

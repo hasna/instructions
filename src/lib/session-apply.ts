@@ -4,9 +4,10 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   statSync,
 } from "node:fs";
-import { isAbsolute, join, parse, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import {
   observeProjectContextSessionGuard,
   removeProjectContextCoordinatedFile,
@@ -140,8 +141,9 @@ interface SessionRenderSnapshot {
   afterFiles: SessionRenderSnapshotAfterFileV1[];
 }
 
-interface StoredSessionRenderSnapshot extends Omit<SessionRenderSnapshot, "afterFiles"> {
-  afterFiles: Array<Omit<SessionRenderSnapshotAfterFileV1, "action"> & {
+interface StoredSessionRenderSnapshot extends Omit<SessionRenderSnapshot, "targetKind" | "afterFiles"> {
+  targetKind?: SessionRenderPlan["targetKind"];
+  afterFiles?: Array<Omit<SessionRenderSnapshotAfterFileV1, "action"> & {
     action?: SessionSnapshotAction;
   }>;
 }
@@ -510,7 +512,6 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshot 
     typeof snapshot.targetHome !== "string"
     || typeof snapshot.manifestPath !== "string"
     || !Array.isArray(snapshot.files)
-    || !Array.isArray(snapshot.afterFiles)
     || (
       snapshot.previousManifest !== null
       && (
@@ -522,11 +523,25 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshot 
     )
     || typeof snapshot.tool !== "string"
     || typeof snapshot.profile !== "string"
-    || (snapshot.targetKind !== "session-home" && snapshot.targetKind !== "project-root")
+  ) {
+    throw new SessionApplyError(`Session snapshot is incomplete: ${snapshotPath}`);
+  }
+  const isPreRollbackLegacyV1 = (
+    snapshot.schema === "hasna.configs.session-render-snapshot/v1"
+    && snapshot.targetKind === undefined
+    && snapshot.afterFiles === undefined
+  );
+  if (
+    !isPreRollbackLegacyV1
+    && (
+      !Array.isArray(snapshot.afterFiles)
+      || (snapshot.targetKind !== "session-home" && snapshot.targetKind !== "project-root")
+    )
   ) {
     throw new SessionApplyError(`Session snapshot is incomplete: ${snapshotPath}`);
   }
   const targetHome = assertSafeTargetHome(snapshot.targetHome);
+  const previousManifest = snapshot.previousManifest as SessionRenderManifest | null;
   const previousFiles = new Map<string, SessionRenderSnapshot["files"][number]>();
   for (const file of snapshot.files) {
     if (
@@ -545,10 +560,34 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshot 
     }
     previousFiles.set(file.relativePath, file);
   }
-  const previousManifestFiles = indexPreviousManifestFiles(snapshot.previousManifest, targetHome, snapshotPath);
+  const previousManifestFiles = indexPreviousManifestFiles(previousManifest, targetHome, snapshotPath);
+  const legacyUpgrade = isPreRollbackLegacyV1
+    ? reconstructPreRollbackLegacyV1Snapshot(
+      {
+        ...snapshot,
+        targetHome: snapshot.targetHome,
+        manifestPath: snapshot.manifestPath,
+        tool: snapshot.tool,
+        profile: snapshot.profile,
+        previousManifest,
+      },
+      previousFiles,
+      previousManifestFiles,
+      targetHome,
+      snapshotPath,
+    )
+    : null;
+  const targetKind = legacyUpgrade?.targetKind ?? snapshot.targetKind;
+  const storedAfterFiles = legacyUpgrade?.afterFiles ?? snapshot.afterFiles;
+  if (
+    (targetKind !== "session-home" && targetKind !== "project-root")
+    || !Array.isArray(storedAfterFiles)
+  ) {
+    throw new SessionApplyError(`Session snapshot is incomplete: ${snapshotPath}`);
+  }
   const afterRelativePaths = new Set<string>();
   const afterFiles: SessionRenderSnapshot["afterFiles"] = [];
-  for (const file of snapshot.afterFiles) {
+  for (const file of storedAfterFiles) {
     if (
       !file
       || typeof file.relativePath !== "string"
@@ -587,8 +626,209 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshot 
   }
   return {
     ...snapshot,
+    targetKind,
     afterFiles,
   } as SessionRenderSnapshot;
+}
+
+function reconstructPreRollbackLegacyV1Snapshot(
+  snapshot: Partial<StoredSessionRenderSnapshot> & {
+    targetHome: string;
+    manifestPath: string;
+    tool: string;
+    profile: string;
+    previousManifest: SessionRenderManifest | null;
+  },
+  previousFiles: Map<string, SessionRenderSnapshot["files"][number]>,
+  previousManifestFiles: Map<string, SessionRenderManifest["files"][number]>,
+  targetHome: string,
+  snapshotPath: string,
+): Pick<SessionRenderSnapshot, "targetKind" | "afterFiles"> {
+  assertNoNewerSessionSnapshot(snapshotPath, snapshot.createdAt, targetHome);
+  const manifestPath = resolve(snapshot.manifestPath);
+  const manifestRelativePath = relative(targetHome, manifestPath).replaceAll("\\", "/");
+  resolveSnapshotFilePath(manifestRelativePath, snapshot.manifestPath, targetHome);
+  const manifestSha256 = currentSessionFileHash(manifestPath, targetHome);
+  if (manifestSha256 === null) {
+    throw new SessionApplyError(`Cannot restore pre-rollback legacy v1 snapshot without its applied manifest: ${snapshotPath}`);
+  }
+
+  let parsedManifest: unknown;
+  try {
+    parsedManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch {
+    throw new SessionApplyError(`Pre-rollback legacy v1 applied manifest is not valid JSON: ${snapshotPath}`);
+  }
+  if (!parsedManifest || typeof parsedManifest !== "object" || Array.isArray(parsedManifest)) {
+    throw new SessionApplyError(`Pre-rollback legacy v1 applied manifest is invalid: ${snapshotPath}`);
+  }
+  const appliedManifest = parsedManifest as Partial<SessionRenderManifest>;
+  if (
+    appliedManifest.schema !== SESSION_RENDER_SCHEMA
+    || appliedManifest.tool !== snapshot.tool
+    || appliedManifest.profile !== snapshot.profile
+    || typeof appliedManifest.targetHome !== "string"
+    || resolve(appliedManifest.targetHome) !== targetHome
+    || (appliedManifest.targetKind !== "session-home" && appliedManifest.targetKind !== "project-root")
+    || !Array.isArray(appliedManifest.files)
+  ) {
+    throw new SessionApplyError(`Pre-rollback legacy v1 applied manifest does not match its snapshot: ${snapshotPath}`);
+  }
+
+  const afterFiles: SessionRenderSnapshot["afterFiles"] = [];
+  const appliedRelativePaths = new Set<string>();
+  for (const file of appliedManifest.files) {
+    if (
+      !file
+      || typeof file.path !== "string"
+      || typeof file.relativePath !== "string"
+      || !isSessionRenderFileRole(file.role)
+      || file.role === "manifest"
+      || typeof file.sha256 !== "string"
+    ) {
+      throw new SessionApplyError(`Pre-rollback legacy v1 applied manifest file metadata is invalid: ${snapshotPath}`);
+    }
+    resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
+    if (appliedRelativePaths.has(file.relativePath)) {
+      throw new SessionApplyError(`Pre-rollback legacy v1 applied manifest has duplicate file metadata: ${file.relativePath}`);
+    }
+    appliedRelativePaths.add(file.relativePath);
+
+    const previousFile = previousFiles.get(file.relativePath);
+    const previousManifestFile = previousManifestFiles.get(file.relativePath);
+    let action: SessionSnapshotAction;
+    if (previousFile) {
+      assertMatchingLegacyFileMetadata(file, previousFile, "before-image");
+      if (previousFile.sha256 === file.sha256) {
+        throw new SessionApplyError(`Pre-rollback legacy v1 update has identical before and after hashes: ${file.relativePath}`);
+      }
+      action = "update";
+    } else if (previousManifestFile) {
+      assertMatchingLegacyFileMetadata(file, previousManifestFile, "previous manifest");
+      if (previousManifestFile.sha256 === file.sha256) {
+        throw new SessionApplyError(
+          `Cannot infer pre-rollback legacy v1 unchanged versus recreated file: ${file.relativePath}`,
+        );
+      }
+      action = "create";
+    } else {
+      action = "create";
+    }
+    afterFiles.push({
+      path: file.path,
+      relativePath: file.relativePath,
+      role: file.role,
+      action,
+      sha256: file.sha256,
+    });
+  }
+
+  for (const [relativePath, previousFile] of previousFiles) {
+    if (relativePath === manifestRelativePath || appliedRelativePaths.has(relativePath)) continue;
+    const previousManifestFile = previousManifestFiles.get(relativePath);
+    if (!previousManifestFile) {
+      throw new SessionApplyError(
+        `Cannot infer pre-rollback legacy v1 delete without previous manifest metadata: ${relativePath}`,
+      );
+    }
+    assertMatchingLegacyFileMetadata(previousFile, previousManifestFile, "previous manifest");
+    afterFiles.push({
+      path: previousFile.path,
+      relativePath,
+      role: previousFile.role,
+      action: "delete",
+      sha256: null,
+    });
+  }
+
+  const previousManifestFile = previousFiles.get(manifestRelativePath);
+  if (previousManifestFile) {
+    if (previousManifestFile.path !== manifestPath || previousManifestFile.role !== "manifest") {
+      throw new SessionApplyError(`Pre-rollback legacy v1 manifest before-image metadata is invalid: ${snapshotPath}`);
+    }
+    if (previousManifestFile.sha256 === manifestSha256) {
+      throw new SessionApplyError(`Pre-rollback legacy v1 manifest has identical before and after hashes: ${snapshotPath}`);
+    }
+  } else if (snapshot.previousManifest) {
+    throw new SessionApplyError(`Pre-rollback legacy v1 snapshot is missing its manifest before-image: ${snapshotPath}`);
+  }
+  afterFiles.push({
+    path: manifestPath,
+    relativePath: manifestRelativePath,
+    role: "manifest",
+    action: previousManifestFile ? "update" : "create",
+    sha256: manifestSha256,
+  });
+
+  return {
+    targetKind: appliedManifest.targetKind,
+    afterFiles,
+  };
+}
+
+function assertNoNewerSessionSnapshot(
+  snapshotPath: string,
+  createdAt: string | undefined,
+  targetHome: string,
+): void {
+  const createdAtMs = typeof createdAt === "string" ? Date.parse(createdAt) : Number.NaN;
+  if (!Number.isFinite(createdAtMs)) {
+    throw new SessionApplyError(`Pre-rollback legacy v1 snapshot has an invalid creation time: ${snapshotPath}`);
+  }
+  for (const entry of readdirSync(dirname(snapshotPath))) {
+    const candidatePath = resolve(dirname(snapshotPath), entry);
+    if (candidatePath === resolve(snapshotPath) || !entry.endsWith(".json")) continue;
+    const candidateStat = lstatSync(candidatePath);
+    if (candidateStat.isSymbolicLink() || !candidateStat.isFile() || candidateStat.size > 32 * 1024 * 1024) continue;
+    try {
+      const candidate = JSON.parse(readFileSync(candidatePath, "utf8")) as {
+        schema?: unknown;
+        createdAt?: unknown;
+        targetHome?: unknown;
+      };
+      const candidateCreatedAtMs = typeof candidate.createdAt === "string"
+        ? Date.parse(candidate.createdAt)
+        : Number.NaN;
+      if (
+        (candidate.schema === "hasna.configs.session-render-snapshot/v1"
+          || candidate.schema === "hasna.configs.session-render-snapshot/v2")
+        && typeof candidate.targetHome === "string"
+        && resolve(candidate.targetHome) === targetHome
+        && Number.isFinite(candidateCreatedAtMs)
+        && candidateCreatedAtMs >= createdAtMs
+      ) {
+        throw new SessionApplyError(
+          `Cannot restore pre-rollback legacy v1 snapshot after a newer session snapshot exists: ${candidatePath}`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof SessionApplyError) throw error;
+    }
+  }
+}
+
+function assertMatchingLegacyFileMetadata(
+  appliedFile: Pick<SessionRenderManifest["files"][number], "path" | "role" | "relativePath">,
+  previousFile: Pick<SessionRenderSnapshot["files"][number], "path" | "role" | "relativePath">,
+  source: string,
+): void {
+  if (
+    appliedFile.path !== previousFile.path
+    || appliedFile.role !== previousFile.role
+    || appliedFile.relativePath !== previousFile.relativePath
+  ) {
+    throw new SessionApplyError(
+      `Pre-rollback legacy v1 ${source} metadata conflicts for ${appliedFile.relativePath}`,
+    );
+  }
+}
+
+function isSessionRenderFileRole(role: unknown): role is SessionRenderFileRole {
+  return role === "index"
+    || role === "fragment"
+    || role === "rule"
+    || role === "config"
+    || role === "manifest";
 }
 
 function indexPreviousManifestFiles(
@@ -617,7 +857,7 @@ function indexPreviousManifestFiles(
 }
 
 function inferLegacySnapshotAction(
-  file: StoredSessionRenderSnapshot["afterFiles"][number],
+  file: NonNullable<StoredSessionRenderSnapshot["afterFiles"]>[number],
   previousFiles: Map<string, SessionRenderSnapshot["files"][number]>,
   previousManifestFiles: Map<string, SessionRenderManifest["files"][number]>,
   previousManifest: SessionRenderManifest | null | undefined,
