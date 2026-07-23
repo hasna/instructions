@@ -14,6 +14,8 @@ import {
   observeProjectContextSessionGuard,
   type ProjectContextSessionGuard,
 } from "./project-context.js";
+import { isRetiredOrUnsupportedConfigAgent } from "./config-agents.js";
+import { applyTransform } from "./transforms.js";
 import {
   CODEWITH_NATIVE_IMPORTS_ENV,
   SESSION_INSTRUCTION_LAYERS,
@@ -29,6 +31,7 @@ export {
 } from "./session-render-contract.js";
 export const RAW_STORE_ROOT_ENV = "HASNA_CONFIGS_HOME";
 export const ANTIGRAVITY_RULE_FILE_CHAR_LIMIT = 12_000;
+export const SESSION_RENDERER_OWNER_ID = "instructions-session-renderer";
 
 export const SESSION_RENDER_TOOLS = [
   "claude",
@@ -39,6 +42,13 @@ export const SESSION_RENDER_TOOLS = [
   "qwen",
   "aicopilot",
   "antigravity",
+] as const;
+
+export const SESSION_RENDER_PROFILE_ENTRYPOINTS = [
+  ".claude/CLAUDE.md",
+  ".codex/AGENTS.md",
+  ".codewith/CODEWITH.md",
+  ".config/opencode/AGENTS.md",
 ] as const;
 
 export type SessionRenderTool = (typeof SESSION_RENDER_TOOLS)[number];
@@ -128,7 +138,31 @@ export interface SessionTargetOwner {
   projectRoot: string | null;
   ownedBy: "open-configs";
   canonicalOwner: "instructions";
+  writer: {
+    id: typeof SESSION_RENDERER_OWNER_ID;
+    canonical: true;
+    legacyAliases: ["open-configs"];
+    scope: "managed-provider-files" | "managed-instruction-fields";
+  };
   reason: string;
+}
+
+export interface SessionProviderConfig {
+  sourceId: string;
+  content: string;
+}
+
+export interface SessionSkippedSource {
+  id: string;
+  label: string;
+  targetProviders: string[];
+  reason: string;
+}
+
+export interface SessionProfileRenderSelection {
+  sources: SessionInstructionSource[];
+  skippedSources: SessionSkippedSource[];
+  providerConfig?: SessionProviderConfig;
 }
 
 export interface SessionRenderInput {
@@ -141,6 +175,8 @@ export interface SessionRenderInput {
   generatedAt?: string;
   codewithNativeImports?: boolean;
   allowEmptySources?: boolean;
+  providerConfig?: SessionProviderConfig;
+  skippedSources?: SessionSkippedSource[];
 }
 
 export interface SessionRenderFile {
@@ -187,6 +223,7 @@ export interface SessionRenderManifest {
       globs: string[];
       hash: string | null;
     }>;
+    renderedPayloadSha256: string;
     provenance: Record<string, unknown> | null;
     metadata?: Record<string, unknown> | null;
   }>;
@@ -204,6 +241,12 @@ export interface SessionRenderManifest {
     sourceIds: string[];
   }>;
   warnings: string[];
+  providerConfig?: {
+    sourceId: string;
+    selectedPayloadSha256: string;
+    renderedPayloadSha256: string;
+    selected: boolean;
+  };
   projectContext?: {
     schema: string;
     projectId: string;
@@ -683,6 +726,7 @@ function buildOpenCodeFiles(
   adapter: SessionToolAdapter,
   profile: string,
   sources: OrderedSessionInstructionSource[],
+  providerConfig?: SessionProviderConfig,
 ): SessionRenderFile[] {
   const fragments = sources.flatMap((source, index) => [
     makeFile(targetHome, fragmentPath(adapter, index, source), "fragment", sectionForSource(source), [source.id]),
@@ -706,15 +750,59 @@ function buildOpenCodeFiles(
       ...sources.flatMap((source) => source.resolvedRules.map((rule) => rule.id)),
     ],
   );
+  const existingConfigPath = joinTarget(targetHome, adapter.configFile!);
+  const selectedConfig = existsSync(existingConfigPath)
+    ? readOpenCodeConfig(readFileSync(existingConfigPath, "utf8"), existingConfigPath)
+    : providerConfig
+      ? readOpenCodeConfig(providerConfig.content, providerConfig.sourceId)
+      : {};
+  const preservedInstructions = normalizeOpenCodeInstructions(selectedConfig["instructions"])
+    .filter((path) => !pathIsManagedOpenCodeInstruction(path, adapter.managedDir));
   const config = {
-    $schema: "https://opencode.ai/config.json",
-    instructions: fragments.map((file) => file.relativePath),
+    ...selectedConfig,
+    $schema: typeof selectedConfig["$schema"] === "string"
+      ? selectedConfig["$schema"]
+      : "https://opencode.ai/config.json",
+    instructions: [
+      ...preservedInstructions,
+      ...fragments.map((file) => file.relativePath),
+    ],
   };
+  const configSourceIds = [
+    ...sources.map((source) => source.id),
+    ...(providerConfig ? [providerConfig.sourceId] : []),
+  ];
   return [
     flattenedIndex,
-    makeFile(targetHome, adapter.configFile!, "config", JSON.stringify(config, null, 2), sources.map((source) => source.id)),
+    makeFile(targetHome, adapter.configFile!, "config", JSON.stringify(config, null, 2), configSourceIds),
     ...fragments,
   ];
+}
+
+function readOpenCodeConfig(content: string, source: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new Error(`OpenCode config ${source} is not valid JSON.`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`OpenCode config ${source} must contain a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function normalizeOpenCodeInstructions(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error("OpenCode config instructions must be an array of strings.");
+  }
+  return value as string[];
+}
+
+function pathIsManagedOpenCodeInstruction(path: string, managedDir: string): boolean {
+  const normalized = posix.normalize(path.replaceAll("\\", "/")).replace(/^\.\//, "");
+  return normalized === managedDir || normalized.startsWith(`${managedDir}/`);
 }
 
 function buildAntigravityRuleFiles(
@@ -754,6 +842,7 @@ function buildFiles(
   adapter: SessionToolAdapter,
   profile: string,
   sources: OrderedSessionInstructionSource[],
+  providerConfig?: SessionProviderConfig,
 ): SessionRenderFile[] {
   switch (adapter.mode) {
     case "native-imports":
@@ -763,7 +852,7 @@ function buildFiles(
     case "cursor-mdc":
       return buildCursorRuleFiles(targetHome, adapter, sources);
     case "opencode-instructions":
-      return buildOpenCodeFiles(targetHome, adapter, profile, sources);
+      return buildOpenCodeFiles(targetHome, adapter, profile, sources, providerConfig);
     case "antigravity-rules":
       return buildAntigravityRuleFiles(targetHome, adapter, sources);
   }
@@ -871,6 +960,12 @@ export function resolveSessionTargetOwnership(input: Pick<SessionRenderInput, "t
       projectRoot: input.projectRoot ? resolveSessionPath(input.projectRoot) : null,
       ownedBy: "open-configs",
       canonicalOwner: "instructions",
+      writer: {
+        id: SESSION_RENDERER_OWNER_ID,
+        canonical: true,
+        legacyAliases: ["open-configs"],
+        scope: input.tool === "opencode" ? "managed-instruction-fields" : "managed-provider-files",
+      },
       reason: "target resolution blocked before provider files can be owned",
     };
   }
@@ -883,6 +978,12 @@ export function resolveSessionTargetOwnership(input: Pick<SessionRenderInput, "t
       projectRoot: target.targetHome,
       ownedBy: "open-configs",
       canonicalOwner: "instructions",
+      writer: {
+        id: SESSION_RENDERER_OWNER_ID,
+        canonical: true,
+        legacyAliases: ["open-configs"],
+        scope: input.tool === "opencode" ? "managed-instruction-fields" : "managed-provider-files",
+      },
       reason: "project-scoped provider files are generated in the explicit repository root",
     };
   }
@@ -894,6 +995,12 @@ export function resolveSessionTargetOwnership(input: Pick<SessionRenderInput, "t
     projectRoot: null,
     ownedBy: "open-configs",
     canonicalOwner: "instructions",
+    writer: {
+      id: SESSION_RENDERER_OWNER_ID,
+      canonical: true,
+      legacyAliases: ["open-configs"],
+      scope: input.tool === "opencode" ? "managed-instruction-fields" : "managed-provider-files",
+    },
     reason: "profile-scoped provider home is generated by Instructions from identity/config sources",
   };
 }
@@ -917,7 +1024,10 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
     ...(orderedSources.length === 0 ? ["No instruction sources were provided."] : []),
     ...blockers,
   ];
-  const baseFiles = blocked ? [] : buildFiles(targetHome, adapter, input.profile, orderedSources);
+  if (input.providerConfig && input.tool !== "opencode") {
+    throw new Error("Provider base config is supported only for OpenCode session renders.");
+  }
+  const baseFiles = blocked ? [] : buildFiles(targetHome, adapter, input.profile, orderedSources, input.providerConfig);
   const projectContext = blocked
     ? null
     : composeProjectContextSessionRender({
@@ -957,9 +1067,17 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
     sourceHash: fingerprint(projectContext
       ? {
         sources: orderedSources.map(sourceFingerprint),
+        providerConfig: input.providerConfig
+          ? { sourceId: input.providerConfig.sourceId, content: input.providerConfig.content }
+          : null,
         projectContext: projectContext.project_context,
       }
-      : orderedSources.map(sourceFingerprint)),
+      : {
+        sources: orderedSources.map(sourceFingerprint),
+        providerConfig: input.providerConfig
+          ? { sourceId: input.providerConfig.sourceId, content: input.providerConfig.content }
+          : null,
+      }),
     sources: [
       ...orderedSources.map((source) => ({
         id: source.id,
@@ -981,12 +1099,13 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
           globs: rule.globs ?? [],
           hash: rule.hash ?? null,
         })),
+        renderedPayloadSha256: sha256(source.content),
         provenance: source.provenance ?? null,
         metadata: source.metadata ?? null,
       })),
       ...(projectContext ? [projectContext.source] : []),
     ],
-    skippedSources: [],
+    skippedSources: input.skippedSources ?? [],
     files: files.map((file) => ({
       path: file.path,
       relativePath: file.relativePath,
@@ -995,6 +1114,17 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
       sourceIds: file.sourceIds,
     })),
     warnings,
+    ...(input.providerConfig
+      ? {
+        providerConfig: {
+          sourceId: input.providerConfig.sourceId,
+          selectedPayloadSha256: sha256(input.providerConfig.content),
+          renderedPayloadSha256: files.find((file) => file.relativePath === adapter.configFile)?.sha256
+            ?? sha256(input.providerConfig.content),
+          selected: !existsSync(joinTarget(targetHome, adapter.configFile!)),
+        },
+      }
+      : {}),
     ...(projectContext
       ? {
         projectContext: projectContext.project_context,
@@ -1070,6 +1200,136 @@ export function sourceFromConfig(
       },
     metadata: isAgentOperatingRules ? { ...AGENT_OPERATING_RULES_METADATA } : null,
     nonOverridable: isAgentOperatingRules,
+  };
+}
+
+export function selectProfileConfigsForSessionRender(
+  configs: Config[],
+  tool: SessionRenderTool,
+): SessionProfileRenderSelection {
+  const sources: Array<{ config: Config; source: SessionInstructionSource }> = [];
+  const skippedSources: SessionSkippedSource[] = [];
+  const providerConfigs: Config[] = [];
+
+  for (const config of configs) {
+    if (isRetiredOrUnsupportedConfigAgent(config.agent)) {
+      skippedSources.push(skippedProfileConfig(config, [], "retired or unsupported provider config"));
+      continue;
+    }
+    if (isOpenCodeProviderConfig(config)) {
+      if (tool === "opencode") providerConfigs.push(config);
+      else skippedSources.push(skippedProfileConfig(config, ["opencode"], "provider settings belong to OpenCode"));
+      continue;
+    }
+    if (config.category !== "rules") {
+      skippedSources.push(skippedProfileConfig(
+        config,
+        [],
+        config.kind === "reference"
+          ? "reference config is not a provider instruction source"
+          : "profile config is handled by direct config preview/apply",
+      ));
+      continue;
+    }
+
+    const output = config.outputs.find((candidate) => candidate.agent === tool);
+    if (config.agent !== "global" && config.agent !== tool && !output) {
+      skippedSources.push(skippedProfileConfig(config, [config.agent], "rule targets a different provider"));
+      continue;
+    }
+    const selectedContent = output
+      ? applyTransform(config, output, { configs })
+      : config.content;
+    sources.push({
+      config,
+      source: sourceFromConfig({ ...config, content: selectedContent }, sources.length),
+    });
+  }
+
+  const selectedSources: SessionInstructionSource[] = [];
+  const equivalentSources = new Map<string, {
+    config: Config;
+    index: number;
+    nonOverridable: boolean;
+  }>();
+  for (const candidate of sources) {
+    const key = sha256(candidate.source.content);
+    const existing = equivalentSources.get(key);
+    if (!existing) {
+      equivalentSources.set(key, {
+        config: candidate.config,
+        index: selectedSources.length,
+        nonOverridable: candidate.source.nonOverridable === true,
+      });
+      selectedSources.push(candidate.source);
+      continue;
+    }
+    const candidateIsNonOverridable = candidate.source.nonOverridable === true;
+    const replaceExisting = candidateIsNonOverridable !== existing.nonOverridable
+      ? candidateIsNonOverridable
+      : candidate.config.updated_at > existing.config.updated_at;
+    if (replaceExisting) {
+      skippedSources.push(skippedProfileConfig(existing.config, [tool], `equivalent rule superseded by ${candidate.config.slug}`));
+      selectedSources[existing.index] = {
+        ...candidate.source,
+        order: selectedSources[existing.index]!.order,
+      };
+      equivalentSources.set(key, {
+        config: candidate.config,
+        index: existing.index,
+        nonOverridable: candidateIsNonOverridable,
+      });
+    } else {
+      skippedSources.push(skippedProfileConfig(candidate.config, [tool], `equivalent rule superseded by ${existing.config.slug}`));
+    }
+  }
+
+  const providerConfig = selectProviderConfig(providerConfigs, skippedSources);
+  return {
+    sources: selectedSources,
+    skippedSources,
+    ...(providerConfig ? { providerConfig } : {}),
+  };
+}
+
+function skippedProfileConfig(
+  config: Config,
+  targetProviders: string[],
+  reason: string,
+): SessionSkippedSource {
+  return {
+    id: config.slug,
+    label: config.name,
+    targetProviders,
+    reason,
+  };
+}
+
+function isOpenCodeProviderConfig(config: Config): boolean {
+  return config.kind === "file"
+    && config.agent === "opencode"
+    && config.format === "json"
+    && basename(config.target_path ?? "") === "opencode.json";
+}
+
+function selectProviderConfig(
+  configs: Config[],
+  skippedSources: SessionSkippedSource[],
+): SessionProviderConfig | undefined {
+  if (configs.length === 0) return undefined;
+  const selected = [...configs].sort((left, right) =>
+    right.updated_at.localeCompare(left.updated_at) || left.slug.localeCompare(right.slug)
+  )[0]!;
+  for (const config of configs) {
+    if (config.id === selected.id) continue;
+    if (config.content !== selected.content) {
+      throw new Error(`Conflicting OpenCode provider configs in profile: ${selected.slug}, ${config.slug}`);
+    }
+    skippedSources.push(skippedProfileConfig(config, ["opencode"], `equivalent provider config superseded by ${selected.slug}`));
+  }
+  return {
+    sourceId: selected.slug,
+    content: selected.content,
   };
 }
 

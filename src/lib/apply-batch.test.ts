@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig } from "../db/configs";
-import { applyConfigs } from "./apply";
+import type { Config } from "../types/index";
+import { applyConfigs, previewConfigs } from "./apply";
 
 let tmpDir: string;
 
@@ -19,6 +20,7 @@ beforeEach(() => {
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+  delete process.env["CONFIGS_HOME"];
 });
 
 describe("applyConfigs (batch)", () => {
@@ -53,5 +55,108 @@ describe("applyConfigs (batch)", () => {
   test("handles empty array", async () => {
     const results = await applyConfigs([]);
     expect(results.length).toBe(0);
+  });
+
+  test("previews missing secret variables without resolving or exposing them", async () => {
+    const db = getDatabase();
+    const config = createConfig({
+      name: "Authorization Template",
+      category: "mcp",
+      agent: "codex",
+      content: 'Authorization = "{{AUTHORIZATION}}"',
+      target_path: join(tmpDir, "config.toml"),
+      is_template: true,
+    }, db);
+
+    const preview = await previewConfigs([config], {
+      vars: {},
+      store: new LocalConfigStore(db),
+    });
+
+    expect(preview.failures).toEqual([]);
+    expect(preview.results[0]?.unresolved_template_vars).toEqual(["AUTHORIZATION"]);
+    expect(preview.results[0]?.new_content).toBe('Authorization = "{{AUTHORIZATION}}"');
+    expect(existsSync(join(tmpDir, "config.toml"))).toBe(false);
+  });
+
+  test("assigns provider instruction entrypoints to the session renderer once", async () => {
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const db = getDatabase();
+    const canonical = createConfig({
+      name: "claude-claude-md",
+      category: "rules",
+      agent: "claude",
+      content: "Canonical source",
+      target_path: "~/.claude/CLAUDE.md",
+      outputs: [
+        { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
+        { agent: "codewith", target_path: "~/.codewith/CODEWITH.md", transform: "codex-flat" },
+        { agent: "opencode", target_path: "~/.config/opencode/AGENTS.md", transform: "opencode-flat" },
+      ],
+    }, db);
+    const staleDuplicate = createConfig({
+      name: "claude-md",
+      category: "rules",
+      agent: "claude",
+      content: "Canonical source",
+      target_path: "~/.claude/CLAUDE.md",
+      outputs: canonical.outputs,
+    }, db);
+
+    const preview = await previewConfigs([canonical, staleDuplicate], {
+      store: new LocalConfigStore(db),
+    });
+
+    expect(preview.failures).toEqual([]);
+    expect(preview.results).toEqual([]);
+    expect(preview.skipped.every((entry) => entry.owner === "instructions-session-renderer")).toBe(true);
+    expect(new Set(preview.skipped.map((entry) => entry.path))).toEqual(new Set([
+      join(tmpDir, ".claude", "CLAUDE.md"),
+      join(tmpDir, ".codex", "AGENTS.md"),
+      join(tmpDir, ".codewith", "CODEWITH.md"),
+      join(tmpDir, ".config", "opencode", "AGENTS.md"),
+    ]));
+  });
+
+  test("excludes retired Gemini and project-scoped Antigravity writers before validation", async () => {
+    const db = getDatabase();
+    const canonical = createConfig({
+      name: "Claude Canonical",
+      category: "rules",
+      agent: "claude",
+      content: "# Canonical\n",
+      target_path: join(tmpDir, ".claude", "CLAUDE.md"),
+      outputs: [{
+        agent: "antigravity",
+        target_path: join(tmpDir, ".gemini", "GEMINI.md"),
+        transform: "codex-flat",
+      }],
+    }, db);
+    const retired = {
+      ...createConfig({
+        name: "Gemini Legacy",
+        category: "rules",
+        agent: "claude",
+        content: "# Legacy\n",
+        target_path: join(tmpDir, ".gemini", "GEMINI.md"),
+      }, db),
+      agent: "gemini" as Config["agent"],
+    };
+
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const preview = await previewConfigs([canonical, retired], {
+      store: new LocalConfigStore(db),
+    });
+
+    expect(preview.failures).toEqual([]);
+    expect(preview.skipped.some((item) =>
+      item.config_slug === canonical.slug
+      && item.owner === "instructions-session-renderer"
+      && item.reason.includes("Antigravity")
+    )).toBe(true);
+    expect(preview.skipped.some((item) =>
+      item.config_slug === retired.slug
+      && item.owner === "retired-provider-config"
+    )).toBe(true);
   });
 });

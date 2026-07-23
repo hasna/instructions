@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -286,6 +286,77 @@ describe("session render planner", () => {
       ".hasna/instructions/02-agent-marcus.md",
     ]);
     expect(plan.files.filter((file) => file.role === "fragment")).toHaveLength(2);
+    expect(plan.targetOwner.writer).toMatchObject({
+      id: "instructions-session-renderer",
+      canonical: true,
+    });
+  });
+
+  test("preserves OpenCode settings and unmanaged instruction entries", () => {
+    const targetHome = join(tmpRoot, "opencode-preserve");
+    mkdirSync(targetHome, { recursive: true });
+    writeFileSync(join(targetHome, "opencode.json"), JSON.stringify({
+      $schema: "https://opencode.ai/config.json",
+      model: "openai/example",
+      mcp: {
+        files: {
+          type: "local",
+          command: ["bunx", "@hasna/files", "mcp"],
+        },
+      },
+      instructions: [
+        "team-rules.md",
+        ".hasna/instructions/99-old-managed.md",
+      ],
+    }, null, 2));
+
+    const plan = planSessionRender({
+      tool: "opencode",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity],
+    });
+    const config = JSON.parse(plan.files.find((file) => file.relativePath === "opencode.json")!.content) as {
+      model: string;
+      mcp: Record<string, unknown>;
+      instructions: string[];
+    };
+
+    expect(config.model).toBe("openai/example");
+    expect(config.mcp).toHaveProperty("files");
+    expect(config.instructions).toEqual([
+      "team-rules.md",
+      ".hasna/instructions/01-global-codewith.md",
+    ]);
+  });
+
+  test("uses a profile OpenCode config as the base when the target is absent", () => {
+    const plan = planSessionRender({
+      tool: "opencode",
+      profile: "account999",
+      targetHome: join(tmpRoot, "opencode-profile-base"),
+      providerConfig: {
+        sourceId: "opencode-config",
+        content: JSON.stringify({
+          model: "openai/profile-model",
+          mcp: { skills: { type: "remote", url: "https://skills.example.test/mcp" } },
+        }),
+      },
+      sources: [globalIdentity],
+    });
+    const config = JSON.parse(plan.files.find((file) => file.relativePath === "opencode.json")!.content) as {
+      model: string;
+      mcp: Record<string, unknown>;
+      instructions: string[];
+    };
+
+    expect(config.model).toBe("openai/profile-model");
+    expect(config.mcp).toHaveProperty("skills");
+    expect(config.instructions).toEqual([".hasna/instructions/01-global-codewith.md"]);
+    expect(plan.manifest.providerConfig).toMatchObject({
+      sourceId: "opencode-config",
+      selected: true,
+    });
   });
 
   test("plans Qwen as a QWEN.md instructional context file", () => {
