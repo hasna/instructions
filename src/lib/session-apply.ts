@@ -108,8 +108,21 @@ export interface SessionRestoreResult {
   files: SessionRestoreFileResult[];
 }
 
-interface SessionRenderSnapshotV1 {
-  schema: "hasna.configs.session-render-snapshot/v1";
+type SessionSnapshotAction = "create" | "update" | "delete" | "unchanged";
+type SessionSnapshotSchema =
+  | "hasna.configs.session-render-snapshot/v1"
+  | "hasna.configs.session-render-snapshot/v2";
+
+interface SessionRenderSnapshotAfterFileV1 {
+  path: string;
+  relativePath: string;
+  role: SessionRenderFileRole;
+  action: SessionSnapshotAction;
+  sha256: string | null;
+}
+
+interface SessionRenderSnapshot {
+  schema: SessionSnapshotSchema;
   createdAt: string;
   tool: SessionRenderPlan["tool"];
   profile: string;
@@ -124,12 +137,12 @@ interface SessionRenderSnapshotV1 {
     sha256: string;
     content: string;
   }>;
-  afterFiles: Array<{
-    path: string;
-    relativePath: string;
-    role: SessionRenderFileRole;
-    action: "create" | "update" | "delete" | "unchanged";
-    sha256: string | null;
+  afterFiles: SessionRenderSnapshotAfterFileV1[];
+}
+
+interface StoredSessionRenderSnapshot extends Omit<SessionRenderSnapshot, "afterFiles"> {
+  afterFiles: Array<Omit<SessionRenderSnapshotAfterFileV1, "action"> & {
+    action?: SessionSnapshotAction;
   }>;
 }
 
@@ -350,7 +363,7 @@ export function restoreSessionRenderSnapshot(
 }
 
 function restoreSessionRenderSnapshotUnlocked(
-  snapshot: SessionRenderSnapshotV1,
+  snapshot: SessionRenderSnapshot,
   snapshotPath: string,
   targetHome: string,
   options: SessionRestoreOptions,
@@ -467,7 +480,7 @@ function requiredRestoreHash(file: SessionRestoreFileResult): string {
   return file.previousSha256;
 }
 
-function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshotV1 {
+function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshot {
   const resolved = resolve(snapshotPath);
   if (!existsSync(resolved)) throw new SessionApplyError(`Session snapshot not found: ${snapshotPath}`);
   const stat = lstatSync(resolved);
@@ -486,8 +499,11 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshotV
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new SessionApplyError(`Session snapshot must contain an object: ${snapshotPath}`);
   }
-  const snapshot = parsed as Partial<SessionRenderSnapshotV1>;
-  if (snapshot.schema !== "hasna.configs.session-render-snapshot/v1") {
+  const snapshot = parsed as Partial<StoredSessionRenderSnapshot>;
+  if (
+    snapshot.schema !== "hasna.configs.session-render-snapshot/v1"
+    && snapshot.schema !== "hasna.configs.session-render-snapshot/v2"
+  ) {
     throw new SessionApplyError(`Unsupported session snapshot schema: ${String(snapshot.schema)}`);
   }
   if (
@@ -495,6 +511,15 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshotV
     || typeof snapshot.manifestPath !== "string"
     || !Array.isArray(snapshot.files)
     || !Array.isArray(snapshot.afterFiles)
+    || (
+      snapshot.previousManifest !== null
+      && (
+        !snapshot.previousManifest
+        || typeof snapshot.previousManifest !== "object"
+        || snapshot.previousManifest.schema !== SESSION_RENDER_SCHEMA
+        || !Array.isArray(snapshot.previousManifest.files)
+      )
+    )
     || typeof snapshot.tool !== "string"
     || typeof snapshot.profile !== "string"
     || (snapshot.targetKind !== "session-home" && snapshot.targetKind !== "project-root")
@@ -502,6 +527,7 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshotV
     throw new SessionApplyError(`Session snapshot is incomplete: ${snapshotPath}`);
   }
   const targetHome = assertSafeTargetHome(snapshot.targetHome);
+  const previousFiles = new Map<string, SessionRenderSnapshot["files"][number]>();
   for (const file of snapshot.files) {
     if (
       !file
@@ -514,20 +540,125 @@ function readSessionRenderSnapshot(snapshotPath: string): SessionRenderSnapshotV
       throw new SessionApplyError(`Session snapshot previous file metadata is invalid: ${snapshotPath}`);
     }
     resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
+    if (previousFiles.has(file.relativePath)) {
+      throw new SessionApplyError(`Session snapshot has duplicate previous file metadata: ${file.relativePath}`);
+    }
+    previousFiles.set(file.relativePath, file);
   }
+  const previousManifestFiles = indexPreviousManifestFiles(snapshot.previousManifest, targetHome, snapshotPath);
+  const afterRelativePaths = new Set<string>();
+  const afterFiles: SessionRenderSnapshot["afterFiles"] = [];
   for (const file of snapshot.afterFiles) {
     if (
       !file
       || typeof file.relativePath !== "string"
       || typeof file.path !== "string"
-      || (file.action !== "create" && file.action !== "update" && file.action !== "delete" && file.action !== "unchanged")
+      || (
+        (
+          snapshot.schema === "hasna.configs.session-render-snapshot/v2"
+          && file.action === undefined
+        )
+        || (
+          file.action !== undefined
+          && file.action !== "create"
+          && file.action !== "update"
+          && file.action !== "delete"
+          && file.action !== "unchanged"
+        )
+      )
       || (typeof file.sha256 !== "string" && file.sha256 !== null)
     ) {
       throw new SessionApplyError(`Session snapshot applied file metadata is invalid: ${snapshotPath}`);
     }
     resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
+    if (afterRelativePaths.has(file.relativePath)) {
+      throw new SessionApplyError(`Session snapshot has duplicate applied file metadata: ${file.relativePath}`);
+    }
+    afterRelativePaths.add(file.relativePath);
+    afterFiles.push({
+      ...file,
+      action: file.action ?? inferLegacySnapshotAction(
+        file,
+        previousFiles,
+        previousManifestFiles,
+        snapshot.previousManifest,
+      ),
+    });
   }
-  return snapshot as SessionRenderSnapshotV1;
+  return {
+    ...snapshot,
+    afterFiles,
+  } as SessionRenderSnapshot;
+}
+
+function indexPreviousManifestFiles(
+  previousManifest: SessionRenderManifest | null | undefined,
+  targetHome: string,
+  snapshotPath: string,
+): Map<string, SessionRenderManifest["files"][number]> {
+  const files = new Map<string, SessionRenderManifest["files"][number]>();
+  if (!previousManifest) return files;
+  for (const file of previousManifest.files) {
+    if (
+      !file
+      || typeof file.relativePath !== "string"
+      || typeof file.path !== "string"
+      || typeof file.sha256 !== "string"
+    ) {
+      throw new SessionApplyError(`Session snapshot previous manifest metadata is invalid: ${snapshotPath}`);
+    }
+    resolveSnapshotFilePath(file.relativePath, file.path, targetHome);
+    if (files.has(file.relativePath)) {
+      throw new SessionApplyError(`Session snapshot previous manifest has duplicate file metadata: ${file.relativePath}`);
+    }
+    files.set(file.relativePath, file);
+  }
+  return files;
+}
+
+function inferLegacySnapshotAction(
+  file: StoredSessionRenderSnapshot["afterFiles"][number],
+  previousFiles: Map<string, SessionRenderSnapshot["files"][number]>,
+  previousManifestFiles: Map<string, SessionRenderManifest["files"][number]>,
+  previousManifest: SessionRenderManifest | null | undefined,
+): SessionSnapshotAction {
+  const previousFile = previousFiles.get(file.relativePath);
+  const previousManifestFile = previousManifestFiles.get(file.relativePath);
+  if (file.sha256 === null) {
+    if (
+      !previousFile
+      || !previousManifestFile
+      || previousManifestFile.sha256 !== previousFile.sha256
+      || previousManifestFile.path !== previousFile.path
+      || previousManifestFile.role !== previousFile.role
+    ) {
+      throw new SessionApplyError(`Cannot infer legacy v1 delete from incomplete previous metadata: ${file.relativePath}`);
+    }
+    return "delete";
+  }
+  if (previousFile) {
+    if (previousFile.path !== file.path || previousFile.role !== file.role) {
+      throw new SessionApplyError(`Cannot infer legacy v1 update from conflicting before-image metadata: ${file.relativePath}`);
+    }
+    return "update";
+  }
+  if (previousManifestFile) {
+    if (previousManifestFile.path !== file.path || previousManifestFile.role !== file.role) {
+      throw new SessionApplyError(`Cannot infer legacy v1 action from conflicting previous manifest metadata: ${file.relativePath}`);
+    }
+    if (previousManifestFile.sha256 === file.sha256) {
+      throw new SessionApplyError(`Cannot infer legacy v1 unchanged versus recreated file: ${file.relativePath}`);
+    }
+    return "create";
+  }
+  if (file.role === "manifest" && previousManifest) {
+    const previousManifestSha256 = sha256(`${JSON.stringify(previousManifest, null, 2)}\n`);
+    if (previousManifestSha256 !== file.sha256) {
+      throw new SessionApplyError(`Cannot infer legacy v1 manifest action without a before-image: ${file.relativePath}`);
+    }
+    return "unchanged";
+  }
+  return "create";
 }
 
 function resolveSnapshotFilePath(relativePath: string, recordedPath: string, targetHome: string): string {
@@ -822,7 +953,7 @@ function writeSessionSnapshot(
     "session-render-snapshots",
     `${timestamp}-${randomUUID()}.json`,
   );
-  const afterFiles: SessionRenderSnapshotV1["afterFiles"] = results.map((result) => {
+  const afterFiles: SessionRenderSnapshot["afterFiles"] = results.map((result) => {
     if (result.action === "conflict") {
       throw new SessionApplyError(`Cannot snapshot unresolved conflict: ${result.relativePath}`);
     }
@@ -834,8 +965,8 @@ function writeSessionSnapshot(
       sha256: result.action === "delete" ? null : result.newSha256,
     };
   });
-  const snapshot: SessionRenderSnapshotV1 = {
-    schema: "hasna.configs.session-render-snapshot/v1",
+  const snapshot: SessionRenderSnapshot = {
+    schema: "hasna.configs.session-render-snapshot/v2",
     createdAt: new Date().toISOString(),
     tool: plan.tool,
     profile: plan.profile,

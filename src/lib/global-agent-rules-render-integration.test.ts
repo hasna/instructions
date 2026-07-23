@@ -355,7 +355,7 @@ describe("agent operating rules managed render integration", () => {
       previousManifest: { sources: Array<{ id: string }> };
       files: Array<{ relativePath: string; content: string }>;
     };
-    expect(snapshot.schema).toBe("hasna.configs.session-render-snapshot/v1");
+    expect(snapshot.schema).toBe("hasna.configs.session-render-snapshot/v2");
     expect(snapshot.previousManifest.sources.map((source) => source.id)).toEqual([
       "global-agent-rules-standard",
     ]);
