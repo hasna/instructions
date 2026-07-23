@@ -141,7 +141,7 @@ describe("diffConfig", () => {
 });
 
 describe("syncToDisk", () => {
-  test("skips stale retired Gemini rows and still applies active Antigravity rows", async () => {
+  test("skips stale retired Gemini and session-owned Antigravity rows", async () => {
     const db = getDatabase();
     const store = new LocalConfigStore(db);
     process.env["CONFIGS_HOME"] = tmpDir;
@@ -171,8 +171,9 @@ describe("syncToDisk", () => {
     }, db);
 
     const result = await syncToDisk({ store });
-    expect(result.updated).toBe(1);
-    expect(result.skipped.length).toBe(1);
-    expect(readFileSync(antigravityTarget, "utf-8")).toBe("active antigravity content");
+    expect(result.updated).toBe(0);
+    expect(result.skipped.length).toBe(2);
+    expect(result.skipped.some((entry) => entry.includes("instructions-session-renderer"))).toBe(true);
+    expect(existsSync(antigravityTarget)).toBe(false);
   });
 });

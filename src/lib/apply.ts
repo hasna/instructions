@@ -9,7 +9,7 @@ import { isRetiredOrUnsupportedConfigAgent } from "./config-agents.js";
 import { renderMachineAwareContent, renderMachineAwareContentPreview } from "./machine.js";
 import {
   ANTIGRAVITY_RULE_FILE_CHAR_LIMIT,
-  SESSION_RENDER_PROFILE_ENTRYPOINTS,
+  SESSION_RENDER_OWNED_CONFIG_TARGETS,
   SESSION_RENDERER_OWNER_ID,
 } from "./session-render.js";
 import { applyTransform } from "./transforms.js";
@@ -99,6 +99,11 @@ async function writeConfigResult(
   const renderedTargetPath = renderedTarget.content;
   const renderedContent = rendered.content;
   const targetAgent = meta.agent ?? config.agent;
+  if (sessionRendererOwnsTarget(renderedTargetPath, opts)) {
+    throw new ConfigApplyError(
+      `Config "${config.name}" targets ${normalizeTargetPath(renderedTargetPath)}, which is owned by ${SESSION_RENDERER_OWNER_ID}; use the Instructions session renderer.`
+    );
+  }
   if (isAntigravityRuleTarget(targetAgent, renderedTargetPath) && renderedContent.length > ANTIGRAVITY_RULE_FILE_CHAR_LIMIT) {
     throw new ConfigApplyError(
       `Antigravity rule file ${renderedTargetPath} is ${renderedContent.length} characters; split it before applying because Antigravity limits rule files to ${ANTIGRAVITY_RULE_FILE_CHAR_LIMIT} characters.`
@@ -168,6 +173,11 @@ export async function applyConfig(
   config: Config,
   opts: ApplyOptions = {}
 ): Promise<ApplyResult> {
+  if (config.kind === "reference") {
+    throw new ConfigApplyError(
+      `Config "${config.name}" is a reference (kind=reference) and has no target_path — cannot apply to disk.`
+    );
+  }
   if (opts.outputAgent && isRetiredOrUnsupportedConfigAgent(opts.outputAgent)) {
     throw new ConfigApplyError(`Config output agent "${opts.outputAgent}" is retired or unsupported — cannot apply to disk.`);
   }
@@ -175,6 +185,25 @@ export async function applyConfig(
     throw new ConfigApplyError(`Config "${config.name}" uses retired or unsupported agent "${config.agent}" — cannot apply to disk.`);
   }
 
+  const report = await applyConfigsWithReport([config], opts);
+  if (report.failures.length > 0) {
+    throw new ConfigApplyError(report.failures.map((failure) => failure.message).join("; "));
+  }
+  const result = report.results[0];
+  if (result) return result;
+  const owned = report.skipped.find((entry) => entry.owner === SESSION_RENDERER_OWNER_ID);
+  if (owned) {
+    throw new ConfigApplyError(
+      `Config "${config.name}" targets ${owned.path}, which is owned by ${SESSION_RENDERER_OWNER_ID}; use the Instructions session renderer.`
+    );
+  }
+  throw new ConfigApplyError(`Config "${config.name}" has no writable targets after apply ownership checks.`);
+}
+
+async function applyPreparedConfig(
+  config: Config,
+  opts: ApplyOptions,
+): Promise<ApplyResult> {
   const selectedOutputs = opts.outputAgent
     ? config.outputs.filter((output) => output.agent === opts.outputAgent)
     : config.outputs.filter((output) => !isRetiredOrUnsupportedConfigAgent(output.agent));
@@ -241,30 +270,24 @@ export async function applyConfigs(
   configs: Config[],
   opts: ApplyOptions = {}
 ): Promise<ApplyResult[]> {
-  const prepared = prepareConfigBatch(configs);
-  if (prepared.failures.length > 0) {
-    throw new ConfigApplyError(prepared.failures.map((failure) => failure.message).join("; "));
+  const report = await applyConfigsWithReport(configs, opts);
+  if (report.failures.length > 0) {
+    throw new ConfigApplyError(report.failures.map((failure) => failure.message).join("; "));
   }
-  const results: ApplyResult[] = [];
-  for (const config of prepared.configs) {
-    if (config.kind === "reference") continue;
-    if (isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
-    results.push(await applyConfig(config, opts));
-  }
-  return results;
+  return report.results;
 }
 
-export async function previewConfigs(
+export async function applyConfigsWithReport(
   configs: Config[],
-  opts: Omit<ApplyOptions, "dryRun"> = {},
+  opts: ApplyOptions = {},
 ): Promise<ConfigApplyPreview> {
-  const prepared = prepareConfigBatch(configs);
+  const prepared = prepareConfigBatch(configs, opts);
   const results: ApplyResult[] = [];
   const failures = [...prepared.failures];
   for (const config of prepared.configs) {
     if (config.kind === "reference" || isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
     try {
-      results.push(await applyConfig(config, { ...opts, dryRun: true }));
+      results.push(await applyPreparedConfig(config, opts));
     } catch (error) {
       failures.push({
         config_id: config.id,
@@ -280,9 +303,25 @@ export async function previewConfigs(
   };
 }
 
-function prepareConfigBatch(configs: Config[]): PreparedConfigBatch {
+export async function previewConfigs(
+  configs: Config[],
+  opts: Omit<ApplyOptions, "dryRun"> = {},
+): Promise<ConfigApplyPreview> {
+  return applyConfigsWithReport(configs, { ...opts, dryRun: true });
+}
+
+function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConfigBatch {
   const skipped: ConfigApplySkippedTarget[] = [];
-  const activeConfigs = configs.filter((config) => {
+  const outputAgent = opts.outputAgent;
+  const selectedConfigs = configs.map((config) => outputAgent
+    ? {
+      ...config,
+      target_path: config.agent === outputAgent ? config.target_path : null,
+      outputs: config.outputs.filter((output) => output.agent === outputAgent),
+    }
+    : config
+  );
+  const activeConfigs = selectedConfigs.filter((config) => {
     if (!isRetiredOrUnsupportedConfigAgent(config.agent)) return true;
     for (const target of configTargets(config)) {
       skipped.push({
@@ -301,11 +340,11 @@ function prepareConfigBatch(configs: Config[]): PreparedConfigBatch {
       skipped.push({
         config_id: duplicate.id,
         config_slug: duplicate.slug,
-        path: target.path,
-        owner: sessionRendererOwnsTarget(target.path)
+        path: normalizeApplyTargetPath(target.path, opts),
+        owner: sessionRendererOwnsTarget(target.path, opts)
           ? SESSION_RENDERER_OWNER_ID
           : "equivalent-profile-config",
-        reason: sessionRendererOwnsTarget(target.path)
+        reason: sessionRendererOwnsTarget(target.path, opts)
           ? "provider instruction entrypoint is owned by the Instructions session renderer"
           : "equivalent profile config is superseded by the newer identical source",
       });
@@ -313,15 +352,15 @@ function prepareConfigBatch(configs: Config[]): PreparedConfigBatch {
   }
 
   const prepared = deduplicated.flatMap((config) => {
-    const primaryOwned = config.target_path ? sessionRendererOwnsTarget(config.target_path) : false;
+    const primaryOwned = config.target_path ? sessionRendererOwnsTarget(config.target_path, opts) : false;
     const outputs = config.outputs.filter((output) => {
       const retiredOutput = isRetiredOrUnsupportedConfigAgent(output.agent);
-      const sessionOwned = sessionRendererOwnsTarget(output.target_path) || output.agent === "antigravity";
+      const sessionOwned = sessionRendererOwnsTarget(output.target_path, opts);
       if (!retiredOutput && !sessionOwned) return true;
       skipped.push({
         config_id: config.id,
         config_slug: config.slug,
-        path: normalizeTargetPath(output.target_path),
+        path: normalizeApplyTargetPath(output.target_path, opts),
         owner: retiredOutput ? "retired-provider-config" : SESSION_RENDERER_OWNER_ID,
         reason: retiredOutput
           ? `retired or unsupported provider output "${output.agent}" is excluded from profile apply`
@@ -335,7 +374,7 @@ function prepareConfigBatch(configs: Config[]): PreparedConfigBatch {
       skipped.push({
         config_id: config.id,
         config_slug: config.slug,
-        path: normalizeTargetPath(config.target_path),
+        path: normalizeApplyTargetPath(config.target_path, opts),
         owner: SESSION_RENDERER_OWNER_ID,
         reason: "provider instruction entrypoint is owned by the Instructions session renderer",
       });
@@ -417,9 +456,23 @@ function duplicateTargetFailures(configs: Config[]): ConfigApplyPreviewFailure[]
     }));
 }
 
-function sessionRendererOwnsTarget(targetPath: string): boolean {
-  const normalized = normalizeTargetPath(targetPath);
-  return SESSION_RENDER_PROFILE_ENTRYPOINTS.some((relativePath) =>
-    normalized === normalizeTargetPath(join(getConfigHome(), ...relativePath.split("/")))
-  );
+function normalizeApplyTargetPath(targetPath: string, opts: ApplyOptions): string {
+  const renderedTargetPath = opts.vars
+    ? renderMachineAwareContentPreview(targetPath, opts.vars).content
+    : targetPath;
+  return normalizeTargetPath(renderedTargetPath);
+}
+
+function sessionRendererOwnsTarget(targetPath: string, opts: ApplyOptions): boolean {
+  const normalized = normalizeApplyTargetPath(targetPath, opts);
+  const homes = new Set([
+    getConfigHome(),
+    opts.vars?.["HOME_DIR"],
+  ].filter((home): home is string => typeof home === "string" && home.length > 0));
+  if ([...homes].some((home) =>
+    SESSION_RENDER_OWNED_CONFIG_TARGETS.some((relativePath) =>
+      normalized === normalizeTargetPath(join(home, ...relativePath.split("/")))
+    )
+  )) return true;
+  return normalized.replaceAll("\\", "/").includes("/.agents/rules/");
 }
