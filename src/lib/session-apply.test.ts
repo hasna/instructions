@@ -23,6 +23,22 @@ const agentIdentity: SessionInstructionSource = {
   content: "Prefer repository-local evidence and focused tests.",
 };
 
+const obsoleteIdentity: SessionInstructionSource = {
+  id: "obsolete-policy",
+  label: "Obsolete Policy",
+  layer: "agent",
+  order: 20,
+  content: "This managed policy will be removed.",
+};
+
+const replacementIdentity: SessionInstructionSource = {
+  id: "replacement-policy",
+  label: "Replacement Policy",
+  layer: "agent",
+  order: 20,
+  content: "This managed policy replaces the obsolete policy.",
+};
+
 beforeEach(() => {
   tmpRoot = join(tmpdir(), `open-configs-session-apply-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   mkdirSync(tmpRoot, { recursive: true });
@@ -34,6 +50,19 @@ afterEach(() => {
 
 function targetFor(name: string): string {
   return join(tmpRoot, name);
+}
+
+function materializeLegacyV1SnapshotFixture(snapshotPath: string): void {
+  const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as {
+    schema: string;
+    afterFiles: Array<Record<string, unknown>>;
+  };
+  if (snapshot.schema !== "hasna.configs.session-render-snapshot/v2") {
+    throw new Error(`Unexpected snapshot schema: ${snapshot.schema}`);
+  }
+  snapshot.schema = "hasna.configs.session-render-snapshot/v1";
+  for (const file of snapshot.afterFiles) delete file["action"];
+  writeFileSync(snapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`);
 }
 
 describe("session apply writer", () => {
@@ -279,6 +308,149 @@ describe("session apply writer", () => {
     expect(restored.conflicts.map((conflict) => conflict.relativePath)).toContain(".hasna/instructions/02-agent-marcus.md");
     expect(readFileSync(join(targetHome, ".hasna", "instructions", "01-global-codewith.md"), "utf8")).toContain("Updated managed content.");
     expect(readFileSync(unchangedFragmentPath, "utf8")).toBe("drifted unchanged fragment\n");
+  });
+
+  test("restores a pre-action legacy v1 snapshot while preserving unrelated unchanged files", () => {
+    const targetHome = targetFor("claude-restore-legacy-v1");
+    applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity, agentIdentity, obsoleteIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    }));
+    const updatedFragmentPath = join(targetHome, ".hasna", "instructions", "01-global-codewith.md");
+    const recreatedFragmentPath = join(targetHome, ".hasna", "instructions", "02-agent-marcus.md");
+    const deletedFragmentPath = join(targetHome, ".hasna", "instructions", "03-obsolete-policy.md");
+    const createdFragmentPath = join(targetHome, ".hasna", "instructions", "03-replacement-policy.md");
+    const unchangedFilePath = join(targetHome, "human-notes.md");
+    const previousUpdatedFragment = readFileSync(updatedFragmentPath, "utf8");
+    const deletedFragment = readFileSync(deletedFragmentPath, "utf8");
+    rmSync(recreatedFragmentPath);
+    writeFileSync(unchangedFilePath, "human-owned unchanged notes\n");
+
+    const applied = applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [
+        { ...globalIdentity, content: "Updated managed content." },
+        { ...agentIdentity, content: "Recreated with different managed content." },
+        replacementIdentity,
+      ],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    }));
+    materializeLegacyV1SnapshotFixture(applied.snapshotPath!);
+
+    const restored = restoreSessionRenderSnapshot(applied.snapshotPath!);
+
+    expect(restored.restored).toBe(true);
+    expect(restored.files.find((file) => file.relativePath === ".hasna/instructions/02-agent-marcus.md")?.action).toBe("delete");
+    expect(readFileSync(updatedFragmentPath, "utf8")).toBe(previousUpdatedFragment);
+    expect(existsSync(recreatedFragmentPath)).toBe(false);
+    expect(readFileSync(deletedFragmentPath, "utf8")).toBe(deletedFragment);
+    expect(existsSync(createdFragmentPath)).toBe(false);
+    expect(readFileSync(unchangedFilePath, "utf8")).toBe("human-owned unchanged notes\n");
+  });
+
+  test("keeps legacy v1 snapshot restore all-or-nothing when an applied file drifted", () => {
+    const targetHome = targetFor("claude-restore-legacy-v1-drift");
+    applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity, agentIdentity, obsoleteIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    }));
+    const recreatedFragmentPath = join(targetHome, ".hasna", "instructions", "02-agent-marcus.md");
+    rmSync(recreatedFragmentPath);
+
+    const applied = applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [
+        { ...globalIdentity, content: "Updated managed content." },
+        { ...agentIdentity, content: "Recreated with different managed content." },
+        replacementIdentity,
+      ],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    }));
+    materializeLegacyV1SnapshotFixture(applied.snapshotPath!);
+    const updatedFragmentPath = join(targetHome, ".hasna", "instructions", "01-global-codewith.md");
+    const deletedFragmentPath = join(targetHome, ".hasna", "instructions", "03-obsolete-policy.md");
+    const createdFragmentPath = join(targetHome, ".hasna", "instructions", "03-replacement-policy.md");
+    const recreatedFragment = readFileSync(recreatedFragmentPath, "utf8");
+    const createdFragment = readFileSync(createdFragmentPath, "utf8");
+    writeFileSync(updatedFragmentPath, "post-apply drift\n");
+
+    const restored = restoreSessionRenderSnapshot(applied.snapshotPath!);
+
+    expect(restored.restored).toBe(false);
+    expect(restored.conflicts.map((conflict) => conflict.relativePath)).toContain(".hasna/instructions/01-global-codewith.md");
+    expect(readFileSync(updatedFragmentPath, "utf8")).toBe("post-apply drift\n");
+    expect(readFileSync(recreatedFragmentPath, "utf8")).toBe(recreatedFragment);
+    expect(existsSync(deletedFragmentPath)).toBe(false);
+    expect(readFileSync(createdFragmentPath, "utf8")).toBe(createdFragment);
+  });
+
+  test("fails closed when legacy v1 cannot distinguish unchanged from same-byte recreation", () => {
+    const targetHome = targetFor("claude-restore-legacy-v1-ambiguous");
+    applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity, agentIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    }));
+    const recreatedFragmentPath = join(targetHome, ".hasna", "instructions", "02-agent-marcus.md");
+    rmSync(recreatedFragmentPath);
+    const applied = applySessionRender(planSessionRender({
+      tool: "claude",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Updated managed content." }, agentIdentity],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    }));
+    materializeLegacyV1SnapshotFixture(applied.snapshotPath!);
+    const updatedFragmentPath = join(targetHome, ".hasna", "instructions", "01-global-codewith.md");
+    const updatedFragment = readFileSync(updatedFragmentPath, "utf8");
+    const recreatedFragment = readFileSync(recreatedFragmentPath, "utf8");
+
+    expect(() => restoreSessionRenderSnapshot(applied.snapshotPath!)).toThrow(
+      "Cannot infer legacy v1 unchanged versus recreated file",
+    );
+    expect(readFileSync(updatedFragmentPath, "utf8")).toBe(updatedFragment);
+    expect(readFileSync(recreatedFragmentPath, "utf8")).toBe(recreatedFragment);
+  });
+
+  test("requires explicit restore actions in v2 snapshots", () => {
+    const targetHome = targetFor("codex-restore-v2-action");
+    applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    }));
+    const applied = applySessionRender(planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: "Updated managed content." }],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    }));
+    const snapshot = JSON.parse(readFileSync(applied.snapshotPath!, "utf8")) as {
+      schema: string;
+      afterFiles: Array<Record<string, unknown>>;
+    };
+    expect(snapshot.schema).toBe("hasna.configs.session-render-snapshot/v2");
+    delete snapshot.afterFiles[0]!["action"];
+    writeFileSync(applied.snapshotPath!, `${JSON.stringify(snapshot, null, 2)}\n`);
+
+    expect(() => restoreSessionRenderSnapshot(applied.snapshotPath!)).toThrow(
+      "Session snapshot applied file metadata is invalid",
+    );
   });
 
   test("refuses snapshot restore after post-apply drift", () => {
