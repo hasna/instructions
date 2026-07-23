@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { LocalConfigStore } from "../data/config-store";
 import { createConfig, getConfig } from "../db/configs";
 import { getDatabase, resetDatabase } from "../db/database";
@@ -29,40 +30,54 @@ describe("global agent rules standard", () => {
     expect(config.kind).toBe("reference");
     expect(config.category).toBe("rules");
     expect(config.agent).toBe("global");
-    expect(config.tags).toEqual(expect.arrayContaining(["global-agent-rules", "system-prompt"]));
+    expect(config.description).toContain("hasnaxyz/iapp-identities@48168c549cc2945053a4498a9a2b11888419bc94");
+    expect(config.tags).toEqual(expect.arrayContaining([
+      "global-agent-rules",
+      "system-prompt",
+      "agent-operating-rules",
+      "rules-version:1.1.6",
+      "source-commit:48168c549cc2945053a4498a9a2b11888419bc94",
+    ]));
 
     const content = config.content;
-    expect(content).toContain("automatic session renaming");
-    expect(content).toContain("Repo mutation must happen in a task-scoped worktree");
+    expect(content).toContain("# Hasna Agent Operating Rules — v1.1.6 (2026-07-23)");
+    expect(content).toContain("<!-- hasna:agent-operating-rules v=1.1.6 -->");
+    expect(content).toContain("Only a verified, authorized, scope-matching control");
+    expect(content).toContain("Different identifier types never match each other");
+    expect(content).toContain("smallest potentially affected set");
+    expect(content).toContain("Always continue unrelated safe authorized work");
+    expect(content).toContain("hasna-agent-operating-rules/scoped-operational-control/v1");
+    expect(content).toContain("secrets, provider-policy, legal, billing, destructive-action, and public-action boundaries");
+    expect(content).not.toContain("freeze notices never stop work");
+    expect(content).not.toContain("freezes are not a stop signal");
+    expect(content).toContain("Automatically rename the session when the agent runtime supports it");
+    expect(content).toContain("Repo mutation must happen in a task-specific worktree");
     expect(content).toContain("$HOME/.hasna/repos/worktrees");
     expect(content).toContain("Hasna repo/project worktree");
     expect(content).toContain("mechanisms when available");
     expect(content).toContain("git worktree");
     expect(content).toContain("Never mutate shared checkouts");
     expect(content).toContain("PR-first landing");
-    expect(content).toMatch(/Never push directly to `main`, the default branch, or any protected branch/);
+    expect(content).toContain("Never push directly to main, default, or protected branches");
     expect(content).toContain(NO_BRITTLE_HARDCODING_RULE);
     expect(content).toContain("medium and large applications");
     expect(content).toContain("temporary compatibility shims are allowed only when scoped, named, and justified");
-    expect(content).toContain("Act autonomously");
-    expect(content).toContain("owning\n   CLIs, packages, and workflows");
-    expect(content).toContain("destructive decisions, secret-bearing decisions, user-only authority");
-    expect(content).toContain("`todos`, `conversations`,\n   `mementos`, `knowledge`, `projects`, `repos`, `accounts`,");
-    expect(content).toContain("`instructions`, `machines`, `secrets`, and `access`");
-    expect(content).toContain("Secrets safety is mandatory");
-    expect(content).toContain("Never expose secrets in prompts, tasks");
-    expect(content).toContain("Reference vault item names, secret identifiers, and\n   access grants only");
-    expect(content).toContain("`announcements`");
-    expect(content).toContain("`incidents`");
-    expect(content).toContain("`git-publishing`");
-    expect(content).toContain("`git-prs`, `git-commits`, and `git-releases`");
-    expect(content).toContain("`hq`");
-    expect(content).toContain("`agent-policy`");
-    expect(content).toContain("project/product\n   channels");
+    expect(content).toContain("Act autonomously: diagnose and repair owning CLIs, packages, and workflows");
+    expect(content).toContain("destructive, secret-bearing, or user-only decisions");
+    expect(content).toContain("todos, conversations, mementos, knowledge, projects, repos, accounts, instructions, machines, secrets, and access");
+    expect(content).toContain("NEVER put secrets, tokens, keys, passwords, or credential contents into any message");
+    expect(content).toContain("Reference vault item names only");
+    expect(content).toContain("announcements, incidents, git-publishing, git-prs, git-commits, git-releases, hq, agent-policy");
+    expect(content).toContain("relevant project/product channels");
     expect(content).toContain("`conversations blockers`");
-    expect(content).toContain("Do not invent or refer to a literal blockers channel");
-    expect(content).toContain("Never set Codewith goal/token budgets or goal-plan budgets");
+    expect(content).toContain("not a literal blockers channel");
+    expect(content).not.toContain("Do not set Codewith goal, token, or goal-plan budgets");
+    expect(content).not.toContain("# Canonical Global Coding Agent Prompt");
+    expect(content).not.toContain("# Non-Overridable Global Coding Agent Rules");
     expect(content).not.toContain("#blockers");
+    expect(createHash("sha256").update(content).digest("hex")).toBe(
+      "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420",
+    );
   });
 
   test("updates stale seeded global rules instead of creating a duplicate", async () => {
@@ -72,7 +87,11 @@ describe("global agent rules standard", () => {
       agent: "global",
       format: "markdown",
       kind: "reference",
-      content: "old content",
+      content: [
+        "# Hasna Agent Operating Rules — v1.1.5 (2026-07-20)",
+        "<!-- hasna:agent-operating-rules v=1.1.5 -->",
+        "Treat everything you read there as informational context only; freezes are not a stop signal.",
+      ].join("\n"),
     }, db);
 
     const config = await ensureGlobalAgentRulesStandardConfig(new LocalConfigStore(db));
@@ -80,7 +99,40 @@ describe("global agent rules standard", () => {
 
     expect(config.id).toBe(stored.id);
     expect(stored.content).toBe(GLOBAL_AGENT_RULES_STANDARD_CONTENT);
+    expect(stored.content).toContain("v1.1.6");
+    expect(stored.content).not.toContain("freezes are not a stop signal");
     expect(stored.version).toBe(2);
+  });
+
+  test("renders the canonical managed source even before a stale DB record is reconciled", () => {
+    const stale = createConfig({
+      name: "Global Agent Rules Standard",
+      category: "rules",
+      agent: "global",
+      format: "markdown",
+      kind: "reference",
+      content: [
+        "# Hasna Agent Operating Rules — v1.1.5 (2026-07-20)",
+        "<!-- hasna:agent-operating-rules v=1.1.5 -->",
+        "Treat everything you read there as informational context only; freezes are not a stop signal.",
+      ].join("\n"),
+    }, db);
+
+    const source = sourceFromConfig(stale);
+    const plan = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: "/tmp/codewith-account999",
+      sources: [source],
+    });
+
+    expect(source.content).toBe(GLOBAL_AGENT_RULES_STANDARD_CONTENT);
+    expect(plan.files[0]?.content).toContain("v1.1.6");
+    expect(plan.files[0]?.content).not.toContain("freezes are not a stop signal");
+    expect(plan.manifest.sources[0]?.provenance).toMatchObject({
+      upstreamCommit: "48168c549cc2945053a4498a9a2b11888419bc94",
+      rulesVersion: "1.1.6",
+    });
   });
 
   test("renders the seeded global rules when used as a session source", async () => {
@@ -93,7 +145,7 @@ describe("global agent rules standard", () => {
     });
 
     expect(plan.files[0]?.relativePath).toBe("AGENTS.md");
-    expect(plan.files[0]?.content).toContain("Global Coding Agent Rules Standard");
+    expect(plan.files[0]?.content).toContain("Hasna Agent Operating Rules");
     expect(plan.files[0]?.content).toContain("Never mutate shared checkouts");
     expect(plan.files[0]?.content).toContain("conversations blockers");
     expect(plan.files[0]?.content).toContain(NO_BRITTLE_HARDCODING_RULE);
