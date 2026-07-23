@@ -89,6 +89,55 @@ describe("applyConfigs (batch)", () => {
     expect(readFileSync(independentTarget, "utf8")).toBe("independent before");
   });
 
+  test("aborts before all writes when rendered and literal targets collide", async () => {
+    const db = getDatabase();
+    const sharedTarget = join(tmpDir, "shared.txt");
+    const outputOwnerTarget = join(tmpDir, "output-owner.txt");
+    const independentTarget = join(tmpDir, "independent.txt");
+    writeFileSync(sharedTarget, "shared before");
+    writeFileSync(outputOwnerTarget, "output owner before");
+    writeFileSync(independentTarget, "independent before");
+    const templatedPrimary = createConfig({
+      name: "Templated Primary Writer",
+      category: "tools",
+      content: "templated primary",
+      target_path: "{{HOME_DIR}}/shared.txt",
+    }, db);
+    const literalOutput = createConfig({
+      name: "Literal Output Writer",
+      category: "tools",
+      agent: "claude",
+      content: "literal output",
+      target_path: outputOwnerTarget,
+      outputs: [{
+        agent: "codex",
+        target_path: sharedTarget,
+        transform: "codex-flat",
+      }],
+    }, db);
+    const independent = createConfig({
+      name: "Independent Writer",
+      category: "tools",
+      content: "independent after",
+      target_path: independentTarget,
+    }, db);
+
+    const report = await applyConfigsWithReport(
+      [templatedPrimary, literalOutput, independent],
+      {
+        vars: { HOME_DIR: tmpDir },
+        store: new LocalConfigStore(db),
+      },
+    );
+
+    expect(report.results).toEqual([]);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0]?.message).toContain(`Multiple profile writers target ${sharedTarget}`);
+    expect(readFileSync(sharedTarget, "utf8")).toBe("shared before");
+    expect(readFileSync(outputOwnerTarget, "utf8")).toBe("output owner before");
+    expect(readFileSync(independentTarget, "utf8")).toBe("independent before");
+  });
+
   test("handles empty array", async () => {
     const results = await applyConfigs([]);
     expect(results.length).toBe(0);

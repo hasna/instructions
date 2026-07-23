@@ -395,7 +395,7 @@ function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConf
     }];
   });
 
-  const failures = duplicateTargetFailures(prepared);
+  const failures = duplicateTargetFailures(prepared, opts);
   return { configs: prepared, skipped, failures };
 }
 
@@ -432,22 +432,31 @@ function deduplicateEquivalentProfileConfigs(configs: Config[]): {
   return { configs: kept, duplicates };
 }
 
-function configTargets(config: Config): Array<{ path: string; owner: string }> {
+function configTargets(
+  config: Config,
+  normalizePath: (path: string) => string = normalizeTargetPath,
+): Array<{ path: string; owner: string }> {
   return [
     ...(config.target_path
-      ? [{ path: normalizeTargetPath(config.target_path), owner: `${config.slug}:primary` }]
+      ? [{ path: normalizePath(config.target_path), owner: `${config.slug}:primary` }]
       : []),
     ...config.outputs.map((output) => ({
-      path: normalizeTargetPath(output.target_path),
+      path: normalizePath(output.target_path),
       owner: `${config.slug}:output:${output.agent}`,
     })),
   ];
 }
 
-function duplicateTargetFailures(configs: Config[]): ConfigApplyPreviewFailure[] {
+function duplicateTargetFailures(
+  configs: Config[],
+  opts: ApplyOptions,
+): ConfigApplyPreviewFailure[] {
   const targets = new Map<string, Array<{ config: Config; owner: string }>>();
   for (const config of configs) {
-    for (const target of configTargets(config)) {
+    for (const target of configTargets(
+      config,
+      (path) => normalizeApplyTargetPath(path, opts),
+    )) {
       targets.set(target.path, [
         ...(targets.get(target.path) ?? []),
         { config, owner: target.owner },
