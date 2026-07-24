@@ -3,6 +3,8 @@ import {
   CloudConfigStore,
   CloudHttpError,
   LocalConfigStore,
+  formatCliError,
+  isCloudAuthError,
   isCloudMode,
   resolveCloudConfig,
   resolveConfigStore,
@@ -173,5 +175,72 @@ describe("CloudConfigStore CRUD mapping", () => {
     const store = new CloudConfigStore(CONFIG);
     const configs = await store.getProfileConfigs("p");
     expect(configs).toHaveLength(1);
+  });
+});
+
+describe("revoked / invalid API key handling", () => {
+  const AUTH_ENV = {
+    HASNA_INSTRUCTIONS_API_URL: "https://instructions.hasna.xyz",
+    HASNA_INSTRUCTIONS_API_KEY: "revoked-key",
+  };
+
+  test("isCloudAuthError only matches 401/403 CloudHttpError", () => {
+    expect(isCloudAuthError(new CloudHttpError(401, "API key has been revoked"))).toBe(true);
+    expect(isCloudAuthError(new CloudHttpError(403, "forbidden"))).toBe(true);
+    expect(isCloudAuthError(new CloudHttpError(500, "boom"))).toBe(false);
+    expect(isCloudAuthError(new CloudHttpError(404, "not found"))).toBe(false);
+    expect(isCloudAuthError(new Error("network down"))).toBe(false);
+  });
+
+  test("formatCliError rewrites a revoked-key error into an actionable re-auth message", () => {
+    const msg = formatCliError(new CloudHttpError(401, "API key has been revoked"), AUTH_ENV);
+    expect(msg).toContain("authentication failed");
+    expect(msg).toContain("API key has been revoked");
+    expect(msg).toContain("HASNA_INSTRUCTIONS_API_KEY");
+    expect(msg).toContain("https://instructions.hasna.xyz");
+    // offers both a re-auth and a local-store fallback path
+    expect(msg).toContain("export HASNA_INSTRUCTIONS_API_KEY=");
+    expect(msg).toContain("unset HASNA_INSTRUCTIONS_API_URL HASNA_INSTRUCTIONS_API_KEY");
+  });
+
+  test("formatCliError leaves non-auth errors as plain messages", () => {
+    expect(formatCliError(new CloudHttpError(500, "internal error"), AUTH_ENV)).toBe("internal error");
+    expect(formatCliError(new Error("disk full"))).toBe("disk full");
+    expect(formatCliError("raw string")).toBe("raw string");
+  });
+
+  test("formatCliError omits the generic HTTP fallback note but keeps guidance", () => {
+    const msg = formatCliError(new CloudHttpError(401, "HTTP 401 on GET /configs"), AUTH_ENV);
+    expect(msg).not.toContain("Server said:");
+    expect(msg).toContain("missing, expired, or revoked");
+  });
+
+  test("cloud list path with revoked key surfaces an auth error that formats cleanly", async () => {
+    const m = mockFetch(() => ({ status: 401, json: { error: "API key has been revoked" } }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    try {
+      await store.listConfigs();
+      throw new Error("expected listConfigs to reject");
+    } catch (err) {
+      expect(isCloudAuthError(err)).toBe(true);
+      const shown = formatCliError(err, AUTH_ENV);
+      expect(shown).toContain("authentication failed");
+      expect(shown).toContain("unset HASNA_INSTRUCTIONS_API_URL HASNA_INSTRUCTIONS_API_KEY");
+    }
+  });
+
+  test("cloud create path with revoked key surfaces an auth error that formats cleanly", async () => {
+    const m = mockFetch(() => ({ status: 401, json: { error: "API key has been revoked" } }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    try {
+      await store.createConfig({ name: "Demo", category: "rules" as never, content: "hello" });
+      throw new Error("expected createConfig to reject");
+    } catch (err) {
+      expect(isCloudAuthError(err)).toBe(true);
+      const shown = formatCliError(err, AUTH_ENV);
+      expect(shown).toContain("export HASNA_INSTRUCTIONS_API_KEY=");
+    }
   });
 });
