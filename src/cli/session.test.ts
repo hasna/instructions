@@ -27,7 +27,41 @@ describe("configs session CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("global|provider|tool|account|machine|division|workspace|project|repo|path|identity|agent|session|local");
     expect(result.stdout).toContain("--project-root");
+    expect(result.stdout).toContain("--codewith-native-imports");
     expect(result.stdout).toContain("--allow-empty-sources");
+  });
+
+  test("selects the gated Codewith native-import adapter from session CLI", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    try {
+      mkdirSync(join(home, "sources"), { recursive: true });
+      writeFileSync(join(home, "sources", "global.md"), "Global native-import source");
+      const result = runCli([
+        "session",
+        "plan",
+        "--tool",
+        "codewith",
+        "--profile",
+        "account999",
+        "--target-home",
+        "~/codewith-home",
+        "--source",
+        "global:global-cli=~/sources/global.md",
+        "--codewith-native-imports",
+        "--json",
+      ], {
+        HOME: home,
+        HASNA_CONFIGS_HOME: join(home, ".hasna", "configs"),
+        HASNA_CONFIGS_CODEWITH_NATIVE_IMPORTS: undefined,
+      });
+
+      expect(result.status).toBe(0);
+      const plan = JSON.parse(result.stdout) as { adapter: { mode: string }; manifest: { adapterMode: string } };
+      expect(plan.adapter.mode).toBe("native-imports");
+      expect(plan.manifest.adapterMode).toBe("native-imports");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("fails closed when no sources are provided unless explicitly allowed", () => {

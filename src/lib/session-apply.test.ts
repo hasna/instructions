@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applySessionRender, checkSessionRenderDrift } from "./session-apply";
@@ -109,6 +109,20 @@ describe("session apply writer", () => {
     }
   });
 
+  test("preserves legacy support for session outputs larger than the project-context read cap", () => {
+    const targetHome = targetFor("codex-large-output");
+    const largeContent = "x".repeat(300 * 1024);
+    const plan = planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [{ ...globalIdentity, content: largeContent }],
+    });
+
+    expect(applySessionRender(plan).applied).toBe(true);
+    expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toContain(largeContent);
+  });
+
   test("blocks unmanaged file conflicts unless forced", () => {
     const targetHome = targetFor("codex-conflict");
     mkdirSync(targetHome, { recursive: true });
@@ -174,6 +188,39 @@ describe("session apply writer", () => {
     expect(readFileSync(result.snapshotPath!, "utf-8")).toContain("Use the shared Hasna engineering rules.");
     expect(result.files.find((file) => file.relativePath === "AGENTS.md")?.action).toBe("update");
     expect(readFileSync(join(targetHome, "AGENTS.md"), "utf-8")).toContain("Updated managed content.");
+  });
+
+  test("preserves portable session updates and removals when no project-context guard is active", () => {
+    const targetHome = targetFor("cursor-portable-rerender");
+    const first = planSessionRender({
+      tool: "cursor",
+      profile: "account999",
+      projectRoot: targetHome,
+      sources: [globalIdentity, agentIdentity],
+      generatedAt: "2026-07-01T00:00:00.000Z",
+    });
+    expect(first.projectContextGuard).toBeUndefined();
+    expect(applySessionRender(first, {
+      test_hooks: { force_portable_file_ops: true },
+    }).applied).toBe(true);
+
+    const stalePath = join(targetHome, ".cursor", "rules", "02-agent-marcus.mdc");
+    const second = planSessionRender({
+      tool: "cursor",
+      profile: "account999",
+      projectRoot: targetHome,
+      sources: [{ ...globalIdentity, content: "Portable managed update." }],
+      generatedAt: "2026-07-01T00:01:00.000Z",
+    });
+    const result = applySessionRender(second, {
+      test_hooks: { force_portable_file_ops: true },
+    });
+
+    expect(result.applied).toBe(true);
+    expect(result.files.find((file) => file.action === "update")).toBeDefined();
+    expect(result.files.find((file) => file.action === "delete")?.relativePath).toBe(".cursor/rules/02-agent-marcus.mdc");
+    expect(readFileSync(join(targetHome, ".cursor", "rules", "01-global-codewith.mdc"), "utf8")).toContain("Portable managed update.");
+    expect(existsSync(stalePath)).toBe(false);
   });
 
   test("detects drift from previous manifest before apply", () => {
@@ -272,6 +319,31 @@ describe("session apply writer", () => {
 
     expect(() => applySessionRender(plan)).toThrow("symlink");
     expect(existsSync(join(outside, "instructions"))).toBe(false);
+  });
+
+  test("rejects a target-home symlink swap after planning without writing outside", () => {
+    const targetHome = targetFor("codex-symlink-race");
+    const displaced = targetFor("codex-symlink-race-displaced");
+    const outside = targetFor("codex-symlink-race-outside");
+    mkdirSync(targetHome, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const plan = planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome,
+      sources: [globalIdentity],
+    });
+
+    expect(() => applySessionRender(plan, {
+      test_hooks: {
+        before_apply_writes: () => {
+          renameSync(targetHome, displaced);
+          symlinkSync(outside, targetHome, "dir");
+        },
+      },
+    })).toThrow("symlink");
+    expect(existsSync(join(outside, "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(displaced, "AGENTS.md"))).toBe(false);
   });
 
   test("writes identity export rules and provenance into manifest", () => {
