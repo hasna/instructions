@@ -56,6 +56,23 @@ export function renderTemplate(
   return content.replace(VAR_PATTERN, (_match, name: string) => vars[name] ?? "");
 }
 
+export function renderTemplatePreview(
+  content: string,
+  vars: Record<string, string>,
+): { content: string; unresolved: string[] } {
+  const unresolved = new Set<string>();
+  VAR_PATTERN.lastIndex = 0;
+  const rendered = content.replace(VAR_PATTERN, (match, name: string) => {
+    if (name in vars) return vars[name] ?? "";
+    unresolved.add(name);
+    return match;
+  });
+  return {
+    content: rendered,
+    unresolved: [...unresolved].sort(),
+  };
+}
+
 export function isTemplate(content: string): boolean {
   VAR_PATTERN.lastIndex = 0;
   return VAR_PATTERN.test(content);

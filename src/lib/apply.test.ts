@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig } from "../db/configs";
-import { applyConfig, applyConfigs } from "./apply";
+import { applyConfig, applyConfigs, applyConfigsWithReport } from "./apply";
 import { ANTIGRAVITY_RULE_FILE_CHAR_LIMIT } from "./session-render";
 import { detectMachineContext, resolveProfileVariables } from "./machine";
 import type { ConfigAgent } from "../types";
@@ -158,8 +158,9 @@ describe("applyConfig", () => {
     expect(cursor).toContain("Shared system guidance.");
   });
 
-  test("refuses oversized Antigravity generated global rules", async () => {
+  test("skips oversized Antigravity legacy outputs before apply validation", async () => {
     const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
     const antigravityTarget = join(tmpDir, ".gemini", "GEMINI.md");
     const c = createConfig({
       name: "Claude Prompt",
@@ -173,8 +174,38 @@ describe("applyConfig", () => {
       ],
     }, db);
 
-    await expect(applyConfig(c, { store: new LocalConfigStore(db) })).rejects.toThrow("Antigravity limits rule files");
+    const report = await applyConfigsWithReport([c], { store: new LocalConfigStore(db) });
+    expect(report.failures).toEqual([]);
+    expect(report.skipped.some((entry) => entry.path === antigravityTarget)).toBe(true);
     expect(existsSync(antigravityTarget)).toBe(false);
+  });
+
+  test("direct apply refuses session-renderer-owned instruction entrypoints", async () => {
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const db = getDatabase();
+    const store = new LocalConfigStore(db);
+    const ownedConfigs = [
+      createConfig({
+        name: "Claude Legacy Entrypoint",
+        category: "rules",
+        agent: "claude",
+        content: "legacy claude",
+        target_path: "~/.claude/CLAUDE.md",
+      }, db),
+      createConfig({
+        name: "Antigravity Legacy Entrypoint",
+        category: "rules",
+        agent: "antigravity",
+        content: "legacy antigravity",
+        target_path: "~/.gemini/GEMINI.md",
+      }, db),
+    ];
+
+    for (const config of ownedConfigs) {
+      await expect(applyConfig(config, { store })).rejects.toThrow("instructions-session-renderer");
+    }
+    expect(existsSync(join(tmpDir, ".claude", "CLAUDE.md"))).toBe(false);
+    expect(existsSync(join(tmpDir, ".gemini", "GEMINI.md"))).toBe(false);
   });
 
   test("bulk apply skips retired Gemini rows", async () => {
@@ -201,10 +232,9 @@ describe("applyConfig", () => {
 
     const results = await applyConfigs([stale, active], { store: new LocalConfigStore(db) });
 
-    expect(results.length).toBe(1);
-    expect(results[0]?.config_id).toBe(active.id);
+    expect(results.length).toBe(0);
     expect(existsSync(geminiTarget)).toBe(false);
-    expect(readFileSync(antigravityTarget, "utf-8")).toBe("active antigravity content");
+    expect(existsSync(antigravityTarget)).toBe(false);
   });
 
   test("refuses to apply stale rows targeting generated fan-out outputs", async () => {
@@ -248,23 +278,51 @@ describe("applyConfig", () => {
       target_path: "~/.claude/CLAUDE.md",
       format: "markdown",
       outputs: [
-        { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
+        { agent: "aicopilot", target_path: "~/.config/aicopilot/AICOPILOT.md", transform: "codex-flat" },
       ],
     }, db);
     const stale = createConfig({
-      name: "stale-codex-generated-absolute",
+      name: "stale-aicopilot-generated-absolute",
       category: "rules",
-      agent: "codex",
+      agent: "aicopilot",
       content: "# absolute stale",
-      target_path: join(tmpDir, ".codex", "AGENTS.md"),
+      target_path: join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"),
       format: "markdown",
     }, db);
 
     await applyConfig(canonical, { store: new LocalConfigStore(db) });
     await expect(applyConfig(stale, { store: new LocalConfigStore(db) })).rejects.toThrow("generated output");
 
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Generated");
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("absolute stale");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).toContain("Generated");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).not.toContain("absolute stale");
+  });
+
+  test("refuses generated output rows after rendering machine-aware target paths", async () => {
+    const db = getDatabase();
+    const generatedTarget = join(tmpDir, "generated.md");
+    createConfig({
+      name: "Canonical Source",
+      category: "rules",
+      agent: "claude",
+      content: "# Canonical\n",
+      target_path: join(tmpDir, "canonical.md"),
+      outputs: [
+        { agent: "codex", target_path: generatedTarget, transform: "codex-flat" },
+      ],
+    }, db);
+    const stale = createConfig({
+      name: "Rendered Stale Writer",
+      category: "rules",
+      agent: "codex",
+      content: "# stale\n",
+      target_path: "{{HOME_DIR}}/generated.md",
+    }, db);
+
+    await expect(applyConfig(stale, {
+      store: new LocalConfigStore(db),
+      vars: { HOME_DIR: tmpDir },
+    })).rejects.toThrow("generated output");
+    expect(existsSync(generatedTarget)).toBe(false);
   });
 
   test("refuses generated output rows when target path reaches the same file through a symlink", async () => {
@@ -280,23 +338,23 @@ describe("applyConfig", () => {
       target_path: "~/.claude/CLAUDE.md",
       format: "markdown",
       outputs: [
-        { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
+        { agent: "aicopilot", target_path: "~/.config/aicopilot/AICOPILOT.md", transform: "codex-flat" },
       ],
     }, db);
     const stale = createConfig({
-      name: "stale-codex-generated-symlink",
+      name: "stale-aicopilot-generated-symlink",
       category: "rules",
-      agent: "codex",
+      agent: "aicopilot",
       content: "# symlink stale",
-      target_path: join(linkHome, ".codex", "AGENTS.md"),
+      target_path: join(linkHome, ".config", "aicopilot", "AICOPILOT.md"),
       format: "markdown",
     }, db);
 
     await applyConfig(canonical, { store: new LocalConfigStore(db) });
     await expect(applyConfig(stale, { store: new LocalConfigStore(db) })).rejects.toThrow("generated output");
 
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).toContain("Generated");
-    expect(readFileSync(join(tmpDir, ".codex", "AGENTS.md"), "utf-8")).not.toContain("symlink stale");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).toContain("Generated");
+    expect(readFileSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"), "utf-8")).not.toContain("symlink stale");
   });
 
   test("refuses symlink stale rows before the generated output directory exists", async () => {
@@ -312,19 +370,19 @@ describe("applyConfig", () => {
       target_path: "~/.claude/CLAUDE.md",
       format: "markdown",
       outputs: [
-        { agent: "codex", target_path: "~/.codex/AGENTS.md", transform: "codex-flat" },
+        { agent: "aicopilot", target_path: "~/.config/aicopilot/AICOPILOT.md", transform: "codex-flat" },
       ],
     }, db);
     const stale = createConfig({
-      name: "stale-codex-generated-symlink-before-dir",
+      name: "stale-aicopilot-generated-symlink-before-dir",
       category: "rules",
-      agent: "codex",
+      agent: "aicopilot",
       content: "# symlink stale",
-      target_path: join(linkHome, ".codex", "AGENTS.md"),
+      target_path: join(linkHome, ".config", "aicopilot", "AICOPILOT.md"),
       format: "markdown",
     }, db);
 
     await expect(applyConfig(stale, { store: new LocalConfigStore(db) })).rejects.toThrow("generated output");
-    expect(existsSync(join(tmpDir, ".codex", "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"))).toBe(false);
   });
 });

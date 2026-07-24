@@ -5,7 +5,7 @@ import { join, relative } from "node:path";
 import { homedir } from "node:os";
 import type { SyncResult } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
-import { applyConfig, expandPath } from "./apply.js";
+import { applyConfigsWithReport, expandPath } from "./apply.js";
 import { detectAgent, detectCategory, detectFormat } from "./sync.js";
 
 const SKIP = [".db", ".db-shm", ".db-wal", ".log", ".lock", ".DS_Store", "node_modules", ".git"];
@@ -59,8 +59,12 @@ export async function syncToDir(dir: string, opts: { store?: ConfigStore; dryRun
   for (const config of configs) {
     if (config.kind === "reference") continue;
     try {
-      const r = await applyConfig(config, { dryRun: opts.dryRun, store });
-      r.changed ? result.updated++ : result.unchanged++;
+      const report = await applyConfigsWithReport([config], { dryRun: opts.dryRun, store });
+      result.skipped.push(...report.skipped.map((entry) => `${entry.path} (${entry.owner})`));
+      if (report.failures.length > 0) throw new Error(report.failures[0]!.message);
+      for (const applied of report.results) {
+        applied.changed ? result.updated++ : result.unchanged++;
+      }
     } catch { result.skipped.push(config.target_path || config.id); }
   }
   return result;

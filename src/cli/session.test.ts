@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { GLOBAL_AGENT_RULES_STANDARD_CONTENT } from "../lib/global-agent-rules-standard";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -190,6 +191,63 @@ describe("configs session CLI", () => {
     }
   });
 
+  test("restores an unchanged applied snapshot through the session CLI", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    try {
+      const sourcePath = join(home, "global.md");
+      const targetHome = join(home, "session-home");
+      const env = {
+        HOME: home,
+        HASNA_CONFIGS_HOME: join(home, ".hasna", "configs"),
+      };
+      writeFileSync(sourcePath, "Original CLI source");
+      const applyArgs = [
+        "session",
+        "apply",
+        "--tool",
+        "codex",
+        "--profile",
+        "account999",
+        "--target-home",
+        targetHome,
+        "--source",
+        `global:global-cli=${sourcePath}`,
+        "--json",
+      ];
+      expect(runCli(applyArgs, env).status).toBe(0);
+
+      writeFileSync(sourcePath, "Updated CLI source");
+      const update = runCli(applyArgs, env);
+      expect(update.status).toBe(0);
+      const updateResult = JSON.parse(update.stdout) as { snapshotPath: string | null };
+      expect(updateResult.snapshotPath).not.toBeNull();
+      expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toContain("Updated CLI source");
+
+      const preview = runCli([
+        "session",
+        "restore",
+        updateResult.snapshotPath!,
+        "--dry-run",
+        "--json",
+      ], env);
+      expect(preview.status).toBe(0);
+      expect((JSON.parse(preview.stdout) as { restored: boolean }).restored).toBe(false);
+      expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toContain("Updated CLI source");
+
+      const restore = runCli([
+        "session",
+        "restore",
+        updateResult.snapshotPath!,
+        "--json",
+      ], env);
+      expect(restore.status).toBe(0);
+      expect((JSON.parse(restore.stdout) as { restored: boolean }).restored).toBe(true);
+      expect(readFileSync(join(targetHome, "AGENTS.md"), "utf8")).toContain("Original CLI source");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("loads OpenIdentities configs exports and provider layer aliases", () => {
     const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
     try {
@@ -323,6 +381,78 @@ describe("configs session CLI", () => {
       expect(rendered).toContain("CLI resolved path-only Codewith rules.");
       expect(rendered).toContain("CLI Codewith-only rule.");
       expect(rendered).not.toContain("CLI Claude-only rule leak.");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("deduplicates one semantic policy across config and identity-export transports", () => {
+    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    try {
+      const dbPath = join(home, "instructions.db");
+      const env = {
+        HOME: home,
+        CONFIGS_HOME: home,
+        HASNA_INSTRUCTIONS_DB_PATH: dbPath,
+        HASNA_CONFIGS_HOME: join(home, ".hasna", "configs"),
+      };
+      const configPath = join(home, "global-agent-rules-standard.md");
+      writeFileSync(configPath, GLOBAL_AGENT_RULES_STANDARD_CONTENT);
+      const added = runCli([
+        "add",
+        configPath,
+        "--name",
+        "Global Agent Rules Standard",
+        "--category",
+        "rules",
+        "--agent",
+        "global",
+        "--kind",
+        "reference",
+      ], env);
+      expect(added.status).toBe(0);
+
+      const exportPath = join(home, "identity-export.json");
+      writeFileSync(exportPath, JSON.stringify({
+        contract: "hasna.identities.configs-instructions/v1",
+        sources: [{
+          id: "identity-agent-operating-rules",
+          label: "Identity Agent Operating Rules",
+          layer: "global",
+          merge: "append",
+          order: 1,
+          content: GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+          targetProviders: ["codewith"],
+          nonOverridable: true,
+          metadata: { role: "agent-operating-rules", rulesVersion: "1.1.6" },
+        }],
+        validation: { valid: true },
+      }));
+
+      const result = runCli([
+        "session",
+        "apply",
+        "--tool",
+        "codewith",
+        "--profile",
+        "account999",
+        "--target-home",
+        "~/codewith-home",
+        "--config",
+        "global:global-agent-rules-standard",
+        "--identity-export",
+        exportPath,
+        "--json",
+      ], env);
+
+      expect(result.status).toBe(0);
+      const applied = JSON.parse(result.stdout) as { manifestPath: string };
+      const manifest = JSON.parse(readFileSync(applied.manifestPath, "utf8")) as {
+        sources: Array<{ id: string }>;
+      };
+      const rendered = readFileSync(join(home, "codewith-home", "CODEWITH.md"), "utf8");
+      expect(manifest.sources).toHaveLength(1);
+      expect((rendered.match(/hasna:agent-operating-rules v=1\.1\.6/g) ?? [])).toHaveLength(1);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

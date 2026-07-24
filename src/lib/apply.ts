@@ -1,13 +1,17 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { ApplyResult, Config, ConfigOutput } from "../types/index.js";
 import { ConfigApplyError } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import type { ProfileVariables } from "../types/index.js";
 import { isRetiredOrUnsupportedConfigAgent } from "./config-agents.js";
-import { renderMachineAwareContent } from "./machine.js";
-import { ANTIGRAVITY_RULE_FILE_CHAR_LIMIT } from "./session-render.js";
+import { renderMachineAwareContent, renderMachineAwareContentPreview } from "./machine.js";
+import {
+  ANTIGRAVITY_RULE_FILE_CHAR_LIMIT,
+  SESSION_RENDER_OWNED_CONFIG_TARGETS,
+  SESSION_RENDERER_OWNER_ID,
+} from "./session-render.js";
 import { applyTransform } from "./transforms.js";
 
 export function getConfigHome(): string {
@@ -53,6 +57,52 @@ export interface ApplyOptions {
   outputAgent?: Config["agent"];
 }
 
+export interface ConfigApplySkippedTarget {
+  config_id: string;
+  config_slug: string;
+  path: string;
+  owner: typeof SESSION_RENDERER_OWNER_ID | "equivalent-profile-config" | "retired-provider-config";
+  reason: string;
+}
+
+export interface ConfigApplyPreviewFailure {
+  config_id: string;
+  config_slug: string;
+  message: string;
+}
+
+export interface ConfigApplyPreview {
+  results: ApplyResult[];
+  skipped: ConfigApplySkippedTarget[];
+  failures: ConfigApplyPreviewFailure[];
+}
+
+interface PreparedConfigBatch {
+  configs: Config[];
+  skipped: ConfigApplySkippedTarget[];
+  failures: ConfigApplyPreviewFailure[];
+}
+
+interface CanonicalConfigPrimary {
+  path: string;
+  agent: Config["agent"];
+  content: string;
+}
+
+interface CanonicalConfigOutput {
+  sourceIndex: number;
+  path: string;
+  agent: ConfigOutput["agent"];
+  transform: ConfigOutput["transform"];
+  content: string;
+}
+
+interface CanonicalConfigApplyBehavior {
+  primary: CanonicalConfigPrimary | null;
+  outputs: CanonicalConfigOutput[];
+  equivalenceKey: string;
+}
+
 async function writeConfigResult(
   config: Config,
   targetPath: string,
@@ -60,13 +110,20 @@ async function writeConfigResult(
   opts: ApplyOptions,
   meta: Pick<ApplyResult, "agent" | "transform"> = {}
 ): Promise<ApplyResult> {
-  const renderedTargetPath = opts.vars
-    ? renderMachineAwareContent(targetPath, opts.vars)
-    : targetPath;
-  const renderedContent = opts.vars
-    ? renderMachineAwareContent(content, opts.vars)
-    : content;
+  const renderedTarget = opts.vars
+    ? renderForApply(targetPath, opts.vars, opts.dryRun === true)
+    : { content: targetPath, unresolved: [] };
+  const rendered = opts.vars
+    ? renderForApply(content, opts.vars, opts.dryRun === true)
+    : { content, unresolved: [] };
+  const renderedTargetPath = renderedTarget.content;
+  const renderedContent = rendered.content;
   const targetAgent = meta.agent ?? config.agent;
+  if (sessionRendererOwnsTarget(renderedTargetPath, opts)) {
+    throw new ConfigApplyError(
+      `Config "${config.name}" targets ${normalizeTargetPath(renderedTargetPath)}, which is owned by ${SESSION_RENDERER_OWNER_ID}; use the Instructions session renderer.`
+    );
+  }
   if (isAntigravityRuleTarget(targetAgent, renderedTargetPath) && renderedContent.length > ANTIGRAVITY_RULE_FILE_CHAR_LIMIT) {
     throw new ConfigApplyError(
       `Antigravity rule file ${renderedTargetPath} is ${renderedContent.length} characters; split it before applying because Antigravity limits rule files to ${ANTIGRAVITY_RULE_FILE_CHAR_LIMIT} characters.`
@@ -99,7 +156,23 @@ async function writeConfigResult(
     new_content: renderedContent,
     dry_run: opts.dryRun ?? false,
     changed,
+    unresolved_template_vars: [...new Set([
+      ...renderedTarget.unresolved,
+      ...rendered.unresolved,
+    ])].sort(),
     ...meta,
+  };
+}
+
+function renderForApply(
+  content: string,
+  variables: ProfileVariables,
+  preview: boolean,
+): { content: string; unresolved: string[] } {
+  if (preview) return renderMachineAwareContentPreview(content, variables);
+  return {
+    content: renderMachineAwareContent(content, variables),
+    unresolved: [],
   };
 }
 
@@ -107,12 +180,16 @@ function isAntigravityRuleTarget(agent: Config["agent"] | undefined, targetPath:
   return agent === "antigravity" && /\.(md|mdc|markdown)$/i.test(targetPath);
 }
 
-function isGeneratedOutputTarget(config: Config, configs: Config[]): boolean {
-  if (!config.target_path) return false;
-  const targetPath = normalizeTargetPath(config.target_path);
+function isGeneratedOutputTarget(
+  config: Config,
+  configs: Config[],
+  opts: ApplyOptions,
+): boolean {
+  const primary = canonicalConfigApplyBehavior(config, opts, configs).primary;
+  if (!primary) return false;
   return configs.some((candidate) =>
     candidate.id !== config.id &&
-    candidate.outputs.some((output) => normalizeTargetPath(output.target_path) === targetPath)
+    canonicalConfigApplyBehavior(candidate, opts, configs).outputs.some((output) => output.path === primary.path)
   );
 }
 
@@ -120,6 +197,11 @@ export async function applyConfig(
   config: Config,
   opts: ApplyOptions = {}
 ): Promise<ApplyResult> {
+  if (config.kind === "reference") {
+    throw new ConfigApplyError(
+      `Config "${config.name}" is a reference (kind=reference) and has no target_path — cannot apply to disk.`
+    );
+  }
   if (opts.outputAgent && isRetiredOrUnsupportedConfigAgent(opts.outputAgent)) {
     throw new ConfigApplyError(`Config output agent "${opts.outputAgent}" is retired or unsupported — cannot apply to disk.`);
   }
@@ -127,6 +209,25 @@ export async function applyConfig(
     throw new ConfigApplyError(`Config "${config.name}" uses retired or unsupported agent "${config.agent}" — cannot apply to disk.`);
   }
 
+  const report = await applyConfigsWithReport([config], opts);
+  if (report.failures.length > 0) {
+    throw new ConfigApplyError(report.failures.map((failure) => failure.message).join("; "));
+  }
+  const result = report.results[0];
+  if (result) return result;
+  const owned = report.skipped.find((entry) => entry.owner === SESSION_RENDERER_OWNER_ID);
+  if (owned) {
+    throw new ConfigApplyError(
+      `Config "${config.name}" targets ${owned.path}, which is owned by ${SESSION_RENDERER_OWNER_ID}; use the Instructions session renderer.`
+    );
+  }
+  throw new ConfigApplyError(`Config "${config.name}" has no writable targets after apply ownership checks.`);
+}
+
+async function applyPreparedConfig(
+  config: Config,
+  opts: ApplyOptions,
+): Promise<ApplyResult> {
   const selectedOutputs = opts.outputAgent
     ? config.outputs.filter((output) => output.agent === opts.outputAgent)
     : config.outputs.filter((output) => !isRetiredOrUnsupportedConfigAgent(output.agent));
@@ -140,7 +241,7 @@ export async function applyConfig(
 
   const store = opts.store ?? resolveConfigStore();
   const contextConfigs = selectedOutputs.length > 0 || config.target_path ? await store.listConfigs() : [config];
-  if (isGeneratedOutputTarget(config, contextConfigs)) {
+  if (isGeneratedOutputTarget(config, contextConfigs, opts)) {
     throw new ConfigApplyError(
       `Config "${config.name}" targets a generated output path. Apply the canonical source config instead.`
     );
@@ -157,6 +258,10 @@ export async function applyConfig(
     result = await writeConfigResult(config, config.target_path, config.content, opts);
     result.outputs = outputResults;
     result.changed = result.changed || outputResults.some((output) => output.changed);
+    result.unresolved_template_vars = [...new Set([
+      ...(result.unresolved_template_vars ?? []),
+      ...outputResults.flatMap((output) => output.unresolved_template_vars ?? []),
+    ])].sort();
   } else {
     result = {
       ...outputResults[0]!,
@@ -189,11 +294,276 @@ export async function applyConfigs(
   configs: Config[],
   opts: ApplyOptions = {}
 ): Promise<ApplyResult[]> {
-  const results: ApplyResult[] = [];
-  for (const config of configs) {
-    if (config.kind === "reference") continue;
-    if (isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
-    results.push(await applyConfig(config, opts));
+  const report = await applyConfigsWithReport(configs, opts);
+  if (report.failures.length > 0) {
+    throw new ConfigApplyError(report.failures.map((failure) => failure.message).join("; "));
   }
-  return results;
+  return report.results;
+}
+
+export async function applyConfigsWithReport(
+  configs: Config[],
+  opts: ApplyOptions = {},
+): Promise<ConfigApplyPreview> {
+  const prepared = prepareConfigBatch(configs, opts);
+  if (prepared.failures.length > 0) {
+    return {
+      results: [],
+      skipped: prepared.skipped,
+      failures: prepared.failures,
+    };
+  }
+  const results: ApplyResult[] = [];
+  const failures: ConfigApplyPreviewFailure[] = [];
+  for (const config of prepared.configs) {
+    if (config.kind === "reference" || isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
+    try {
+      results.push(await applyPreparedConfig(config, opts));
+    } catch (error) {
+      failures.push({
+        config_id: config.id,
+        config_slug: config.slug,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return {
+    results,
+    skipped: prepared.skipped,
+    failures,
+  };
+}
+
+export async function previewConfigs(
+  configs: Config[],
+  opts: Omit<ApplyOptions, "dryRun"> = {},
+): Promise<ConfigApplyPreview> {
+  return applyConfigsWithReport(configs, { ...opts, dryRun: true });
+}
+
+function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConfigBatch {
+  const skipped: ConfigApplySkippedTarget[] = [];
+  const outputAgent = opts.outputAgent;
+  const selectedConfigs = configs.map((config) => outputAgent
+    ? {
+      ...config,
+      target_path: config.agent === outputAgent ? config.target_path : null,
+      outputs: config.outputs.filter((output) => output.agent === outputAgent),
+    }
+    : config
+  );
+  const activeConfigs = selectedConfigs.filter((config) => {
+    if (!isRetiredOrUnsupportedConfigAgent(config.agent)) return true;
+    for (const target of configTargets(config, opts, selectedConfigs)) {
+      skipped.push({
+        config_id: config.id,
+        config_slug: config.slug,
+        path: target.path,
+        owner: "retired-provider-config",
+        reason: `retired or unsupported provider config "${config.agent}" is excluded from profile apply`,
+      });
+    }
+    return false;
+  });
+  const { configs: deduplicated, duplicates } = deduplicateEquivalentProfileConfigs(activeConfigs, opts);
+  for (const duplicate of duplicates) {
+    for (const target of configTargets(duplicate, opts, activeConfigs)) {
+      skipped.push({
+        config_id: duplicate.id,
+        config_slug: duplicate.slug,
+        path: target.path,
+        owner: sessionRendererOwnsCanonicalTarget(target.path, opts)
+          ? SESSION_RENDERER_OWNER_ID
+          : "equivalent-profile-config",
+        reason: sessionRendererOwnsCanonicalTarget(target.path, opts)
+          ? "provider instruction entrypoint is owned by the Instructions session renderer"
+          : "equivalent profile config is superseded by the newer identical source",
+      });
+    }
+  }
+
+  const prepared = deduplicated.flatMap((config) => {
+    const behavior = canonicalConfigApplyBehavior(config, opts, activeConfigs);
+    const primaryOwned = behavior.primary
+      ? sessionRendererOwnsCanonicalTarget(behavior.primary.path, opts)
+      : false;
+    const outputs = config.outputs.filter((output, sourceIndex) => {
+      const canonicalOutput = behavior.outputs.find((candidate) => candidate.sourceIndex === sourceIndex)!;
+      const retiredOutput = isRetiredOrUnsupportedConfigAgent(output.agent);
+      const sessionOwned = sessionRendererOwnsCanonicalTarget(canonicalOutput.path, opts);
+      if (!retiredOutput && !sessionOwned) return true;
+      skipped.push({
+        config_id: config.id,
+        config_slug: config.slug,
+        path: canonicalOutput.path,
+        owner: retiredOutput ? "retired-provider-config" : SESSION_RENDERER_OWNER_ID,
+        reason: retiredOutput
+          ? `retired or unsupported provider output "${output.agent}" is excluded from profile apply`
+          : output.agent === "antigravity"
+            ? "project-scoped Antigravity rules are owned by the Instructions session renderer"
+            : "provider instruction entrypoint is owned by the Instructions session renderer",
+      });
+      return false;
+    });
+    if (primaryOwned && config.target_path) {
+      skipped.push({
+        config_id: config.id,
+        config_slug: config.slug,
+        path: behavior.primary!.path,
+        owner: SESSION_RENDERER_OWNER_ID,
+        reason: "provider instruction entrypoint is owned by the Instructions session renderer",
+      });
+    }
+    if (primaryOwned && outputs.length === 0) return [];
+    if (!primaryOwned && outputs.length === config.outputs.length) return [config];
+    return [{
+      ...config,
+      target_path: primaryOwned ? null : config.target_path,
+      outputs,
+    }];
+  });
+
+  const failures = duplicateTargetFailures(prepared, opts);
+  return { configs: prepared, skipped, failures };
+}
+
+function deduplicateEquivalentProfileConfigs(
+  configs: Config[],
+  opts: ApplyOptions,
+): {
+  configs: Config[];
+  duplicates: Config[];
+} {
+  const groups = new Map<string, Config[]>();
+  const withoutTargets: Config[] = [];
+  for (const config of configs) {
+    const behavior = canonicalConfigApplyBehavior(config, opts, configs);
+    if (!behavior.primary && behavior.outputs.length === 0) {
+      withoutTargets.push(config);
+      continue;
+    }
+    groups.set(behavior.equivalenceKey, [
+      ...(groups.get(behavior.equivalenceKey) ?? []),
+      config,
+    ]);
+  }
+  const kept = [...withoutTargets];
+  const duplicates: Config[] = [];
+  for (const group of groups.values()) {
+    const ordered = [...group].sort((left, right) =>
+      right.updated_at.localeCompare(left.updated_at) || left.slug.localeCompare(right.slug)
+    );
+    kept.push(ordered[0]!);
+    duplicates.push(...ordered.slice(1));
+  }
+  const order = new Map(configs.map((config, index) => [config.id, index]));
+  kept.sort((left, right) => (order.get(left.id) ?? 0) - (order.get(right.id) ?? 0));
+  return { configs: kept, duplicates };
+}
+
+function canonicalConfigApplyBehavior(
+  config: Config,
+  opts: ApplyOptions,
+  contextConfigs: Config[],
+): CanonicalConfigApplyBehavior {
+  const primary = config.target_path
+    ? {
+      path: canonicalApplyTargetPath(config.target_path, opts),
+      agent: config.agent,
+      content: canonicalApplyContent(config.content, opts),
+    }
+    : null;
+  const outputs = config.outputs
+    .map((output, sourceIndex) => ({
+      sourceIndex,
+      path: canonicalApplyTargetPath(output.target_path, opts),
+      agent: output.agent,
+      transform: output.transform,
+      content: canonicalApplyContent(
+        applyTransform(config, output, { configs: contextConfigs }),
+        opts,
+      ),
+    }))
+    .sort((left, right) =>
+      left.path.localeCompare(right.path)
+      || left.agent.localeCompare(right.agent)
+      || left.transform.localeCompare(right.transform)
+      || left.content.localeCompare(right.content)
+    );
+  const equivalenceKey = JSON.stringify({
+    kind: config.kind,
+    category: config.category,
+    primary,
+    outputs: outputs.map(({ sourceIndex: _sourceIndex, ...output }) => output),
+  });
+  return { primary, outputs, equivalenceKey };
+}
+
+function configTargets(
+  config: Config,
+  opts: ApplyOptions,
+  contextConfigs: Config[],
+): Array<{ path: string; owner: string }> {
+  const behavior = canonicalConfigApplyBehavior(config, opts, contextConfigs);
+  return [
+    ...(behavior.primary
+      ? [{ path: behavior.primary.path, owner: `${config.slug}:primary` }]
+      : []),
+    ...behavior.outputs.map((output) => ({
+      path: output.path,
+      owner: `${config.slug}:output:${output.agent}`,
+    })),
+  ];
+}
+
+function duplicateTargetFailures(
+  configs: Config[],
+  opts: ApplyOptions,
+): ConfigApplyPreviewFailure[] {
+  const targets = new Map<string, Array<{ config: Config; owner: string }>>();
+  for (const config of configs) {
+    for (const target of configTargets(config, opts, configs)) {
+      targets.set(target.path, [
+        ...(targets.get(target.path) ?? []),
+        { config, owner: target.owner },
+      ]);
+    }
+  }
+  return [...targets.entries()]
+    .filter(([, owners]) => owners.length > 1)
+    .map(([path, owners]) => ({
+      config_id: owners[0]!.config.id,
+      config_slug: owners[0]!.config.slug,
+      message: `Multiple profile writers target ${path}: ${owners.map((owner) => owner.owner).join(", ")}`,
+    }));
+}
+
+function canonicalApplyContent(content: string, opts: ApplyOptions): string {
+  return opts.vars
+    ? renderMachineAwareContentPreview(content, opts.vars).content
+    : content;
+}
+
+function canonicalApplyTargetPath(targetPath: string, opts: ApplyOptions): string {
+  const renderedTargetPath = opts.vars
+    ? renderMachineAwareContentPreview(targetPath, opts.vars).content
+    : targetPath;
+  return normalizeTargetPath(renderedTargetPath);
+}
+
+function sessionRendererOwnsTarget(targetPath: string, opts: ApplyOptions): boolean {
+  return sessionRendererOwnsCanonicalTarget(canonicalApplyTargetPath(targetPath, opts), opts);
+}
+
+function sessionRendererOwnsCanonicalTarget(normalized: string, opts: ApplyOptions): boolean {
+  const homes = new Set([
+    getConfigHome(),
+    opts.vars?.["HOME_DIR"],
+  ].filter((home): home is string => typeof home === "string" && home.length > 0));
+  if ([...homes].some((home) =>
+    SESSION_RENDER_OWNED_CONFIG_TARGETS.some((relativePath) =>
+      normalized === normalizeTargetPath(join(home, ...relativePath.split("/")))
+    )
+  )) return true;
+  return normalized.replaceAll("\\", "/").includes("/.agents/rules/");
 }

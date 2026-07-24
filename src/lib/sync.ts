@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, SyncResult } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
-import { applyConfig, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
+import { applyConfigsWithReport, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
 import { isRetiredOrUnsupportedConfigAgent, retiredOrUnsupportedAgentReason } from "./config-agents.js";
 import { redactContent } from "./redact.js";
 import { detectMachineContext, templateizeMachineContent } from "./machine.js";
@@ -378,8 +378,16 @@ export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResu
       continue;
     }
     try {
-      const r = await applyConfig(config, { dryRun: opts.dryRun, store, outputAgent: opts.agent });
-      r.changed ? result.updated++ : result.unchanged++;
+      const report = await applyConfigsWithReport([config], {
+        dryRun: opts.dryRun,
+        store,
+        outputAgent: opts.agent,
+      });
+      result.skipped.push(...report.skipped.map((entry) => `${entry.path} (${entry.owner})`));
+      if (report.failures.length > 0) throw new Error(report.failures[0]!.message);
+      for (const applied of report.results) {
+        applied.changed ? result.updated++ : result.unchanged++;
+      }
     } catch {
       result.skipped.push(config.target_path ?? config.id);
     }
