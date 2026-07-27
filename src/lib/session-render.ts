@@ -562,15 +562,16 @@ function normalizeSources(
   const normalized = sources
     .map((source, index) => {
       if (!source.id.trim()) throw new Error("Session instruction source id is required.");
-      const content = applyAgentOperatingRulesFloor(
-        source,
-        filterProviderOnlyBlocks(source.content ?? "", tool),
-      );
+      // Floor BEFORE provider filtering: the pinned digest describes the payload as
+      // published, so comparing filtered bytes against it would fail for any payload that
+      // legitimately uses provider-only blocks and would silently replace it.
+      const floored = applyAgentOperatingRulesFloor(source, source.content ?? "");
+      const content = filterProviderOnlyBlocks(floored.content, tool);
       const normalized = {
         ...source,
-        content: content.content,
-        provenance: content.provenance,
-        metadata: content.metadata,
+        content,
+        provenance: floored.provenance,
+        metadata: floored.metadata,
         normalizedId: slug(source.id),
         resolvedLabel: source.label ?? source.id,
         resolvedLayer: source.layer === undefined ? "agent" : normalizeSessionInstructionLayer(source.layer),
