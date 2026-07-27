@@ -9,6 +9,13 @@ export const AGENT_OPERATING_RULES_SOURCE_ID = "hasna-agent-operating-rules" as 
 export const AGENT_OPERATING_RULES_VERSION = "1.1.6" as const;
 export const AGENT_OPERATING_RULES_SOURCE_SET_VERSION = "2026-07-23" as const;
 export const AGENT_OPERATING_RULES_SENTINEL = "<!-- hasna:agent-operating-rules v=1.1.6 -->" as const;
+/**
+ * Version-independent identity of the semantic policy an agent-operating-rules payload
+ * carries. Render-time deduplication keys on this, so two payloads declaring different
+ * versions of the same policy collapse to one instead of stamping one instruction file
+ * with two contradictory rule-set versions.
+ */
+export const AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY = "hasna:agent-operating-rules" as const;
 /** Canonical form of the version sentinel every agent-operating-rules payload must carry. */
 export const AGENT_OPERATING_RULES_SENTINEL_PATTERN = /<!--\s*hasna:agent-operating-rules\s+v=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/i;
 export const AGENT_OPERATING_RULES_PAYLOAD_SHA256 = "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420" as const;
@@ -56,7 +63,7 @@ export const AGENT_OPERATING_RULES_METADATA = {
   upstreamFileSha256: AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256,
   upstreamExportId: AGENT_OPERATING_RULES_SOURCE_SET_ID,
   upstreamSourceId: AGENT_OPERATING_RULES_SOURCE_ID,
-  sentinel: "hasna:agent-operating-rules",
+  sentinel: AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY,
   policyReferences: {
     incidentRecovery: SCOPED_OPERATIONAL_CONTROL_POLICY_REFERENCE,
   },
@@ -128,8 +135,14 @@ export function compareAgentOperatingRulesVersions(left: string, right: string):
 }
 
 function payloadDate(content: string): string | null {
-  return /^#\s*Hasna Agent Operating Rules\s+—\s+v[0-9]+\.[0-9]+\.[0-9]+\s+\(([0-9]{4}-[0-9]{2}-[0-9]{2})\)/m
-    .exec(content)?.[1] ?? null;
+  const canonical = /^#\s*Hasna Agent Operating Rules\s+—\s+v[0-9]+\.[0-9]+\.[0-9]+\s+\(([0-9]{4}-[0-9]{2}-[0-9]{2})\)/m
+    .exec(content)?.[1];
+  if (canonical) return canonical;
+  // Tolerate a reformatted heading: any level-1 heading carrying an ISO date still
+  // yields the source-set version, so a legitimate rules bump that restyles its title
+  // does not silently drop the field from the attestation.
+  const heading = /^#[^\S\n].*$/m.exec(content)?.[0];
+  return heading ? (/\b([0-9]{4}-[0-9]{2}-[0-9]{2})\b/.exec(heading)?.[1] ?? null) : null;
 }
 
 function sha256(content: string): string {
@@ -141,20 +154,36 @@ function sha256(content: string): string {
  * that describes the bytes actually selected.
  *
  * The embedded baseline is a currency FLOOR, not a ceiling. A stored payload that
- * declares a version at or above the baseline is authoritative — that is how a newly
- * published rules version reaches machines. The baseline is served only when the
- * stored payload cannot be shown to be current: it is empty, it declares no version
- * sentinel (so a stripped or tampered record cannot pose as newer), or it declares a
- * strictly older version.
+ * declares a STRICTLY NEWER version is authoritative — that is how a newly published
+ * rules version reaches machines. The baseline is served whenever the stored payload
+ * cannot be shown to be current:
+ *
+ * - it is empty or declares no version sentinel;
+ * - it declares a strictly older version;
+ * - it declares the baseline version but its bytes do not match
+ *   `AGENT_OPERATING_RULES_PAYLOAD_SHA256`. At the one version this module can verify,
+ *   the pinned digest is enforced, so a same-version record whose body was edited or
+ *   truncated is replaced by the canonical bytes rather than served.
+ *
+ * LIMIT OF THIS CHECK — do not read it as tamper-proofing. The sentinel is a
+ * self-declaration and the payload is unsigned, so a record that raises its own
+ * sentinel above the baseline IS served verbatim; nothing here can distinguish a
+ * genuine future rules version from an inflated one. Authorization to write the
+ * config store is therefore the actual trust boundary for any version above the
+ * baseline, and this function only guarantees that a machine cannot be pushed BELOW
+ * the baseline (older, unversioned, blank, or baseline-version-but-altered).
  */
 export function resolveAgentOperatingRulesPayload(
   storedContent: string | null | undefined,
 ): AgentOperatingRulesPayload {
   const stored = storedContent ?? "";
   const storedVersion = parseAgentOperatingRulesVersion(stored);
-  const storedIsCurrent = stored.trim().length > 0
-    && storedVersion !== null
-    && compareAgentOperatingRulesVersions(storedVersion, AGENT_OPERATING_RULES_VERSION) >= 0;
+  const baselineOrder = storedVersion === null
+    ? null
+    : compareAgentOperatingRulesVersions(storedVersion, AGENT_OPERATING_RULES_VERSION);
+  const storedIsCurrent = baselineOrder !== null
+    && (baselineOrder > 0
+      || (baselineOrder === 0 && sha256(stored) === AGENT_OPERATING_RULES_PAYLOAD_SHA256));
 
   const content = storedIsCurrent ? stored : GLOBAL_AGENT_RULES_STANDARD_CONTENT;
   const origin: AgentOperatingRulesPayloadOrigin = storedIsCurrent ? "stored-config" : "embedded-baseline";
@@ -237,9 +266,11 @@ function standardConfigInput(payload: AgentOperatingRulesPayload) {
 }
 
 /**
- * Seeds the managed rules config, and repairs it when it is stale — but never
- * downgrades it. A stored payload at or above the embedded baseline version keeps its
- * content; only its record metadata is reconciled to describe what it actually holds.
+ * Seeds the managed rules config, and repairs it when it is stale or altered — but
+ * never downgrades it. A stored payload declaring a strictly newer version keeps its
+ * content and only has its record metadata reconciled to describe what it holds. A
+ * record at the baseline version whose bytes do not match the pinned digest is repaired
+ * back to the canonical payload, so a gutted same-version record is not blessed.
  */
 export async function ensureGlobalAgentRulesStandardConfig(store: ConfigStore = resolveConfigStore()): Promise<Config> {
   let existing: Config;
