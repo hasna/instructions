@@ -197,6 +197,11 @@ export async function applyConfig(
   config: Config,
   opts: ApplyOptions = {}
 ): Promise<ApplyResult> {
+  // This refusal is also what keeps the direct-apply path from bypassing the
+  // agent-operating-rules currency floor. That floor lives in the session-render pipeline,
+  // not here, so writing the managed rules config straight to disk would skip it — but the
+  // managed config is kind=reference, so it never gets past this line. If reference configs
+  // ever become applicable, this path needs the floor applied explicitly.
   if (config.kind === "reference") {
     throw new ConfigApplyError(
       `Config "${config.name}" is a reference (kind=reference) and has no target_path — cannot apply to disk.`

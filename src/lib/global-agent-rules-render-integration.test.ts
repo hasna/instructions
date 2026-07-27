@@ -358,20 +358,20 @@ describe("agent operating rules managed render integration", () => {
 
   test("previews a replacement without writing and snapshots rollback evidence on temp apply", async () => {
     const targetHome = join(tmpRoot, "rollback-codewith");
-    const staleSource: SessionInstructionSource = {
+    const legacySource: SessionInstructionSource = {
       id: "global-agent-rules-standard",
       label: "Global Agent Rules Standard",
       layer: "global",
       content: ["# Global Agent Rules (2026-07-20)", LEGACY_ON_DISK_MARKER].join("\n"),
     };
-    const stalePlan = planSessionRender({
+    const legacyPlan = planSessionRender({
       tool: "codewith",
       profile: "account999",
       targetHome,
       generatedAt: "2026-07-20T00:00:00.000Z",
-      sources: [staleSource],
+      sources: [legacySource],
     });
-    expect(applySessionRender(stalePlan).applied).toBe(true);
+    expect(applySessionRender(legacyPlan).applied).toBe(true);
 
     const standard = await ensureGlobalAgentRulesStandardConfig(new LocalConfigStore(db));
     const currentPlan = planSessionRender({
@@ -445,6 +445,13 @@ describe("agent operating rules managed render integration", () => {
     // Repair is recorded, not silent: the rejected version and digest stay in the manifest
     // so a floored render is auditable instead of looking like a clean one.
     expect(plan.manifest.sources[0]?.metadata).toMatchObject({
+      payloadFloorApplied: true,
+      flooredFromRulesVersion: "1.1.5",
+      payloadIntegrity: "pinned-digest",
+    });
+    // Provenance carries the same repair record; asserting only metadata would let the
+    // provenance half of the attestation rot unnoticed.
+    expect(plan.manifest.sources[0]?.provenance).toMatchObject({
       payloadFloorApplied: true,
       flooredFromRulesVersion: "1.1.5",
       payloadIntegrity: "pinned-digest",

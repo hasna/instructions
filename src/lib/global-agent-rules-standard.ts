@@ -6,6 +6,8 @@ export const GLOBAL_AGENT_RULES_STANDARD_SLUG = "global-agent-rules-standard";
 
 export const AGENT_OPERATING_RULES_SOURCE_SET_ID = "hasna-global-agent-rules-standard" as const;
 export const AGENT_OPERATING_RULES_SOURCE_ID = "hasna-agent-operating-rules" as const;
+/** Role a source declares in its metadata to be treated as the agent operating rules. */
+export const AGENT_OPERATING_RULES_ROLE = "agent-operating-rules" as const;
 export const AGENT_OPERATING_RULES_VERSION = "1.1.6" as const;
 export const AGENT_OPERATING_RULES_SOURCE_SET_VERSION = "2026-07-23" as const;
 export const AGENT_OPERATING_RULES_SENTINEL = "<!-- hasna:agent-operating-rules v=1.1.6 -->" as const;
@@ -18,6 +20,15 @@ export const AGENT_OPERATING_RULES_SENTINEL = "<!-- hasna:agent-operating-rules 
 export const AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY = "hasna:agent-operating-rules" as const;
 /** Canonical form of the version sentinel every agent-operating-rules payload must carry. */
 export const AGENT_OPERATING_RULES_SENTINEL_PATTERN = /<!--\s*hasna:agent-operating-rules\s+v=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/i;
+/**
+ * Canonical level-1 heading of the rules document, capturing its ISO date.
+ *
+ * Anchored at the start of the string on purpose: a payload that OPENS with this heading
+ * is presenting itself as the whole rules document, whereas a composite file that merely
+ * embeds the rules further down is a different document that happens to quote them. The
+ * currency floor uses that distinction, so the two cases must stay distinguishable.
+ */
+export const AGENT_OPERATING_RULES_HEADING_PATTERN = /^#\s*Hasna Agent Operating Rules\s+—\s+v[0-9]+\.[0-9]+\.[0-9]+\s+\(([0-9]{4}-[0-9]{2}-[0-9]{2})\)/;
 export const AGENT_OPERATING_RULES_PAYLOAD_SHA256 = "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420" as const;
 export const AGENT_OPERATING_RULES_CONTENT_SHA256 = AGENT_OPERATING_RULES_PAYLOAD_SHA256;
 export const AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256 = "b8e89cdb49e207e5b497ac51384d67022b94fe5645cc9273db60384eb2c2fb32" as const;
@@ -54,7 +65,7 @@ export const AGENT_OPERATING_RULES_PROVENANCE = {
 
 export const AGENT_OPERATING_RULES_METADATA = {
   sourceSet: AGENT_OPERATING_RULES_SOURCE_SET_ID,
-  role: "agent-operating-rules",
+  role: AGENT_OPERATING_RULES_ROLE,
   rulesVersion: AGENT_OPERATING_RULES_VERSION,
   sourceSetVersion: AGENT_OPERATING_RULES_SOURCE_SET_VERSION,
   plan: GLOBAL_AGENT_RULES_STANDARD_SLUG,
@@ -148,7 +159,9 @@ export function compareAgentOperatingRulesVersions(left: string, right: string):
 }
 
 function payloadDate(content: string): string | null {
-  const canonical = /^#\s*Hasna Agent Operating Rules\s+—\s+v[0-9]+\.[0-9]+\.[0-9]+\s+\(([0-9]{4}-[0-9]{2}-[0-9]{2})\)/m
+  // Same canonical heading the floor keys on, matched anywhere in the payload here because
+  // this only reads a date and does not decide trust.
+  const canonical = new RegExp(AGENT_OPERATING_RULES_HEADING_PATTERN.source, "m")
     .exec(content)?.[1];
   if (canonical) return canonical;
   // Tolerate a reformatted heading: any level-1 heading carrying an ISO date still
@@ -182,8 +195,13 @@ function sha256(content: string): string {
  * system-wide guarantee. Two limits are real and neither is closed here:
  *
  * 1. The sentinel is self-declared and the payload is unsigned, so a payload that raises
- *    its own sentinel above the baseline IS served verbatim. Nothing in these bytes
- *    distinguishes a genuine future rules version from an inflated one. Rejecting
+ *    its own sentinel above the baseline IS served verbatim — and it can do more than sit
+ *    alongside the real rules. A source that also mimics the managed privilege markers
+ *    ties on priority in `deduplicateSemanticPolicySources` and then WINS on version,
+ *    EVICTING the genuine baseline from the same render; the collapse happens before
+ *    `rejectDuplicateSourceSlugs` runs, so the duplicate-slug guard never sees the
+ *    collision. Nothing in these bytes distinguishes a genuine future rules version from
+ *    an inflated one. Rejecting
  *    above-baseline versions was considered and deliberately NOT done: the canonical
  *    rules document ships from `@hasna/identities`, which legitimately runs ahead of the
  *    snapshot embedded here, so rejecting unknown-newer would replace current rules with
@@ -193,11 +211,19 @@ function sha256(content: string): string {
  *    channel), not a comparison. Until then the choice is recorded rather than hidden:
  *    every payload carries `payloadIntegrity`, which is `unverified-self-declared`
  *    whenever bytes were accepted on their version claim alone.
- * 2. This function guards only the payloads that are routed through it. It is applied at
- *    the render choke point in `normalizeSources`, so every source declaring the sentinel
- *    is floored regardless of whether it came from the config store, an identity export,
- *    or a file. A caller that renders rules WITHOUT going through that path is not
- *    covered — the guarantee belongs to the render pipeline, not to this function alone.
+ * 2. This function guards only the payloads routed through it, and the render pipeline
+ *    routes exactly one field: `source.content`. `normalizeSources` floors that, so a
+ *    claiming source is covered whether it came from the config store, an identity export,
+ *    or a file. `source.rules[].content` is NOT floored — `normalizeInstructionRules` only
+ *    filters provider blocks, `normalizeIdentityRules` copies rule bodies straight out of
+ *    export JSON, and `deduplicateSemanticPolicySources` inspects only `source.content`.
+ *    So a sentinel carried inside a RULE is neither floored nor deduped nor attested, on
+ *    the same untrusted export transport this floor otherwise defends. That predates this
+ *    guard and is tracked as a follow-up; do not read the choke point as covering it.
+ *
+ *    The attestation is also PER-RENDER, not durable: a repair is recorded in the manifest
+ *    of the render that performed it, so fleet-wide auditing needs those manifests
+ *    captured at that moment rather than reconstructed later.
  */
 export function resolveAgentOperatingRulesPayload(
   storedContent: string | null | undefined,
