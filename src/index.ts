@@ -139,9 +139,16 @@ export {
   ensureProjectDashboardStandardConfig,
 } from "./lib/project-dashboard-standard.js";
 export {
+  AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY,
+  AGENT_OPERATING_RULES_SENTINEL_PATTERN,
   GLOBAL_AGENT_RULES_STANDARD_CONTENT,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
+  compareAgentOperatingRulesVersions,
   ensureGlobalAgentRulesStandardConfig,
+  parseAgentOperatingRulesVersion,
+  resolveAgentOperatingRulesPayload,
+  type AgentOperatingRulesPayload,
+  type AgentOperatingRulesPayloadOrigin,
 } from "./lib/global-agent-rules-standard.js";
 export {
   DANGEROUS_OPERATION_GUARD_STANDARD_CONTENT,

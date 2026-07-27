@@ -4,10 +4,11 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import type { Config } from "../types/index.js";
 import {
-  AGENT_OPERATING_RULES_METADATA,
-  AGENT_OPERATING_RULES_PROVENANCE,
-  GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+  AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY,
+  AGENT_OPERATING_RULES_SENTINEL_PATTERN,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
+  compareAgentOperatingRulesVersions,
+  resolveAgentOperatingRulesPayload,
 } from "./global-agent-rules-standard.js";
 import {
   composeProjectContextSessionRender,
@@ -540,34 +541,52 @@ function normalizeSources(
   return ordered;
 }
 
+/**
+ * Collapses sources that declare the same semantic policy down to one.
+ *
+ * Keyed on the policy IDENTITY, not on the declared version: once a store can hold a
+ * newer rules payload, a version-keyed map would let a newer source and a stale
+ * duplicate both survive and stamp one instruction file with two contradictory rule-set
+ * versions. Selection is priority-first, then version — so the managed non-overridable
+ * source still wins over an ordinary source that merely declares a higher version, and
+ * two equally-privileged sources resolve to the newer one.
+ */
 function deduplicateSemanticPolicySources(
   sources: OrderedSessionInstructionSource[],
 ): OrderedSessionInstructionSource[] {
   const selected: OrderedSessionInstructionSource[] = [];
-  const policySources = new Map<string, { index: number; normalizedContent: string }>();
+  const policySources = new Map<string, { index: number; version: string; normalizedContent: string }>();
   for (const source of sources) {
-    const sentinel = source.content.match(/<!--\s*hasna:agent-operating-rules\s+v=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/i);
+    const sentinel = source.content.match(AGENT_OPERATING_RULES_SENTINEL_PATTERN);
     if (!sentinel) {
       selected.push(source);
       continue;
     }
-    const key = `hasna:agent-operating-rules/v${sentinel[1]}`;
+    const version = sentinel[1]!;
+    const key = AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY;
     const normalizedContent = source.content.replace(/\r\n/g, "\n").trim();
     const existing = policySources.get(key);
     if (!existing) {
-      policySources.set(key, { index: selected.length, normalizedContent });
+      policySources.set(key, { index: selected.length, version, normalizedContent });
       selected.push(source);
       continue;
     }
-    if (existing.normalizedContent !== normalizedContent) {
-      throw new Error(`Conflicting semantic policy sources declare ${key} with different content.`);
+    const versionOrder = compareAgentOperatingRulesVersions(version, existing.version);
+    // Two sources claiming the same version must agree byte for byte, whatever their
+    // privilege — silently picking one of two conflicting same-version policies would
+    // hide a real distribution fault.
+    if (versionOrder === 0 && existing.normalizedContent !== normalizedContent) {
+      throw new Error(`Conflicting semantic policy sources declare ${key}/v${version} with different content.`);
     }
     const current = selected[existing.index]!;
-    if (semanticPolicySourcePriority(source) <= semanticPolicySourcePriority(current)) continue;
+    const priorityOrder = semanticPolicySourcePriority(source) - semanticPolicySourcePriority(current);
+    if (priorityOrder < 0) continue;
+    if (priorityOrder === 0 && versionOrder <= 0) continue;
     selected[existing.index] = {
       ...source,
       resolvedOrder: current.resolvedOrder,
     };
+    policySources.set(key, { index: existing.index, version, normalizedContent });
   }
   return selected;
 }
@@ -1226,16 +1245,19 @@ export function sourceFromConfig(
   layer?: SessionInstructionLayer,
 ): SessionInstructionSource {
   const isAgentOperatingRules = config.slug === GLOBAL_AGENT_RULES_STANDARD_SLUG;
+  // Stored content is authoritative once it declares a current rules version; the
+  // embedded baseline only backstops an empty, unversioned, or strictly older record.
+  const rules = isAgentOperatingRules ? resolveAgentOperatingRulesPayload(config.content) : null;
   return {
     id: config.slug,
     label: config.name,
-    content: isAgentOperatingRules ? GLOBAL_AGENT_RULES_STANDARD_CONTENT : config.content,
+    content: rules ? rules.content : config.content,
     layer: layer ?? (config.agent === "global" ? "global" : "agent"),
     order,
     path: config.target_path ?? undefined,
-    provenance: isAgentOperatingRules
+    provenance: rules
       ? {
-        ...AGENT_OPERATING_RULES_PROVENANCE,
+        ...rules.provenance,
         configSlug: config.slug,
         configAgent: config.agent,
       }
@@ -1244,7 +1266,7 @@ export function sourceFromConfig(
         configSlug: config.slug,
         configAgent: config.agent,
       },
-    metadata: isAgentOperatingRules ? { ...AGENT_OPERATING_RULES_METADATA } : null,
+    metadata: rules ? { ...rules.metadata } : null,
     nonOverridable: isAgentOperatingRules,
   };
 }
