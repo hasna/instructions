@@ -4,10 +4,14 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import type { Config } from "../types/index.js";
 import {
+  AGENT_OPERATING_RULES_HEADING_PATTERN,
+  AGENT_OPERATING_RULES_ROLE,
   AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY,
   AGENT_OPERATING_RULES_SENTINEL_PATTERN,
+  AGENT_OPERATING_RULES_SOURCE_ID,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
   compareAgentOperatingRulesVersions,
+  parseAgentOperatingRulesVersion,
   resolveAgentOperatingRulesPayload,
 } from "./global-agent-rules-standard.js";
 import {
@@ -505,6 +509,80 @@ function makeFile(
   };
 }
 
+/**
+ * Applies the agent-operating-rules currency floor to any source that declares itself to
+ * be that policy, whatever route it arrived by.
+ *
+ * The floor used to live in `sourceFromConfig` alone, which covered the config store and
+ * nothing else. An identity export reaches the renderer through
+ * `sourcesFromIdentityExport`, carries its own `nonOverridable` flag, and never touched
+ * the floor — so an export could render rules BELOW the embedded baseline, or keep the
+ * baseline sentinel over a rewritten body, and still be stamped non-overridable. Running
+ * the floor here instead means every source declaring the sentinel is checked once, at
+ * the point where all routes converge and before deduplication picks a winner.
+ *
+ * A substitution is recorded rather than performed silently: the attestation keeps the
+ * version and digest that were rejected, so a repaired payload is visible in the manifest
+ * as an event instead of looking like a clean render.
+ */
+/**
+ * Whether a source is CLAIMING to be the agent operating rules, as opposed to merely
+ * quoting them.
+ *
+ * The floor replaces a whole body, so applying it on a bare sentinel match destroyed any
+ * composite document that embedded the rules alongside its own content — including this
+ * renderer's own flattened output, which carries the sentinel plus every other source's
+ * text and can be re-ingested as a `--source`. Two claims are recognised, and each is one
+ * an attacker gains nothing by dropping:
+ *
+ * - PRIVILEGE OR IDENTITY: the source asks to be treated as the managed policy
+ *   (`nonOverridable`, the managed slug or source id, or the agent-operating-rules role).
+ *   These are exactly the markers that let a source tie on priority and win on version in
+ *   `deduplicateSemanticPolicySources`, so a payload that drops them to escape the floor
+ *   also drops its ability to displace the genuine rules.
+ * - WHOLE-DOCUMENT PRESENTATION: the body OPENS with the canonical rules heading, i.e. it
+ *   presents itself as the rules document rather than a file that quotes them.
+ */
+function claimsAgentOperatingRulesPolicy(source: SessionInstructionSource, content: string): boolean {
+  if (!AGENT_OPERATING_RULES_SENTINEL_PATTERN.test(content)) return false;
+  if (source.nonOverridable === true) return true;
+  if (source.id === GLOBAL_AGENT_RULES_STANDARD_SLUG || source.id === AGENT_OPERATING_RULES_SOURCE_ID) return true;
+  if (source.metadata?.["role"] === AGENT_OPERATING_RULES_ROLE) return true;
+  return AGENT_OPERATING_RULES_HEADING_PATTERN.test(content.trimStart());
+}
+
+function applyAgentOperatingRulesFloor(
+  source: SessionInstructionSource,
+  content: string,
+): { content: string; provenance: Record<string, unknown> | null; metadata: Record<string, unknown> | null } {
+  const unchanged = {
+    content,
+    provenance: source.provenance ?? null,
+    metadata: source.metadata ?? null,
+  };
+  if (!claimsAgentOperatingRulesPolicy(source, content)) return unchanged;
+
+  const payload = resolveAgentOperatingRulesPayload(content);
+  if (payload.content === content) {
+    return {
+      content,
+      provenance: { ...(source.provenance ?? {}), payloadIntegrity: payload.integrity },
+      metadata: { ...(source.metadata ?? {}), payloadIntegrity: payload.integrity },
+    };
+  }
+
+  const floored = {
+    payloadFloorApplied: true,
+    flooredFromRulesVersion: parseAgentOperatingRulesVersion(content),
+    flooredFromPayloadSha256: sha256(content),
+  };
+  return {
+    content: payload.content,
+    provenance: { ...(source.provenance ?? {}), ...payload.provenance, ...floored },
+    metadata: { ...(source.metadata ?? {}), ...payload.metadata, ...floored },
+  };
+}
+
 function normalizeSources(
   sources: SessionInstructionSource[],
   tool: SessionRenderTool,
@@ -513,10 +591,16 @@ function normalizeSources(
   const normalized = sources
     .map((source, index) => {
       if (!source.id.trim()) throw new Error("Session instruction source id is required.");
-      const content = filterProviderOnlyBlocks(source.content ?? "", tool);
+      // Floor BEFORE provider filtering: the pinned digest describes the payload as
+      // published, so comparing filtered bytes against it would fail for any payload that
+      // legitimately uses provider-only blocks and would silently replace it.
+      const floored = applyAgentOperatingRulesFloor(source, source.content ?? "");
+      const content = filterProviderOnlyBlocks(floored.content, tool);
       const normalized = {
         ...source,
         content,
+        provenance: floored.provenance,
+        metadata: floored.metadata,
         normalizedId: slug(source.id),
         resolvedLabel: source.label ?? source.id,
         resolvedLayer: source.layer === undefined ? "agent" : normalizeSessionInstructionLayer(source.layer),
@@ -595,7 +679,7 @@ function semanticPolicySourcePriority(source: OrderedSessionInstructionSource): 
   let priority = 0;
   if (source.nonOverridable) priority += 4;
   if (source.id === GLOBAL_AGENT_RULES_STANDARD_SLUG) priority += 2;
-  if (source.metadata?.["role"] === "agent-operating-rules") priority += 1;
+  if (source.metadata?.["role"] === AGENT_OPERATING_RULES_ROLE) priority += 1;
   return priority;
 }
 

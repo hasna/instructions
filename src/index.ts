@@ -148,6 +148,7 @@ export {
   parseAgentOperatingRulesVersion,
   resolveAgentOperatingRulesPayload,
   type AgentOperatingRulesPayload,
+  type AgentOperatingRulesPayloadIntegrity,
   type AgentOperatingRulesPayloadOrigin,
 } from "./lib/global-agent-rules-standard.js";
 export {

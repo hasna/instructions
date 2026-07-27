@@ -413,6 +413,28 @@ describe("agent operating rules currency", () => {
       createHash("sha256").update(inflated).digest("hex"),
     );
     expect(payload.provenance).not.toHaveProperty("upstreamFileSha256");
+    // The trust decision is named in the attestation, so a fleet audit can find every
+    // machine serving rules that were accepted on a version claim alone.
+    expect(payload.integrity).toBe("unverified-self-declared");
+    expect(payload.provenance["payloadIntegrity"]).toBe("unverified-self-declared");
+    expect(payload.metadata["payloadIntegrity"]).toBe("unverified-self-declared");
+  });
+
+  test("classifies the pinned baseline as digest-verified", () => {
+    const payload = resolveAgentOperatingRulesPayload(GLOBAL_AGENT_RULES_STANDARD_CONTENT);
+
+    expect(payload.integrity).toBe("pinned-digest");
+    expect(payload.provenance["payloadIntegrity"]).toBe("pinned-digest");
+    expect(payload.metadata["payloadIntegrity"]).toBe("pinned-digest");
+  });
+
+  test("classifies a repaired payload as digest-verified because the baseline is served", () => {
+    const payload = resolveAgentOperatingRulesPayload(
+      ALTERED_BASELINE_PAYLOADS["body replaced under the baseline sentinel"],
+    );
+
+    expect(payload.content).toBe(GLOBAL_AGENT_RULES_STANDARD_CONTENT);
+    expect(payload.integrity).toBe("pinned-digest");
   });
 
   test("keeps the source-set version when a newer payload restyles its heading", () => {
@@ -434,6 +456,7 @@ describe("agent operating rules currency", () => {
     // Exact, not subset: toMatchObject would let a future change silently drop or add an
     // attestation field, which is how provenance rots without a failing test.
     expect(Object.keys(payload.provenance).sort()).toEqual([
+      "payloadIntegrity",
       "payloadOrigin",
       "rulesVersion",
       "selectedPayloadSha256",
@@ -444,6 +467,7 @@ describe("agent operating rules currency", () => {
     ]);
     expect(Object.keys(payload.metadata).sort()).toEqual([
       "contentSha256",
+      "payloadIntegrity",
       "payloadOrigin",
       "plan",
       "role",
@@ -461,6 +485,7 @@ describe("agent operating rules currency", () => {
     const payload = resolveAgentOperatingRulesPayload(null);
 
     expect(Object.keys(payload.provenance).sort()).toEqual([
+      "payloadIntegrity",
       "payloadOrigin",
       "policyReference",
       "rulesVersion",
@@ -476,6 +501,7 @@ describe("agent operating rules currency", () => {
     ]);
     expect(Object.keys(payload.metadata).sort()).toEqual([
       "contentSha256",
+      "payloadIntegrity",
       "payloadOrigin",
       "plan",
       "policyReferences",
