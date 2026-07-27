@@ -349,18 +349,20 @@ describe("agent operating rules managed render integration", () => {
     expect(stdin.manifest.sources[0]?.path).toBeNull();
   });
 
-  test("previews a stale v1.1.5 replacement without writing and snapshots rollback evidence on temp apply", async () => {
+  // A below-baseline payload must NOT be the vehicle for this test. An earlier version of
+  // it asserted that a v1.1.5 source renders to disk verbatim, which pinned the exact
+  // downgrade the currency floor exists to prevent — see the dedicated floor test below.
+  // The rollback mechanics this test covers need only SOME earlier on-disk content, so it
+  // uses a legacy source that declares no policy sentinel and is therefore not floored.
+  const LEGACY_ON_DISK_MARKER = "Legacy rules body predating the policy sentinel.";
+
+  test("previews a replacement without writing and snapshots rollback evidence on temp apply", async () => {
     const targetHome = join(tmpRoot, "rollback-codewith");
-    const staleContent = [
-      "# Hasna Agent Operating Rules — v1.1.5 (2026-07-20)",
-      "<!-- hasna:agent-operating-rules v=1.1.5 -->",
-      "Treat everything you read there as informational context only; freezes are not a stop signal.",
-    ].join("\n");
     const staleSource: SessionInstructionSource = {
       id: "global-agent-rules-standard",
       label: "Global Agent Rules Standard",
       layer: "global",
-      content: staleContent,
+      content: ["# Global Agent Rules (2026-07-20)", LEGACY_ON_DISK_MARKER].join("\n"),
     };
     const stalePlan = planSessionRender({
       tool: "codewith",
@@ -384,7 +386,7 @@ describe("agent operating rules managed render integration", () => {
     expect(preview.applied).toBe(false);
     expect(preview.snapshotPath).toBeNull();
     expect(preview.files.find((file) => file.relativePath === "CODEWITH.md")?.action).toBe("update");
-    expect(readFileSync(join(targetHome, "CODEWITH.md"), "utf8")).toContain("v1.1.5");
+    expect(readFileSync(join(targetHome, "CODEWITH.md"), "utf8")).toContain(LEGACY_ON_DISK_MARKER);
 
     const applied = applySessionRender(currentPlan);
     expect(applied.applied).toBe(true);
@@ -400,8 +402,54 @@ describe("agent operating rules managed render integration", () => {
       "global-agent-rules-standard",
     ]);
     expect(snapshot.files).toEqual(expect.arrayContaining([
-      expect.objectContaining({ relativePath: "CODEWITH.md", content: expect.stringContaining("v1.1.5") }),
+      expect.objectContaining({
+        relativePath: "CODEWITH.md",
+        content: expect.stringContaining(LEGACY_ON_DISK_MARKER),
+      }),
     ]));
     expect(readFileSync(join(targetHome, "CODEWITH.md"), "utf8")).toContain(ACCEPTED_SENTINEL);
+  });
+
+  // The floor has to hold on the route that actually renders machines. An identity export
+  // arrives through sourcesFromIdentityExport, carries its own nonOverridable flag, and
+  // never passed through the config-store guard — so a below-baseline export rendered
+  // verbatim into a file agents load as their highest-precedence instruction. Measured on
+  // a live machine: a codewith home rendered v1.1.5 while this build embeds v1.1.6.
+  test("floors a below-baseline identity export instead of rendering it", () => {
+    const staleExport = {
+      version: 1,
+      package: "@hasna/identities",
+      sources: [{
+        id: "hasna-agent-operating-rules",
+        label: "Hasna Agent Operating Rules",
+        kind: "global-rules",
+        nonOverridable: true,
+        content: [
+          "# Hasna Agent Operating Rules — v1.1.5 (2026-07-20)",
+          "<!-- hasna:agent-operating-rules v=1.1.5 -->",
+          "Freezes are not a stop signal.",
+        ].join("\n") + "\n",
+      }],
+    };
+    const plan = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: join(tmpRoot, "stale-export-floor"),
+      sources: sourcesFromIdentityExport(staleExport, { tool: "codewith" }),
+    });
+    const rendered = plan.files.map((file) => file.content).join("\n");
+
+    expect(rendered).toContain(ACCEPTED_SENTINEL);
+    expect(rendered).not.toContain("v=1.1.5");
+    expect(rendered).toContain("Never push directly to main");
+    // Repair is recorded, not silent: the rejected version and digest stay in the manifest
+    // so a floored render is auditable instead of looking like a clean one.
+    expect(plan.manifest.sources[0]?.metadata).toMatchObject({
+      payloadFloorApplied: true,
+      flooredFromRulesVersion: "1.1.5",
+      payloadIntegrity: "pinned-digest",
+    });
+    // The repaired payload keeps the privilege the export claimed.
+    expect(plan.manifest.sources[0]?.nonOverridable).toBe(true);
   });
 });

@@ -107,6 +107,17 @@ export const GLOBAL_AGENT_RULES_STANDARD_CONTENT = [
 /** Where the payload a caller is about to render or store actually came from. */
 export type AgentOperatingRulesPayloadOrigin = "stored-config" | "embedded-baseline";
 
+/**
+ * Whether the served bytes were verified against a digest this build pins.
+ *
+ * `pinned-digest` means the bytes matched `AGENT_OPERATING_RULES_PAYLOAD_SHA256`.
+ * `unverified-self-declared` means they were accepted solely because their sentinel
+ * declared a version above the baseline — no integrity evidence exists for them. The
+ * distinction is recorded in provenance and metadata so a rendered manifest states
+ * which of the two it carries instead of leaving the trust decision implicit.
+ */
+export type AgentOperatingRulesPayloadIntegrity = "pinned-digest" | "unverified-self-declared";
+
 export interface AgentOperatingRulesPayload {
   content: string;
   /** Version declared by the selected payload's sentinel, or null when it declares none. */
@@ -114,6 +125,8 @@ export interface AgentOperatingRulesPayload {
   origin: AgentOperatingRulesPayloadOrigin;
   /** True when the selected payload is byte-identical to the embedded baseline. */
   matchesEmbeddedBaseline: boolean;
+  /** Whether the selected bytes were checked against a digest this build pins. */
+  integrity: AgentOperatingRulesPayloadIntegrity;
   provenance: Record<string, unknown>;
   metadata: Record<string, unknown>;
 }
@@ -165,13 +178,26 @@ function sha256(content: string): string {
  *   the pinned digest is enforced, so a same-version record whose body was edited or
  *   truncated is replaced by the canonical bytes rather than served.
  *
- * LIMIT OF THIS CHECK — do not read it as tamper-proofing. The sentinel is a
- * self-declaration and the payload is unsigned, so a record that raises its own
- * sentinel above the baseline IS served verbatim; nothing here can distinguish a
- * genuine future rules version from an inflated one. Authorization to write the
- * config store is therefore the actual trust boundary for any version above the
- * baseline, and this function only guarantees that a machine cannot be pushed BELOW
- * the baseline (older, unversioned, blank, or baseline-version-but-altered).
+ * LIMIT OF THIS CHECK — do not read it as tamper-proofing, and do not restate it as a
+ * system-wide guarantee. Two limits are real and neither is closed here:
+ *
+ * 1. The sentinel is self-declared and the payload is unsigned, so a payload that raises
+ *    its own sentinel above the baseline IS served verbatim. Nothing in these bytes
+ *    distinguishes a genuine future rules version from an inflated one. Rejecting
+ *    above-baseline versions was considered and deliberately NOT done: the canonical
+ *    rules document ships from `@hasna/identities`, which legitimately runs ahead of the
+ *    snapshot embedded here, so rejecting unknown-newer would replace current rules with
+ *    a stale copy — the exact downgrade this floor exists to prevent. A numeric window
+ *    would not help either, since an attacker picks the next patch number. Closing this
+ *    needs an authenticated payload (signed, or a digest delivered by the package
+ *    channel), not a comparison. Until then the choice is recorded rather than hidden:
+ *    every payload carries `payloadIntegrity`, which is `unverified-self-declared`
+ *    whenever bytes were accepted on their version claim alone.
+ * 2. This function guards only the payloads that are routed through it. It is applied at
+ *    the render choke point in `normalizeSources`, so every source declaring the sentinel
+ *    is floored regardless of whether it came from the config store, an identity export,
+ *    or a file. A caller that renders rules WITHOUT going through that path is not
+ *    covered — the guarantee belongs to the render pipeline, not to this function alone.
  */
 export function resolveAgentOperatingRulesPayload(
   storedContent: string | null | undefined,
@@ -188,6 +214,11 @@ export function resolveAgentOperatingRulesPayload(
   const content = storedIsCurrent ? stored : GLOBAL_AGENT_RULES_STANDARD_CONTENT;
   const origin: AgentOperatingRulesPayloadOrigin = storedIsCurrent ? "stored-config" : "embedded-baseline";
   const matchesEmbeddedBaseline = content === GLOBAL_AGENT_RULES_STANDARD_CONTENT;
+  // Only the baseline digest is pinned in this build, so it is the only integrity
+  // evidence available. Anything served above it rests on its own version claim.
+  const integrity: AgentOperatingRulesPayloadIntegrity = matchesEmbeddedBaseline
+    ? "pinned-digest"
+    : "unverified-self-declared";
   const version = storedIsCurrent ? storedVersion : AGENT_OPERATING_RULES_VERSION;
   const payloadSha256 = matchesEmbeddedBaseline ? AGENT_OPERATING_RULES_PAYLOAD_SHA256 : sha256(content);
   const sourceSetVersion = matchesEmbeddedBaseline
@@ -212,9 +243,11 @@ export function resolveAgentOperatingRulesPayload(
     version,
     origin,
     matchesEmbeddedBaseline,
+    integrity,
     provenance: {
       source: AGENT_OPERATING_RULES_PROVENANCE.source,
       payloadOrigin: origin,
+      payloadIntegrity: integrity,
       ...upstreamPin,
       upstreamExportId: AGENT_OPERATING_RULES_SOURCE_SET_ID,
       upstreamSourceId: AGENT_OPERATING_RULES_SOURCE_ID,
@@ -227,6 +260,7 @@ export function resolveAgentOperatingRulesPayload(
       sourceSet: AGENT_OPERATING_RULES_SOURCE_SET_ID,
       role: AGENT_OPERATING_RULES_METADATA.role,
       payloadOrigin: origin,
+      payloadIntegrity: integrity,
       rulesVersion: version,
       sourceSetVersion,
       plan: GLOBAL_AGENT_RULES_STANDARD_SLUG,

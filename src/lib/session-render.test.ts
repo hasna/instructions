@@ -13,7 +13,11 @@ import {
   sourcesFromIdentityExport,
   type SessionInstructionSource,
 } from "./session-render";
-import { GLOBAL_AGENT_RULES_STANDARD_CONTENT, NO_BRITTLE_HARDCODING_RULE } from "./global-agent-rules-standard";
+import {
+  AGENT_OPERATING_RULES_VERSION,
+  GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+  NO_BRITTLE_HARDCODING_RULE,
+} from "./global-agent-rules-standard";
 
 const globalIdentity: SessionInstructionSource = {
   id: "global-codewith",
@@ -543,11 +547,39 @@ describe("session render planner", () => {
     expect(plan.manifest.sources[1]?.owner).toMatchObject({ kind: "project" });
   });
 
-  test("rejects conflicting policy content that reuses one semantic sentinel", () => {
+  // The conflict error now covers only the case the currency floor cannot adjudicate: two
+  // sources at the same ABOVE-baseline version with different bodies. Neither carries
+  // integrity evidence, so picking one silently would hide a real distribution fault.
+  test("rejects conflicting policy content that reuses one above-baseline sentinel", () => {
+    const conflicting = (body: string) => [
+      "# Hasna Agent Operating Rules — v1.1.12 (2026-07-27)",
+      "<!-- hasna:agent-operating-rules v=1.1.12 -->",
+      body,
+    ].join("\n") + "\n";
+
     expect(() => planSessionRender({
       tool: "codewith",
       profile: "account999",
       targetHome: join(tmpRoot, "policy-version-collision"),
+      sources: [
+        { ...globalRulesStandard, content: conflicting("1. One published body.") },
+        {
+          ...globalRulesStandard,
+          id: "conflicting-agent-rules",
+          content: conflicting("1. A different body claiming the same version."),
+        },
+      ],
+    })).toThrow("Conflicting semantic policy sources");
+  });
+
+  // At the BASELINE version the floor can adjudicate, so it repairs instead of failing the
+  // whole render. Throwing here would have left the machine with no refreshed rules at all,
+  // which is a worse outcome than serving the canonical bytes.
+  test("repairs rather than rejects a conflicting duplicate at the baseline version", () => {
+    const plan = planSessionRender({
+      tool: "codewith",
+      profile: "account999",
+      targetHome: join(tmpRoot, "policy-baseline-repair"),
       sources: [
         globalRulesStandard,
         {
@@ -556,7 +588,12 @@ describe("session render planner", () => {
           content: `${GLOBAL_AGENT_RULES_STANDARD_CONTENT.trim()}\nConflicting same-version payload.\n`,
         },
       ],
-    })).toThrow("Conflicting semantic policy sources");
+    });
+    const rendered = plan.files.map((file) => file.content).join("\n");
+
+    expect(rendered).not.toContain("Conflicting same-version payload.");
+    expect(rendered).toContain("Never push directly to main");
+    expect(policyVersionStamps(plan)).toEqual([AGENT_OPERATING_RULES_VERSION]);
   });
 
   // Once the store can hold a rules version newer than the embedded baseline, a

@@ -8,6 +8,7 @@ import {
   AGENT_OPERATING_RULES_SENTINEL_PATTERN,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
   compareAgentOperatingRulesVersions,
+  parseAgentOperatingRulesVersion,
   resolveAgentOperatingRulesPayload,
 } from "./global-agent-rules-standard.js";
 import {
@@ -505,6 +506,54 @@ function makeFile(
   };
 }
 
+/**
+ * Applies the agent-operating-rules currency floor to any source that declares itself to
+ * be that policy, whatever route it arrived by.
+ *
+ * The floor used to live in `sourceFromConfig` alone, which covered the config store and
+ * nothing else. An identity export reaches the renderer through
+ * `sourcesFromIdentityExport`, carries its own `nonOverridable` flag, and never touched
+ * the floor — so an export could render rules BELOW the embedded baseline, or keep the
+ * baseline sentinel over a rewritten body, and still be stamped non-overridable. Running
+ * the floor here instead means every source declaring the sentinel is checked once, at
+ * the point where all routes converge and before deduplication picks a winner.
+ *
+ * A substitution is recorded rather than performed silently: the attestation keeps the
+ * version and digest that were rejected, so a repaired payload is visible in the manifest
+ * as an event instead of looking like a clean render.
+ */
+function applyAgentOperatingRulesFloor(
+  source: SessionInstructionSource,
+  content: string,
+): { content: string; provenance: Record<string, unknown> | null; metadata: Record<string, unknown> | null } {
+  const unchanged = {
+    content,
+    provenance: source.provenance ?? null,
+    metadata: source.metadata ?? null,
+  };
+  if (!AGENT_OPERATING_RULES_SENTINEL_PATTERN.test(content)) return unchanged;
+
+  const payload = resolveAgentOperatingRulesPayload(content);
+  if (payload.content === content) {
+    return {
+      content,
+      provenance: { ...(source.provenance ?? {}), payloadIntegrity: payload.integrity },
+      metadata: { ...(source.metadata ?? {}), payloadIntegrity: payload.integrity },
+    };
+  }
+
+  const floored = {
+    payloadFloorApplied: true,
+    flooredFromRulesVersion: parseAgentOperatingRulesVersion(content),
+    flooredFromPayloadSha256: sha256(content),
+  };
+  return {
+    content: payload.content,
+    provenance: { ...(source.provenance ?? {}), ...payload.provenance, ...floored },
+    metadata: { ...(source.metadata ?? {}), ...payload.metadata, ...floored },
+  };
+}
+
 function normalizeSources(
   sources: SessionInstructionSource[],
   tool: SessionRenderTool,
@@ -513,10 +562,15 @@ function normalizeSources(
   const normalized = sources
     .map((source, index) => {
       if (!source.id.trim()) throw new Error("Session instruction source id is required.");
-      const content = filterProviderOnlyBlocks(source.content ?? "", tool);
+      const content = applyAgentOperatingRulesFloor(
+        source,
+        filterProviderOnlyBlocks(source.content ?? "", tool),
+      );
       const normalized = {
         ...source,
-        content,
+        content: content.content,
+        provenance: content.provenance,
+        metadata: content.metadata,
         normalizedId: slug(source.id),
         resolvedLabel: source.label ?? source.id,
         resolvedLayer: source.layer === undefined ? "agent" : normalizeSessionInstructionLayer(source.layer),
