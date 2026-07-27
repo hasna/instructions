@@ -14,8 +14,12 @@ import {
   GLOBAL_AGENT_RULES_STANDARD_CONTENT,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
   NO_BRITTLE_HARDCODING_RULE,
+  compareAgentOperatingRulesVersions,
   ensureGlobalAgentRulesStandardConfig,
+  parseAgentOperatingRulesVersion,
+  resolveAgentOperatingRulesPayload,
 } from "./global-agent-rules-standard";
+import type { Config } from "../types/index";
 
 let db: Database;
 
@@ -195,5 +199,128 @@ describe("global agent rules standard", () => {
     for (const profile of profiles) {
       expect(getProfileConfigs(profile.id, db).map((config) => config.id)).toContain(standard.id);
     }
+  });
+});
+
+const NEWER_RULES_MARKER = "MARKER-NEWER-STORED-RULES-PAYLOAD-MUST-SURVIVE";
+const NEWER_RULES_VERSION = "1.1.12";
+const NEWER_RULES_CONTENT = [
+  `# Hasna Agent Operating Rules — v${NEWER_RULES_VERSION} (2026-07-27)`,
+  `<!-- hasna:agent-operating-rules v=${NEWER_RULES_VERSION} -->`,
+  NEWER_RULES_MARKER,
+  "24. Rule twenty-four exists only in the newer stored payload.",
+].join("\n") + "\n";
+
+function storeNewerRules(): Config {
+  return createConfig({
+    name: "Global Agent Rules Standard",
+    category: "rules",
+    agent: "global",
+    format: "markdown",
+    kind: "reference",
+    content: NEWER_RULES_CONTENT,
+  }, db);
+}
+
+describe("agent operating rules currency", () => {
+  test("parses and orders sentinel versions", () => {
+    expect(parseAgentOperatingRulesVersion(NEWER_RULES_CONTENT)).toBe(NEWER_RULES_VERSION);
+    expect(parseAgentOperatingRulesVersion(GLOBAL_AGENT_RULES_STANDARD_CONTENT)).toBe("1.1.6");
+    expect(parseAgentOperatingRulesVersion("no sentinel here")).toBeNull();
+    // Ordering must be numeric, not lexicographic: "1.1.12" > "1.1.6".
+    expect(compareAgentOperatingRulesVersions("1.1.12", "1.1.6")).toBeGreaterThan(0);
+    expect(compareAgentOperatingRulesVersions("1.1.6", "1.1.12")).toBeLessThan(0);
+    expect(compareAgentOperatingRulesVersions("1.1.6", "1.1.6")).toBe(0);
+    expect(compareAgentOperatingRulesVersions("1.2.0", "1.1.99")).toBeGreaterThan(0);
+  });
+
+  test("serves a stored payload that declares a version at or above the baseline", () => {
+    const payload = resolveAgentOperatingRulesPayload(NEWER_RULES_CONTENT);
+
+    expect(payload.content).toBe(NEWER_RULES_CONTENT);
+    expect(payload.content).toContain(NEWER_RULES_MARKER);
+    expect(payload.origin).toBe("stored-config");
+    expect(payload.version).toBe(NEWER_RULES_VERSION);
+    expect(payload.matchesEmbeddedBaseline).toBe(false);
+    expect(payload.provenance["selectedPayloadSha256"]).toBe(
+      createHash("sha256").update(NEWER_RULES_CONTENT).digest("hex"),
+    );
+    // The upstream file pin describes the embedded baseline; it must not be asserted
+    // about bytes it never described.
+    expect(payload.provenance).not.toHaveProperty("upstreamCommit");
+    expect(payload.provenance).not.toHaveProperty("upstreamFileSha256");
+  });
+
+  test("backstops with the embedded baseline only when currency cannot be established", () => {
+    for (const staleContent of [
+      "",
+      "   \n  ",
+      "# Rules with no sentinel at all\n",
+      "# Hasna Agent Operating Rules — v1.1.5 (2026-07-20)\n<!-- hasna:agent-operating-rules v=1.1.5 -->\nstale\n",
+    ]) {
+      const payload = resolveAgentOperatingRulesPayload(staleContent);
+      expect(payload.content).toBe(GLOBAL_AGENT_RULES_STANDARD_CONTENT);
+      expect(payload.origin).toBe("embedded-baseline");
+      expect(payload.version).toBe("1.1.6");
+      expect(payload.provenance["upstreamCommit"]).toBe("48168c549cc2945053a4498a9a2b11888419bc94");
+    }
+    expect(resolveAgentOperatingRulesPayload(null).content).toBe(GLOBAL_AGENT_RULES_STANDARD_CONTENT);
+    expect(resolveAgentOperatingRulesPayload(undefined).content).toBe(GLOBAL_AGENT_RULES_STANDARD_CONTENT);
+  });
+
+  test("renders newer stored rules content instead of the embedded baseline", () => {
+    const stored = storeNewerRules();
+    const source = sourceFromConfig(stored);
+    const plan = planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome: "/tmp/codex-account999-newer",
+      sources: [source],
+    });
+
+    expect(source.content).toContain(NEWER_RULES_MARKER);
+    expect(source.content).not.toContain("<!-- hasna:agent-operating-rules v=1.1.6 -->");
+    expect(plan.files[0]?.content).toContain(NEWER_RULES_MARKER);
+    expect(plan.files[0]?.content).toContain(`v${NEWER_RULES_VERSION}`);
+    expect(plan.files[0]?.content).not.toContain("v1.1.6");
+    // The rules stay a non-overridable managed source; only their staleness floor moved.
+    expect(source.nonOverridable).toBe(true);
+    expect(plan.manifest.sources[0]?.nonOverridable).toBe(true);
+    expect(plan.manifest.sources[0]?.metadata).toMatchObject({
+      role: "agent-operating-rules",
+      rulesVersion: NEWER_RULES_VERSION,
+      payloadOrigin: "stored-config",
+    });
+    // The attestation must describe the bytes actually rendered.
+    expect(plan.manifest.sources[0]?.renderedPayloadSha256).toBe(
+      createHash("sha256").update(NEWER_RULES_CONTENT).digest("hex"),
+    );
+    expect(plan.manifest.sources[0]?.provenance).toMatchObject({
+      selectedPayloadSha256: plan.manifest.sources[0]?.renderedPayloadSha256,
+      rulesVersion: NEWER_RULES_VERSION,
+      payloadOrigin: "stored-config",
+    });
+    expect(plan.manifest.sources[0]?.provenance).not.toHaveProperty("upstreamCommit");
+  });
+
+  test("seeding never downgrades newer stored rules content", async () => {
+    const stored = storeNewerRules();
+
+    const config = await ensureGlobalAgentRulesStandardConfig(new LocalConfigStore(db));
+    const after = getConfig(GLOBAL_AGENT_RULES_STANDARD_SLUG, db);
+
+    expect(config.id).toBe(stored.id);
+    expect(after.content).toBe(NEWER_RULES_CONTENT);
+    expect(after.content).toContain(NEWER_RULES_MARKER);
+    expect(after.content).not.toContain("v1.1.6");
+    // The record's own metadata must describe what it actually holds.
+    expect(after.tags).toEqual(expect.arrayContaining([`rules-version:${NEWER_RULES_VERSION}`]));
+    expect(after.tags).not.toEqual(expect.arrayContaining(["rules-version:1.1.6"]));
+    expect(after.description).toContain(`v${NEWER_RULES_VERSION}`);
+
+    // Seeding twice must be idempotent — no write churn on an already-current record.
+    const again = await ensureGlobalAgentRulesStandardConfig(new LocalConfigStore(db));
+    expect(again.version).toBe(getConfig(GLOBAL_AGENT_RULES_STANDARD_SLUG, db).version);
+    expect(getConfig(GLOBAL_AGENT_RULES_STANDARD_SLUG, db).content).toBe(NEWER_RULES_CONTENT);
   });
 });

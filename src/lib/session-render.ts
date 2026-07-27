@@ -4,10 +4,9 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import type { Config } from "../types/index.js";
 import {
-  AGENT_OPERATING_RULES_METADATA,
-  AGENT_OPERATING_RULES_PROVENANCE,
-  GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+  AGENT_OPERATING_RULES_SENTINEL_PATTERN,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
+  resolveAgentOperatingRulesPayload,
 } from "./global-agent-rules-standard.js";
 import {
   composeProjectContextSessionRender,
@@ -546,7 +545,7 @@ function deduplicateSemanticPolicySources(
   const selected: OrderedSessionInstructionSource[] = [];
   const policySources = new Map<string, { index: number; normalizedContent: string }>();
   for (const source of sources) {
-    const sentinel = source.content.match(/<!--\s*hasna:agent-operating-rules\s+v=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/i);
+    const sentinel = source.content.match(AGENT_OPERATING_RULES_SENTINEL_PATTERN);
     if (!sentinel) {
       selected.push(source);
       continue;
@@ -1226,16 +1225,19 @@ export function sourceFromConfig(
   layer?: SessionInstructionLayer,
 ): SessionInstructionSource {
   const isAgentOperatingRules = config.slug === GLOBAL_AGENT_RULES_STANDARD_SLUG;
+  // Stored content is authoritative once it declares a current rules version; the
+  // embedded baseline only backstops an empty, unversioned, or strictly older record.
+  const rules = isAgentOperatingRules ? resolveAgentOperatingRulesPayload(config.content) : null;
   return {
     id: config.slug,
     label: config.name,
-    content: isAgentOperatingRules ? GLOBAL_AGENT_RULES_STANDARD_CONTENT : config.content,
+    content: rules ? rules.content : config.content,
     layer: layer ?? (config.agent === "global" ? "global" : "agent"),
     order,
     path: config.target_path ?? undefined,
-    provenance: isAgentOperatingRules
+    provenance: rules
       ? {
-        ...AGENT_OPERATING_RULES_PROVENANCE,
+        ...rules.provenance,
         configSlug: config.slug,
         configAgent: config.agent,
       }
@@ -1244,7 +1246,7 @@ export function sourceFromConfig(
         configSlug: config.slug,
         configAgent: config.agent,
       },
-    metadata: isAgentOperatingRules ? { ...AGENT_OPERATING_RULES_METADATA } : null,
+    metadata: rules ? { ...rules.metadata } : null,
     nonOverridable: isAgentOperatingRules,
   };
 }

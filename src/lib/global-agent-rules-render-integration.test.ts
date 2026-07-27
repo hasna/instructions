@@ -234,6 +234,46 @@ describe("agent operating rules managed render integration", () => {
     }
   }
 
+  for (const renderer of RENDERERS) {
+    test(`serves a newer stored rules payload end to end through ${renderer.tool}`, async () => {
+      const store = new LocalConfigStore(db);
+      const marker = "MARKER-NEWER-STORED-RULES-REACHES-DISK";
+      const newerContent = [
+        "# Hasna Agent Operating Rules — v1.1.12 (2026-07-27)",
+        "<!-- hasna:agent-operating-rules v=1.1.12 -->",
+        marker,
+        "24. Rule twenty-four exists only in the newer stored payload.",
+      ].join("\n") + "\n";
+      // Seed the managed record, then advance it the way a published rules bump does.
+      const seeded = await ensureGlobalAgentRulesStandardConfig(store);
+      const stored = await store.updateConfig(seeded.id, { content: newerContent });
+      expect(stored.content).toBe(newerContent);
+
+      const targetHome = join(tmpRoot, "newer", renderer.tool);
+      process.env["CONFIGS_HOME"] = targetHome;
+      const plan = planSessionRender({
+        tool: renderer.tool,
+        profile: "account999",
+        targetHome,
+        projectRoot: renderer.tool === "cursor" ? targetHome : undefined,
+        generatedAt: "2026-07-27T00:00:00.000Z",
+        sources: [sourceFromConfig(stored)],
+      });
+      expect(applySessionRender(plan).applied).toBe(true);
+
+      const written = plan.files
+        .map((file) => readFileSync(join(targetHome, file.relativePath), "utf8"))
+        .join("\n");
+      expect(written).toContain(marker);
+      expect(written).toContain("v1.1.12");
+      expect(written).not.toContain(ACCEPTED_SENTINEL);
+      expect(plan.manifest.sources[0]?.metadata).toMatchObject({
+        rulesVersion: "1.1.12",
+        payloadOrigin: "stored-config",
+      });
+    });
+  }
+
   test("makes source/version metadata part of the deterministic source hash", async () => {
     const standard = await ensureGlobalAgentRulesStandardConfig(new LocalConfigStore(db));
     const source = sourceFromConfig(standard);

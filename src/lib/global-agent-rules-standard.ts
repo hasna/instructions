@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Config } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 
@@ -8,6 +9,8 @@ export const AGENT_OPERATING_RULES_SOURCE_ID = "hasna-agent-operating-rules" as 
 export const AGENT_OPERATING_RULES_VERSION = "1.1.6" as const;
 export const AGENT_OPERATING_RULES_SOURCE_SET_VERSION = "2026-07-23" as const;
 export const AGENT_OPERATING_RULES_SENTINEL = "<!-- hasna:agent-operating-rules v=1.1.6 -->" as const;
+/** Canonical form of the version sentinel every agent-operating-rules payload must carry. */
+export const AGENT_OPERATING_RULES_SENTINEL_PATTERN = /<!--\s*hasna:agent-operating-rules\s+v=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/i;
 export const AGENT_OPERATING_RULES_PAYLOAD_SHA256 = "8b236086b82e94490516e0b00dffa03fb5f6841b68d95f80fc3e3c8fb7087420" as const;
 export const AGENT_OPERATING_RULES_CONTENT_SHA256 = AGENT_OPERATING_RULES_PAYLOAD_SHA256;
 export const AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256 = "b8e89cdb49e207e5b497ac51384d67022b94fe5645cc9273db60384eb2c2fb32" as const;
@@ -94,40 +97,170 @@ export const GLOBAL_AGENT_RULES_STANDARD_CONTENT = [
   "21. At session end: post final task state, release task locks, then release your identity (conversations agents remove + todos release). Loop runs do this in their final step even on failure.",
 ].join("\n") + "\n";
 
-export async function ensureGlobalAgentRulesStandardConfig(store: ConfigStore = resolveConfigStore()): Promise<Config> {
-  const input = {
+/** Where the payload a caller is about to render or store actually came from. */
+export type AgentOperatingRulesPayloadOrigin = "stored-config" | "embedded-baseline";
+
+export interface AgentOperatingRulesPayload {
+  content: string;
+  /** Version declared by the selected payload's sentinel, or null when it declares none. */
+  version: string | null;
+  origin: AgentOperatingRulesPayloadOrigin;
+  /** True when the selected payload is byte-identical to the embedded baseline. */
+  matchesEmbeddedBaseline: boolean;
+  provenance: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+}
+
+/** Reads the version a payload declares through the canonical sentinel. */
+export function parseAgentOperatingRulesVersion(content: string | null | undefined): string | null {
+  return content ? (AGENT_OPERATING_RULES_SENTINEL_PATTERN.exec(content)?.[1] ?? null) : null;
+}
+
+/** Numeric compare of two `X.Y.Z` rules versions. */
+export function compareAgentOperatingRulesVersions(left: string, right: string): number {
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const diff = (leftParts[i] ?? 0) - (rightParts[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function payloadDate(content: string): string | null {
+  return /^#\s*Hasna Agent Operating Rules\s+—\s+v[0-9]+\.[0-9]+\.[0-9]+\s+\(([0-9]{4}-[0-9]{2}-[0-9]{2})\)/m
+    .exec(content)?.[1] ?? null;
+}
+
+function sha256(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * Selects the agent-operating-rules payload to serve, and derives an attestation
+ * that describes the bytes actually selected.
+ *
+ * The embedded baseline is a currency FLOOR, not a ceiling. A stored payload that
+ * declares a version at or above the baseline is authoritative — that is how a newly
+ * published rules version reaches machines. The baseline is served only when the
+ * stored payload cannot be shown to be current: it is empty, it declares no version
+ * sentinel (so a stripped or tampered record cannot pose as newer), or it declares a
+ * strictly older version.
+ */
+export function resolveAgentOperatingRulesPayload(
+  storedContent: string | null | undefined,
+): AgentOperatingRulesPayload {
+  const stored = storedContent ?? "";
+  const storedVersion = parseAgentOperatingRulesVersion(stored);
+  const storedIsCurrent = stored.trim().length > 0
+    && storedVersion !== null
+    && compareAgentOperatingRulesVersions(storedVersion, AGENT_OPERATING_RULES_VERSION) >= 0;
+
+  const content = storedIsCurrent ? stored : GLOBAL_AGENT_RULES_STANDARD_CONTENT;
+  const origin: AgentOperatingRulesPayloadOrigin = storedIsCurrent ? "stored-config" : "embedded-baseline";
+  const matchesEmbeddedBaseline = content === GLOBAL_AGENT_RULES_STANDARD_CONTENT;
+  const version = storedIsCurrent ? storedVersion : AGENT_OPERATING_RULES_VERSION;
+  const payloadSha256 = matchesEmbeddedBaseline ? AGENT_OPERATING_RULES_PAYLOAD_SHA256 : sha256(content);
+  const sourceSetVersion = matchesEmbeddedBaseline
+    ? AGENT_OPERATING_RULES_SOURCE_SET_VERSION
+    : payloadDate(content);
+  // The upstream file pin describes the embedded baseline only; it says nothing about
+  // a newer stored payload, so it is withheld rather than asserted about other bytes.
+  const upstreamPin = matchesEmbeddedBaseline
+    ? {
+      upstreamRepository: AGENT_OPERATING_RULES_UPSTREAM.repository,
+      upstreamCommit: AGENT_OPERATING_RULES_UPSTREAM.commit,
+      upstreamPath: AGENT_OPERATING_RULES_UPSTREAM.path,
+      upstreamFileSha256: AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256,
+    }
+    : {};
+  const policyReference = content.includes(SCOPED_OPERATIONAL_CONTROL_POLICY_REFERENCE)
+    ? { policyReference: SCOPED_OPERATIONAL_CONTROL_POLICY_REFERENCE }
+    : {};
+
+  return {
+    content,
+    version,
+    origin,
+    matchesEmbeddedBaseline,
+    provenance: {
+      source: AGENT_OPERATING_RULES_PROVENANCE.source,
+      payloadOrigin: origin,
+      ...upstreamPin,
+      upstreamExportId: AGENT_OPERATING_RULES_SOURCE_SET_ID,
+      upstreamSourceId: AGENT_OPERATING_RULES_SOURCE_ID,
+      selectedPayloadSha256: payloadSha256,
+      rulesVersion: version,
+      sourceSetVersion,
+      ...policyReference,
+    },
+    metadata: {
+      sourceSet: AGENT_OPERATING_RULES_SOURCE_SET_ID,
+      role: AGENT_OPERATING_RULES_METADATA.role,
+      payloadOrigin: origin,
+      rulesVersion: version,
+      sourceSetVersion,
+      plan: GLOBAL_AGENT_RULES_STANDARD_SLUG,
+      contentSha256: payloadSha256,
+      selectedPayloadSha256: payloadSha256,
+      ...(matchesEmbeddedBaseline ? { upstreamFileSha256: AGENT_OPERATING_RULES_UPSTREAM_FILE_SHA256 } : {}),
+      upstreamExportId: AGENT_OPERATING_RULES_SOURCE_SET_ID,
+      upstreamSourceId: AGENT_OPERATING_RULES_SOURCE_ID,
+      sentinel: AGENT_OPERATING_RULES_METADATA.sentinel,
+      ...(policyReference.policyReference
+        ? { policyReferences: { incidentRecovery: SCOPED_OPERATIONAL_CONTROL_POLICY_REFERENCE } }
+        : {}),
+    },
+  };
+}
+
+function standardConfigInput(payload: AgentOperatingRulesPayload) {
+  return {
     name: "Global Agent Rules Standard",
     category: "rules" as const,
     agent: "global" as const,
     format: "markdown" as const,
-    content: GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+    content: payload.content,
     kind: "reference" as const,
-    description: `Managed Hasna agent operating rules v${AGENT_OPERATING_RULES_VERSION}; accepted source ${AGENT_OPERATING_RULES_UPSTREAM.repository}@${AGENT_OPERATING_RULES_UPSTREAM.commit}:${AGENT_OPERATING_RULES_UPSTREAM.path}`,
+    description: payload.matchesEmbeddedBaseline
+      ? `Managed Hasna agent operating rules v${payload.version}; accepted source ${AGENT_OPERATING_RULES_UPSTREAM.repository}@${AGENT_OPERATING_RULES_UPSTREAM.commit}:${AGENT_OPERATING_RULES_UPSTREAM.path}`
+      : `Managed Hasna agent operating rules v${payload.version}; stored payload sha256 ${payload.metadata["contentSha256"] as string}`,
     tags: [
       "global-agent-rules",
       "system-prompt",
       "coding-agent-rules",
       "agent-operating-rules",
-      `rules-version:${AGENT_OPERATING_RULES_VERSION}`,
-      `source-commit:${AGENT_OPERATING_RULES_UPSTREAM.commit}`,
+      `rules-version:${payload.version}`,
+      ...(payload.matchesEmbeddedBaseline ? [`source-commit:${AGENT_OPERATING_RULES_UPSTREAM.commit}`] : []),
     ],
   };
+}
 
+/**
+ * Seeds the managed rules config, and repairs it when it is stale — but never
+ * downgrades it. A stored payload at or above the embedded baseline version keeps its
+ * content; only its record metadata is reconciled to describe what it actually holds.
+ */
+export async function ensureGlobalAgentRulesStandardConfig(store: ConfigStore = resolveConfigStore()): Promise<Config> {
+  let existing: Config;
   try {
-    const existing = await store.getConfig(GLOBAL_AGENT_RULES_STANDARD_SLUG);
-    if (
-      existing.content !== input.content
-      || existing.description !== input.description
-      || existing.category !== input.category
-      || existing.agent !== input.agent
-      || existing.format !== input.format
-      || existing.kind !== input.kind
-      || JSON.stringify(existing.tags) !== JSON.stringify(input.tags)
-    ) {
-      return await store.updateConfig(existing.id, input);
-    }
-    return existing;
+    existing = await store.getConfig(GLOBAL_AGENT_RULES_STANDARD_SLUG);
   } catch {
-    return await store.createConfig(input);
+    return await store.createConfig(standardConfigInput(resolveAgentOperatingRulesPayload(null)));
   }
+
+  const payload = resolveAgentOperatingRulesPayload(existing.content);
+  const input = standardConfigInput(payload);
+  if (
+    existing.content !== input.content
+    || existing.description !== input.description
+    || existing.category !== input.category
+    || existing.agent !== input.agent
+    || existing.format !== input.format
+    || existing.kind !== input.kind
+    || JSON.stringify(existing.tags) !== JSON.stringify(input.tags)
+  ) {
+    return await store.updateConfig(existing.id, input);
+  }
+  return existing;
 }
