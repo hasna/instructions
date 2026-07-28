@@ -24,15 +24,22 @@ import { applyTransform } from "./transforms.js";
 import {
   CODEWITH_NATIVE_IMPORTS_ENV,
   SESSION_INSTRUCTION_LAYERS,
+  SESSION_RENDER_INSTRUCTIONS_MANAGED_DIR,
   SESSION_RENDER_MANAGED_MARKER,
+  SESSION_RENDER_MANIFEST_RELATIVE_PATH,
   SESSION_RENDER_SCHEMA,
+  SESSION_RENDER_SNAPSHOT_RELATIVE_DIR,
 } from "./session-render-contract.js";
 
 export {
   CODEWITH_NATIVE_IMPORTS_ENV,
   SESSION_INSTRUCTION_LAYERS,
+  SESSION_RENDER_INSTRUCTIONS_MANAGED_DIR,
   SESSION_RENDER_MANAGED_MARKER,
+  SESSION_RENDER_MANAGED_NAMESPACE,
+  SESSION_RENDER_MANIFEST_RELATIVE_PATH,
   SESSION_RENDER_SCHEMA,
+  SESSION_RENDER_SNAPSHOT_RELATIVE_DIR,
 } from "./session-render-contract.js";
 export const RAW_STORE_ROOT_ENV = "HASNA_CONFIGS_HOME";
 export const ANTIGRAVITY_RULE_FILE_CHAR_LIMIT = 12_000;
@@ -295,7 +302,7 @@ const CODEWITH_FLATTENED_ADAPTER: SessionToolAdapter = {
   tool: "codewith",
   mode: "flattened-markdown",
   indexFile: "CODEWITH.md",
-  managedDir: ".hasna/instructions",
+  managedDir: SESSION_RENDER_INSTRUCTIONS_MANAGED_DIR,
   envVar: "CODEWITH_HOME",
   nativeImports: false,
   description: "Codewith CODEWITH.md flattened until native @ imports are implemented in Codewith.",
@@ -305,7 +312,7 @@ const CODEWITH_NATIVE_ADAPTER: SessionToolAdapter = {
   tool: "codewith",
   mode: "native-imports",
   indexFile: "CODEWITH.md",
-  managedDir: ".hasna/instructions",
+  managedDir: SESSION_RENDER_INSTRUCTIONS_MANAGED_DIR,
   envVar: "CODEWITH_HOME",
   nativeImports: true,
   description: "Codewith CODEWITH.md with gated @ imports into managed fragments.",
@@ -316,7 +323,7 @@ export const SESSION_TOOL_ADAPTERS: Record<SessionRenderTool, SessionToolAdapter
     tool: "claude",
     mode: "native-imports",
     indexFile: "CLAUDE.md",
-    managedDir: ".hasna/instructions",
+    managedDir: SESSION_RENDER_INSTRUCTIONS_MANAGED_DIR,
     envVar: "CLAUDE_CONFIG_DIR",
     nativeImports: true,
     description: "Claude Code CLAUDE.md with @ imports into managed fragments.",
@@ -325,7 +332,7 @@ export const SESSION_TOOL_ADAPTERS: Record<SessionRenderTool, SessionToolAdapter
     tool: "codex",
     mode: "flattened-markdown",
     indexFile: "AGENTS.md",
-    managedDir: ".hasna/instructions",
+    managedDir: SESSION_RENDER_INSTRUCTIONS_MANAGED_DIR,
     envVar: "CODEX_HOME",
     nativeImports: false,
     description: "Codex AGENTS.md flattened instruction file.",
@@ -342,7 +349,7 @@ export const SESSION_TOOL_ADAPTERS: Record<SessionRenderTool, SessionToolAdapter
     mode: "opencode-instructions",
     indexFile: "AGENTS.md",
     configFile: "opencode.json",
-    managedDir: ".hasna/instructions",
+    managedDir: SESSION_RENDER_INSTRUCTIONS_MANAGED_DIR,
     envVar: "OPENCODE_CONFIG_DIR",
     nativeImports: false,
     description: "OpenCode AGENTS.md plus opencode.json instructions pointing at managed fragments.",
@@ -351,7 +358,7 @@ export const SESSION_TOOL_ADAPTERS: Record<SessionRenderTool, SessionToolAdapter
     tool: "aicopilot",
     mode: "flattened-markdown",
     indexFile: "AICOPILOT.md",
-    managedDir: ".hasna/instructions",
+    managedDir: SESSION_RENDER_INSTRUCTIONS_MANAGED_DIR,
     envVar: "AICOPILOT_CONFIG_DIR",
     nativeImports: false,
     description: "AI Copilot AICOPILOT.md flattened instruction file.",
@@ -374,6 +381,44 @@ export const SESSION_TOOL_ADAPTERS: Record<SessionRenderTool, SessionToolAdapter
   },
   codewith: CODEWITH_FLATTENED_ADAPTER,
 };
+
+/**
+ * Every directory the session renderer writes into, derived from the adapters
+ * themselves so the ownership guard tracks the renderer instead of duplicating
+ * a hand-maintained path list.
+ */
+export const SESSION_RENDER_MANAGED_DIRS: readonly string[] = [
+  ...new Set(
+    [
+      CODEWITH_FLATTENED_ADAPTER,
+      CODEWITH_NATIVE_ADAPTER,
+      ...Object.values(SESSION_TOOL_ADAPTERS),
+    ].map((adapter) => adapter.managedDir),
+  ),
+];
+
+/**
+ * Managed directories the renderer does NOT own exclusively: the config fan-out
+ * writes `cursor-mdc` transform outputs into `~/.cursor/rules` as well, so a
+ * static ownership match there would break `apply`/`sync` for those rows. Files
+ * the renderer actually wrote under a shared directory are still protected —
+ * they are claimed by that target home's session render manifest.
+ *
+ * `session-render-ownership.test.ts` machine-checks this set against the fan-out
+ * outputs in `sync.ts`, so the two cannot drift apart silently.
+ */
+export const SESSION_RENDER_SHARED_MANAGED_DIRS: readonly string[] = [".cursor/rules"];
+
+/**
+ * Paths under any session target home that only the session renderer may write.
+ * `apply` refuses these regardless of which home they sit in, because the
+ * renderer's target homes are provider profile homes, not the config home.
+ */
+export const SESSION_RENDER_EXCLUSIVE_MANAGED_PATHS: readonly string[] = [
+  ...SESSION_RENDER_MANAGED_DIRS.filter((dir) => !SESSION_RENDER_SHARED_MANAGED_DIRS.includes(dir)),
+  SESSION_RENDER_MANIFEST_RELATIVE_PATH,
+  SESSION_RENDER_SNAPSHOT_RELATIVE_DIR,
+];
 
 export const SESSION_LAYER_RANK: Record<SessionInstructionLayer, number> = {
   global: 10,

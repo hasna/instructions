@@ -192,6 +192,41 @@ manifests for drift, refuses unmanaged file conflicts unless `--force` is
 passed, removes stale managed mirrors only when safe, and writes local snapshots
 before mutating managed files.
 
+### Session renderer ownership
+
+Anything the session renderer writes is off limits to `instructions apply` and
+`instructions sync --to-disk`; those rows are reported as `[owned]` and skipped
+instead of overwriting rendered output. Ownership is decided from the renderer's
+own definitions rather than a hand-maintained path list:
+
+- **Managed directories** — every `managedDir` in `SESSION_TOOL_ADAPTERS`, matched
+  on whole path segments under any target home (`~/.claude/.hasna/instructions/…`,
+  `~/.hasna/accounts/profiles/claude/account003/.hasna/instructions/…`, …), plus
+  the renderer's `.hasna/session-render-manifest.json` and
+  `.hasna/session-render-snapshots/`.
+- **Manifest claims** — any file listed in an ancestor target home's
+  `.hasna/session-render-manifest.json`. This covers provider-native output such
+  as `CLAUDE.md`, `AGENTS.md`, and `opencode.json` exactly where the renderer
+  actually rendered.
+
+`~/.cursor/rules` is deliberately *not* statically reserved: the config fan-out
+writes `cursor-mdc` transform outputs there too, so files in that directory are
+owned only when a manifest claims them.
+
+Renumbering a source (inserting a new lower-order source shifts `01-` → `02-`
+and so on) orphans older `target_path` values that still point inside a managed
+directory. The guard is what neutralises those orphans, so stale rows are inert
+rather than destructive.
+
+Applying a config into renderer-owned space requires the explicit opt-in flag:
+
+```bash
+instructions apply <id> --allow-renderer-owned
+```
+
+It is separate from `--force` on purpose — "overwrite even if unchanged" must
+never silently become "overwrite renderer-owned instruction files".
+
 ### Managed project context
 
 `instructions project-context plan|apply` is the sole writer for the strict
