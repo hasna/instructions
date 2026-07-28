@@ -12,6 +12,7 @@ import {
   SESSION_RENDER_OWNED_CONFIG_TARGETS,
   SESSION_RENDERER_OWNER_ID,
 } from "./session-render.js";
+import { sessionRenderOwnsPath } from "./session-render-ownership.js";
 import { applyTransform } from "./transforms.js";
 
 export function getConfigHome(): string {
@@ -55,6 +56,13 @@ export interface ApplyOptions {
   store?: ConfigStore;
   vars?: ProfileVariables;
   outputAgent?: Config["agent"];
+  /**
+   * Opt out of the session-renderer ownership guard for one apply. Deliberately
+   * separate from `force` so that "overwrite even if unchanged" can never
+   * silently become "overwrite renderer-owned instruction files". Off by
+   * default; the only caller is the explicit `--allow-renderer-owned` flag.
+   */
+  allowSessionRendererOwned?: boolean;
 }
 
 export interface ConfigApplySkippedTarget {
@@ -561,14 +569,19 @@ function sessionRendererOwnsTarget(targetPath: string, opts: ApplyOptions): bool
 }
 
 function sessionRendererOwnsCanonicalTarget(normalized: string, opts: ApplyOptions): boolean {
+  if (opts.allowSessionRendererOwned) return false;
   const homes = new Set([
     getConfigHome(),
     opts.vars?.["HOME_DIR"],
   ].filter((home): home is string => typeof home === "string" && home.length > 0));
+  // Provider entrypoints, including retired ones the renderer no longer emits
+  // but still must not be re-created by a stale row.
   if ([...homes].some((home) =>
     SESSION_RENDER_OWNED_CONFIG_TARGETS.some((relativePath) =>
       normalized === normalizeTargetPath(join(home, ...relativePath.split("/")))
     )
   )) return true;
-  return normalized.replaceAll("\\", "/").includes("/.agents/rules/");
+  // Everything else the renderer writes: its managed directories under any
+  // target home, plus any file a target home's render manifest claims.
+  return sessionRenderOwnsPath(normalized);
 }

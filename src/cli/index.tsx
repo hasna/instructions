@@ -436,11 +436,19 @@ program
   .description("Apply a config to its target_path and output targets on disk")
   .option("--dry-run", "preview without writing")
   .option("--force", "overwrite even if unchanged")
+  .option(
+    "--allow-renderer-owned",
+    "write even when the target is owned by the Instructions session renderer (opt-in; normally use `instructions session apply`)",
+  )
   .action(async (id, opts) => {
     try {
       const store = resolveConfigStore();
       const config = await store.getConfig(id);
-      const report = await applyConfigsWithReport([config], { dryRun: opts.dryRun, store });
+      const report = await applyConfigsWithReport([config], {
+        dryRun: opts.dryRun,
+        store,
+        allowSessionRendererOwned: opts.allowRendererOwned,
+      });
       if (report.failures.length > 0) {
         throw new Error(report.failures.map((failure) => failure.message).join("; "));
       }
