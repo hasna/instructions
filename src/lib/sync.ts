@@ -4,8 +4,8 @@ import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, S
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { applyConfigsWithReport, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
 import { isRetiredOrUnsupportedConfigAgent, retiredOrUnsupportedAgentReason } from "./config-agents.js";
-import { redactContent } from "./redact.js";
-import { detectMachineContext, templateizeMachineContent } from "./machine.js";
+import { redactContent, type RedactFormat } from "./redact.js";
+import { detectMachineContext, renderMachineAwareContentPreview, resolveProfileVariables, templateizeMachineContent } from "./machine.js";
 import { applyTransform } from "./transforms.js";
 
 // ── Known config map ──────────────────────────────────────────────────────────
@@ -400,13 +400,20 @@ export interface DiffConfigOptions {
   store?: ConfigStore;
 }
 
-function buildDiff(expectedContent: string, targetPath: string): string {
-  const path = expandPath(targetPath);
+function buildDiff(
+  expectedContent: string,
+  targetPath: string,
+  format: RedactFormat,
+  variables: Record<string, string>,
+): string {
+  const renderedTargetPath = renderMachineAwareContentPreview(targetPath, variables).content;
+  const renderedExpectedContent = renderMachineAwareContentPreview(expectedContent, variables).content;
+  const path = expandPath(renderedTargetPath);
   if (!existsSync(path)) return `(file not found on disk: ${path})`;
-  const diskContent = readFileSync(path, "utf-8");
-  if (diskContent === expectedContent) return "(no diff — identical)";
+  const diskContent = redactContent(readFileSync(path, "utf-8"), format).content;
+  if (diskContent === renderedExpectedContent) return "(no diff — identical)";
 
-  const stored = expectedContent.split("\n");
+  const stored = renderedExpectedContent.split("\n");
   const disk = diskContent.split("\n");
   const lines: string[] = [`--- stored (DB)`, `+++ disk (${path})`];
   const maxLen = Math.max(stored.length, disk.length);
@@ -427,6 +434,8 @@ export async function diffConfig(config: Config, opts: DiffConfigOptions = {}): 
 
   const diffs: string[] = [];
   const store = opts.store ?? resolveConfigStore();
+  const machine = detectMachineContext();
+  const variables = resolveProfileVariables(await store.resolveProfileForMachine(machine), machine);
   const contextConfigs = config.outputs.length > 0 || config.target_path
     ? await store.listConfigs()
     : [config];
@@ -436,14 +445,14 @@ export async function diffConfig(config: Config, opts: DiffConfigOptions = {}): 
   }
 
   if (config.target_path) {
-    const diff = buildDiff(config.content, config.target_path);
+    const diff = buildDiff(config.content, config.target_path, config.format as RedactFormat, variables);
     if (!diff.includes("no diff")) diffs.push(diff);
   }
 
   if (config.outputs.length > 0) {
     for (const output of config.outputs) {
       const expected = applyTransform(config, output, { configs: contextConfigs });
-      const diff = buildDiff(expected, output.target_path);
+      const diff = buildDiff(expected, output.target_path, config.format as RedactFormat, variables);
       if (!diff.includes("no diff")) diffs.push(diff);
     }
   }

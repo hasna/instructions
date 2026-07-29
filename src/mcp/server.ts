@@ -5,7 +5,7 @@ import { z } from "zod";
 import { resolveConfigStore } from "../data/config-store.js";
 import { applyConfigsWithReport } from "../lib/apply.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
-import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
+import { detectMachineContext, renderMachineAwareContentPreview, resolveProfileVariables } from "../lib/machine.js";
 import { pagedPayload, summarizeApplyResult, summarizeConfig, summarizeProfile } from "../lib/compact-output.js";
 import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, ConfigOutput } from "../types/index.js";
 
@@ -219,17 +219,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const { existsSync: ex, readFileSync: rf } = await import("node:fs");
         const { expandPath } = await import("../lib/apply.js");
         const { redactContent } = await import("../lib/redact.js");
+        const machine = detectMachineContext();
+        const comparisonVariables = resolveProfileVariables(await store.resolveProfileForMachine(machine), machine);
         let drifted = 0, missing = 0, templates = 0;
         const driftedSlugs: string[] = [];
         for (const c of allConfigs) {
           if (c.is_template) templates++;
           if (!c.target_path) continue;
-          const abs = expandPath(c.target_path);
+          const renderedTargetPath = renderMachineAwareContentPreview(c.target_path, comparisonVariables).content;
+          const abs = expandPath(renderedTargetPath);
           if (!ex(abs)) { missing++; continue; }
           // Compare redacted disk content vs stored (lightweight — only for known configs, ~30 files)
           const disk = rf(abs, "utf-8");
           const { content: redactedDisk } = redactContent(disk, c.format as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
-          if (redactedDisk !== c.content) { drifted++; driftedSlugs.push(c.slug); }
+          const expectedContent = renderMachineAwareContentPreview(c.content, comparisonVariables).content;
+          if (redactedDisk !== expectedContent) { drifted++; driftedSlugs.push(c.slug); }
         }
         return ok({
           total: stats["total"] || 0,

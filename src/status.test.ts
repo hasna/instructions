@@ -22,6 +22,7 @@ beforeEach(() => {
 afterEach(() => {
   resetDatabase();
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+  delete process.env["CONFIGS_HOME"];
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -125,5 +126,28 @@ describe("getConfigsStatus", () => {
     expect(status.counts.byAgent.gemini).toBe(1);
     expect(serialized).not.toContain("~/.gemini/GEMINI.md");
     expect(serialized).not.toContain("stale retired content");
+  });
+
+  test("does not report drift for rendered machine-aware templates", async () => {
+    process.env["CONFIGS_HOME"] = tempDir;
+    const target = join(tempDir, "machine-aware.txt");
+    writeFileSync(target, `home=${tempDir}`);
+    const db = getDatabase();
+    createConfig({
+      name: "Machine-aware Config",
+      kind: "file",
+      category: "tools",
+      target_path: "{{HOME_DIR}}/machine-aware.txt",
+      format: "text",
+      content: "home={{HOME_DIR}}",
+      is_template: true,
+    }, db);
+
+    const status = await getConfigsStatus(new LocalConfigStore(db));
+
+    expect(status.health.driftedTargets).toBe(0);
+    expect(status.health.missingTargets).toBe(0);
+    expect(status.health.hasDrift).toBe(false);
+    expect(status.health.status).toBe("ok");
   });
 });

@@ -12,7 +12,7 @@ import { redactContent, scanSecrets } from "../lib/redact.js";
 import { exportConfigs } from "../lib/export.js";
 import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
-import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
+import { detectMachineContext, renderMachineAwareContentPreview, resolveProfileVariables } from "../lib/machine.js";
 import { applySessionRender, restoreSessionRenderSnapshot } from "../lib/session-apply.js";
 import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
@@ -1706,16 +1706,20 @@ program
     const refConfigs = allConfigs.filter((c) => c.kind === "reference");
     const templates = allConfigs.filter((c) => c.is_template);
     const profiles = await store.listProfiles();
+    const machine = detectMachineContext();
+    const comparisonVariables = resolveProfileVariables(await store.resolveProfileForMachine(machine), machine);
 
     // Drift check
     let drifted = 0, missing = 0;
     for (const c of fileConfigs) {
       if (!c.target_path) continue;
-      const abs = expandPath(c.target_path);
+      const renderedTargetPath = renderMachineAwareContentPreview(c.target_path, comparisonVariables).content;
+      const abs = expandPath(renderedTargetPath);
       if (!existsSync(abs)) { missing++; continue; }
       const disk = readFileSync(abs, "utf-8");
       const { content: redactedDisk } = redactContent(disk, c.format as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
-      if (redactedDisk !== c.content) drifted++;
+      const expectedContent = renderMachineAwareContentPreview(c.content, comparisonVariables).content;
+      if (redactedDisk !== expectedContent) drifted++;
     }
 
     // Agent breakdown

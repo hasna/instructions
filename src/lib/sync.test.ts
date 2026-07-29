@@ -109,6 +109,22 @@ describe("diffConfig", () => {
     expect(diff).toContain("+disk content");
   });
 
+  test("renders machine-aware content and target paths before comparing", async () => {
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const target = join(tmpDir, "machine-aware.txt");
+    writeFileSync(target, `home=${tmpDir}`);
+    const db = getDatabase();
+    const c = createConfig({
+      name: "machine-aware",
+      category: "tools",
+      content: "home={{HOME_DIR}}",
+      target_path: "{{HOME_DIR}}/machine-aware.txt",
+      is_template: true,
+    }, db);
+
+    expect(await diffConfig(c, { store: new LocalConfigStore(db) })).toBe("(no diff — identical)");
+  });
+
   test("returns file not found for missing path", async () => {
     const db = getDatabase();
     const c = createConfig({ name: "missing", category: "tools", content: "x", target_path: join(tmpDir, "nope.txt") }, db);

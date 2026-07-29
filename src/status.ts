@@ -3,6 +3,7 @@ import { resolveConfigStore, type ConfigStore } from "./data/config-store.js";
 import type { Config } from "./types/index.js";
 import { expandPath } from "./lib/apply.js";
 import { isRetiredOrUnsupportedConfigAgent } from "./lib/config-agents.js";
+import { detectMachineContext, renderMachineAwareContentPreview, resolveProfileVariables } from "./lib/machine.js";
 import { getPackageVersion } from "./lib/package-version.js";
 import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
 
@@ -91,10 +92,13 @@ export async function getConfigsStatus(
   let databaseReachable = true;
   let configs: Config[] = [];
   let categoryStats: Record<string, number> = { total: 0 };
+  const machine = detectMachineContext();
+  let comparisonVariables = resolveProfileVariables(null, machine);
 
   try {
     configs = await store.listConfigs();
     categoryStats = await store.getConfigStats();
+    comparisonVariables = resolveProfileVariables(await store.resolveProfileForMachine(machine), machine);
   } catch {
     databaseReachable = false;
   }
@@ -112,7 +116,8 @@ export async function getConfigsStatus(
     if (!config.target_path) continue;
 
     knownTargets += 1;
-    const targetPath = expandPath(config.target_path);
+    const renderedTargetPath = renderMachineAwareContentPreview(config.target_path, comparisonVariables).content;
+    const targetPath = expandPath(renderedTargetPath);
     if (!existsSync(targetPath)) {
       missingTargets += 1;
       continue;
@@ -120,7 +125,8 @@ export async function getConfigsStatus(
 
     const disk = readFileSync(targetPath, "utf-8");
     const { content: redactedDisk } = redactContent(disk, config.format as RedactFormat);
-    if (redactedDisk !== config.content) {
+    const expectedContent = renderMachineAwareContentPreview(config.content, comparisonVariables).content;
+    if (redactedDisk !== expectedContent) {
       driftedTargets += 1;
     }
   }
