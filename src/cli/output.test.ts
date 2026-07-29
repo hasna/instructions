@@ -95,6 +95,30 @@ describe("configs list output", () => {
 });
 
 describe("configs apply ownership output", () => {
+  test("returns nonzero instead of writing unresolved templates", () => {
+    const home = makeTempRoot("open-configs-template-apply-cli-");
+    tempDirs.push(home);
+    const dbPath = join(home, "configs.db");
+    const target = join(home, "template.txt");
+    process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
+    resetDatabase();
+    const config = createConfig({
+      name: "Unresolved Template",
+      category: "tools",
+      content: "token={{API_TOKEN}}",
+      target_path: target,
+      is_template: true,
+    }, getDatabase());
+    resetDatabase();
+    delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+
+    const result = runCli(["apply", config.slug], dbPath, home);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Missing required template variables: API_TOKEN");
+    expect(existsSync(target)).toBe(false);
+  });
+
   test("CLI direct and profile dry-runs report owned instructions and preserve OpenCode settings", () => {
     const home = makeTempRoot("open-configs-apply-cli-");
     tempDirs.push(home);

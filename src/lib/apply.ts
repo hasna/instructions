@@ -118,11 +118,12 @@ async function writeConfigResult(
   opts: ApplyOptions,
   meta: Pick<ApplyResult, "agent" | "transform"> = {}
 ): Promise<ApplyResult> {
-  const renderedTarget = opts.vars
-    ? renderForApply(targetPath, opts.vars, opts.dryRun === true)
+  const vars = opts.vars ?? (config.is_template ? {} : undefined);
+  const renderedTarget = vars
+    ? renderForApply(targetPath, vars, opts.dryRun === true)
     : { content: targetPath, unresolved: [] };
-  const rendered = opts.vars
-    ? renderForApply(content, opts.vars, opts.dryRun === true)
+  const rendered = vars
+    ? renderForApply(content, vars, opts.dryRun === true)
     : { content, unresolved: [] };
   const renderedTargetPath = renderedTarget.content;
   const renderedContent = rendered.content;

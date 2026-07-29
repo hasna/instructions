@@ -102,6 +102,22 @@ describe("applyConfig", () => {
     expect(readFileSync(result.path, "utf-8")).toBe(`workspace=${tmpDir}/Workspace`);
   });
 
+  test("refuses to write unresolved template content", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "template.txt");
+    const c = createConfig({
+      name: "Unresolved Template",
+      category: "tools",
+      content: "token={{API_TOKEN}}",
+      target_path: target,
+      is_template: true,
+    }, db);
+
+    await expect(applyConfig(c, { store: new LocalConfigStore(db) }))
+      .rejects.toThrow("Missing required template variables: API_TOKEN");
+    expect(existsSync(target)).toBe(false);
+  });
+
   test("applies transformed outputs for canonical Claude configs", async () => {
     const db = getDatabase();
     const claudeTarget = join(tmpDir, ".claude", "CLAUDE.md");
