@@ -27,6 +27,7 @@ afterEach(() => {
 describe("detectCategory", () => {
   test("detects rules for claude.md", () => expect(detectCategory("/home/user/.claude/CLAUDE.md")).toBe("rules"));
   test("detects rules for rules dir", () => expect(detectCategory("/home/user/.claude/rules/git.md")).toBe("rules"));
+  test("detects rules for Codewith rules dir", () => expect(detectCategory("/home/user/.codewith/rules/git.md")).toBe("rules"));
   test("detects rules for Antigravity rule files whose names contain mcp", () => expect(detectCategory("/home/user/repo/.agents/rules/mcp.md")).toBe("rules"));
   test("detects agent for .claude dir", () => expect(detectCategory("/home/user/.claude/settings.json")).toBe("agent"));
   test("detects shell for .zshrc", () => expect(detectCategory("/home/user/.zshrc")).toBe("shell"));

@@ -114,6 +114,7 @@ export const KNOWN_CONFIGS: KnownConfig[] = [
 
   // ── codewith ───────────────────────────────────────────────────────────────
   { path: "~/.codewith/CODEWITH.md",      name: "codewith-codewith-md",      category: "rules", agent: "codewith", format: "markdown", optional: true },
+  { path: "~/.codewith/rules",            name: "codewith-rules",            category: "rules", agent: "codewith", rulesDir: "~/.codewith/rules", rulesExtensions: [".md"], optional: true },
   { path: "~/.codewith/config.toml",      name: "codewith-config",           category: "mcp",   agent: "codewith", format: "toml", optional: true, description: "codewith config (Codex fork, includes Skills MCP server entries)" },
 
   // ── aicopilot ──────────────────────────────────────────────────────────────
@@ -454,7 +455,7 @@ export async function diffConfig(config: Config, opts: DiffConfigOptions = {}): 
 // ── Helpers (kept for tests + add command) ────────────────────────────────────
 export function detectCategory(filePath: string): ConfigCategory {
   const p = filePath.toLowerCase().replace(getConfigHome(), "~");
-  if (p.includes("/.claude/rules/") || p.includes("/.cursor/rules/") || p.includes("/.agents/rules/") || p.endsWith("claude.md") || p.endsWith("agents.md") || p.endsWith("codewith.md") || p.endsWith("aicopilot.md") || p.endsWith("/.gemini/gemini.md") || p.endsWith(".mdc")) return "rules";
+  if (p.includes("/.claude/rules/") || p.includes("/.cursor/rules/") || p.includes("/.codewith/rules/") || p.includes("/.agents/rules/") || p.endsWith("claude.md") || p.endsWith("agents.md") || p.endsWith("codewith.md") || p.endsWith("aicopilot.md") || p.endsWith("/.gemini/gemini.md") || p.endsWith(".mdc")) return "rules";
   if (p.includes(".mcp.json") || p.includes("mcp")) return "mcp";
   if (p.includes("/.claude/") || p.includes("/.codex/") || p.includes("/.antigravity/") || p.includes("/.agents/") || p.includes("/.cursor/") || p.includes("/.config/opencode/") || p.includes("/.codewith/") || p.includes("/.config/aicopilot/") || p.includes("/.qwen/")) return "agent";
   if (p.includes(".zshrc") || p.includes(".zprofile") || p.includes(".bashrc") || p.includes(".bash_profile")) return "shell";

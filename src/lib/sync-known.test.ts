@@ -81,6 +81,8 @@ describe("KNOWN_CONFIGS", () => {
     expect(paths.has("~/.gemini/GEMINI.md")).toBe(true);
     expect(paths.has("~/.gemini/config/mcp_config.json")).toBe(true);
     expect(paths.has("~/.codewith/CODEWITH.md")).toBe(true);
+    expect(paths.has("~/.claude/rules")).toBe(true);
+    expect(paths.has("~/.codewith/rules")).toBe(true);
     expect(paths.has("~/.codewith/config.toml")).toBe(true);
     expect(paths.has("~/.cursor/rules")).toBe(true);
     expect(paths.has("~/.cursor/mcp.json")).toBe(true);
@@ -140,6 +142,28 @@ describe("syncKnown", () => {
       if (originalHome === undefined) delete process.env["CONFIGS_HOME"];
       else process.env["CONFIGS_HOME"] = originalHome;
     }
+  });
+
+  test("ingests and updates Codewith .md rules from rulesDir", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    mkdirSync(join(tmpDir, ".codewith", "rules"), { recursive: true });
+    const rulePath = join(tmpDir, ".codewith", "rules", "security.md");
+    writeFileSync(rulePath, "# Security v1");
+
+    const firstResult = await syncKnown({ store: new LocalConfigStore(db), agent: "codewith" });
+    const firstConfig = listConfigs({ agent: "codewith" }, db)[0]!;
+
+    expect(firstResult.added).toBe(1);
+    expect(firstConfig.name).toBe("codewith-rules-security.md");
+    expect(firstConfig.category).toBe("rules");
+    expect(firstConfig.target_path).toBe("~/.codewith/rules/security.md");
+
+    writeFileSync(rulePath, "# Security v2");
+    const secondResult = await syncKnown({ store: new LocalConfigStore(db), agent: "codewith" });
+
+    expect(secondResult.updated).toBe(1);
+    expect(getConfig(firstConfig.id, db).content).toBe("# Security v2");
   });
 
   test("syncs Claude prompt with fan-out outputs for all coding agents", async () => {
