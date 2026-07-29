@@ -173,10 +173,16 @@ export async function createConfig(
   if (!input.category) throw new Error("category is required");
   const id = randomUUID();
   const slug = await uniqueSlug(client, input.name);
+  const snapshotId = randomUUID();
   await client.execute(
-    `INSERT INTO configs
-       (id, name, slug, kind, category, agent, target_path, outputs, format, content, description, tags, is_template, version, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12::jsonb,$13,1,now(),now())`,
+    `WITH inserted_config AS (
+       INSERT INTO configs
+         (id, name, slug, kind, category, agent, target_path, outputs, format, content, description, tags, is_template, version, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12::jsonb,$13,1,now(),now())
+       RETURNING id, content, version
+     )
+     INSERT INTO config_snapshots (id, config_id, content, version, created_at)
+     SELECT $14, id, content, version, now() FROM inserted_config`,
     [
       id,
       input.name,
@@ -191,6 +197,7 @@ export async function createConfig(
       input.description ?? null,
       JSON.stringify(input.tags ?? []),
       input.is_template ?? false,
+      snapshotId,
     ],
   );
   return getConfig(client, id);
@@ -225,8 +232,16 @@ export async function updateConfig(
   if (input.synced_at !== undefined) set("synced_at", input.synced_at, "::timestamptz");
 
   params.push(existing.id);
+  const configIdParam = params.length;
+  params.push(randomUUID());
+  const snapshotIdParam = params.length;
   await client.execute(
-    `UPDATE configs SET ${sets.join(", ")} WHERE id = $${params.length}`,
+    `WITH updated_config AS (
+       UPDATE configs SET ${sets.join(", ")} WHERE id = $${configIdParam}
+       RETURNING id, content, version
+     )
+     INSERT INTO config_snapshots (id, config_id, content, version, created_at)
+     SELECT $${snapshotIdParam}, id, content, version, now() FROM updated_config`,
     params,
   );
   return getConfig(client, existing.id);

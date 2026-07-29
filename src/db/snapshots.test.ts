@@ -36,10 +36,9 @@ describe("snapshots", () => {
 
   test("getSnapshotByVersion returns correct snapshot", () => {
     const c = createConfig({ name: "C", category: "rules", content: "" }, db);
-    createSnapshot(c.id, "v1", 1, db);
     createSnapshot(c.id, "v2", 2, db);
-    const snap = getSnapshotByVersion(c.id, 1, db);
-    expect(snap?.content).toBe("v1");
+    const snap = getSnapshotByVersion(c.id, 2, db);
+    expect(snap?.content).toBe("v2");
   });
 
   test("pruneSnapshots keeps only N most recent", () => {

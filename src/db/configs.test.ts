@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { getDatabase, resetDatabase } from "./database";
 import { createConfig, getConfig, listConfigs, updateConfig, deleteConfig, getConfigStats } from "./configs";
+import { listSnapshots } from "./snapshots";
 import type { Database } from "bun:sqlite";
 
 let db: Database;
@@ -25,6 +26,30 @@ describe("createConfig", () => {
     expect(c.version).toBe(1);
     expect(c.tags).toEqual([]);
     expect(c.is_template).toBe(false);
+  });
+
+  test("creates the initial version snapshot", () => {
+    const c = base();
+    const snapshots = listSnapshots(c.id, db);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      config_id: c.id,
+      content: "hello",
+      version: 1,
+    });
+  });
+
+  test("rolls back creation when the initial snapshot cannot be written", () => {
+    db.exec(`
+      CREATE TRIGGER reject_config_snapshot
+      BEFORE INSERT ON config_snapshots
+      BEGIN
+        SELECT RAISE(ABORT, 'snapshot rejected');
+      END
+    `);
+
+    expect(() => base()).toThrow("snapshot rejected");
+    expect(listConfigs(undefined, db)).toHaveLength(0);
   });
 
   test("auto-generates unique slugs", () => {
@@ -120,6 +145,10 @@ describe("updateConfig", () => {
     const updated = updateConfig(c.id, { content: "updated" }, db);
     expect(updated.content).toBe("updated");
     expect(updated.version).toBe(2);
+    expect(listSnapshots(c.id, db).map(({ content, version }) => ({ content, version }))).toEqual([
+      { content: "updated", version: 2 },
+      { content: "hello", version: 1 },
+    ]);
   });
 
   test("updates name and regenerates slug", () => {
@@ -133,6 +162,22 @@ describe("updateConfig", () => {
     const c = base();
     const updated = updateConfig(c.id, { tags: ["x", "y"] }, db);
     expect(updated.tags).toEqual(["x", "y"]);
+    expect(listSnapshots(c.id, db).map((snapshot) => snapshot.version)).toEqual([2, 1]);
+  });
+
+  test("rolls back an update when its snapshot cannot be written", () => {
+    const c = base();
+    db.exec(`
+      CREATE TRIGGER reject_config_snapshot
+      BEFORE INSERT ON config_snapshots
+      BEGIN
+        SELECT RAISE(ABORT, 'snapshot rejected');
+      END
+    `);
+
+    expect(() => updateConfig(c.id, { content: "not persisted" }, db)).toThrow("snapshot rejected");
+    expect(getConfig(c.id, db)).toMatchObject({ content: "hello", version: 1 });
+    expect(listSnapshots(c.id, db)).toHaveLength(1);
   });
 
   test("updates output fan-out targets", () => {

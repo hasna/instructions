@@ -9,6 +9,7 @@ import type {
 } from "../types/index.js";
 import { ConfigNotFoundError } from "../types/index.js";
 import { getDatabase, now, slugify, uuid } from "./database.js";
+import { createSnapshot } from "./snapshots.js";
 
 function rowToConfig(row: ConfigRow): Config {
   let outputs: ConfigOutput[] = [];
@@ -52,29 +53,31 @@ export function createConfig(input: CreateConfigInput, db?: Database): Config {
   const tags = JSON.stringify(input.tags || []);
   const outputs = JSON.stringify(input.outputs || []);
 
-  d.run(
-    `INSERT INTO configs (id, name, slug, kind, category, agent, target_path, outputs, format, content, description, tags, is_template, version, created_at, updated_at, synced_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
-    [
-      id,
-      input.name,
-      slug,
-      input.kind ?? "file",
-      input.category,
-      input.agent ?? "global",
-      input.target_path ?? null,
-      outputs,
-      input.format ?? "text",
-      input.content,
-      input.description ?? null,
-      tags,
-      input.is_template ? 1 : 0,
-      ts,
-      ts,
-    ]
-  );
-
-  return getConfig(id, d);
+  return d.transaction(() => {
+    d.run(
+      `INSERT INTO configs (id, name, slug, kind, category, agent, target_path, outputs, format, content, description, tags, is_template, version, created_at, updated_at, synced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
+      [
+        id,
+        input.name,
+        slug,
+        input.kind ?? "file",
+        input.category,
+        input.agent ?? "global",
+        input.target_path ?? null,
+        outputs,
+        input.format ?? "text",
+        input.content,
+        input.description ?? null,
+        tags,
+        input.is_template ? 1 : 0,
+        ts,
+        ts,
+      ]
+    );
+    createSnapshot(id, input.content, 1, d);
+    return getConfig(id, d);
+  })();
 }
 
 export function getConfig(idOrSlug: string, db?: Database): Config {
@@ -165,10 +168,13 @@ export function updateConfig(
   if (input.is_template !== undefined) { updates.push("is_template = ?"); params.push(input.is_template ? 1 : 0); }
   if (input.synced_at !== undefined) { updates.push("synced_at = ?"); params.push(input.synced_at); }
 
-  params.push(existing.id);
-  d.run(`UPDATE configs SET ${updates.join(", ")} WHERE id = ?`, params);
-
-  return getConfigById(existing.id, d);
+  return d.transaction(() => {
+    params.push(existing.id);
+    d.run(`UPDATE configs SET ${updates.join(", ")} WHERE id = ?`, params);
+    const updated = getConfigById(existing.id, d);
+    createSnapshot(updated.id, updated.content, updated.version, d);
+    return updated;
+  })();
 }
 
 export function deleteConfig(idOrSlug: string, db?: Database): void {

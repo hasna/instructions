@@ -54,12 +54,13 @@ describe("MCP tool logic", () => {
     expect(profiles[0].name).toBe("Setup");
   });
 
-  test("get_snapshot returns null when no snapshots", () => {
+  test("get_snapshot returns the initial config snapshot", () => {
     const db = getDatabase();
     const c = createConfig({ name: "C", category: "rules", content: "" }, db);
     const { listSnapshots } = require("../db/snapshots");
     const snaps = listSnapshots(c.id, db);
-    expect(snaps.length).toBe(0);
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0]).toMatchObject({ config_id: c.id, content: "", version: 1 });
   });
 
   test("search_tools finds by keyword", () => {
