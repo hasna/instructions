@@ -1374,8 +1374,8 @@ export function sourceFromConfig(
   layer?: SessionInstructionLayer,
 ): SessionInstructionSource {
   const isAgentOperatingRules = config.slug === GLOBAL_AGENT_RULES_STANDARD_SLUG;
-  // Stored content is authoritative once it declares a current rules version; the
-  // embedded baseline only backstops an empty, unversioned, or strictly older record.
+  // Stored content is authoritative once it declares a current, non-retired rules
+  // version; the embedded baseline backstops an empty, unversioned, old, or retired row.
   const rules = isAgentOperatingRules ? resolveAgentOperatingRulesPayload(config.content) : null;
   return {
     id: config.slug,

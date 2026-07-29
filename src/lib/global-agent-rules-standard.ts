@@ -9,6 +9,15 @@ export const AGENT_OPERATING_RULES_SOURCE_ID = "hasna-agent-operating-rules" as 
 /** Role a source declares in its metadata to be treated as the agent operating rules. */
 export const AGENT_OPERATING_RULES_ROLE = "agent-operating-rules" as const;
 export const AGENT_OPERATING_RULES_VERSION = "1.1.6" as const;
+/**
+ * Rules releases explicitly retired by governance decision.
+ *
+ * v1.2.0 was an unratified fork that inverted the scoped freeze doctrine. It must
+ * not become authoritative merely because its self-declared version sorts above the
+ * ratified 1.1.x line. Keep this list narrow: other newer stored releases remain the
+ * normal distribution path until authenticated payloads replace version-only currency.
+ */
+export const RETIRED_AGENT_OPERATING_RULES_VERSIONS = ["1.2.0"] as const;
 export const AGENT_OPERATING_RULES_SOURCE_SET_VERSION = "2026-07-23" as const;
 export const AGENT_OPERATING_RULES_SENTINEL = "<!-- hasna:agent-operating-rules v=1.1.6 -->" as const;
 /**
@@ -123,9 +132,9 @@ export type AgentOperatingRulesPayloadOrigin = "stored-config" | "embedded-basel
  *
  * `pinned-digest` means the bytes matched `AGENT_OPERATING_RULES_PAYLOAD_SHA256`.
  * `unverified-self-declared` means they were accepted solely because their sentinel
- * declared a version above the baseline — no integrity evidence exists for them. The
- * distinction is recorded in provenance and metadata so a rendered manifest states
- * which of the two it carries instead of leaving the trust decision implicit.
+ * declared a non-retired version above the baseline — no integrity evidence exists for
+ * them. The distinction is recorded in provenance and metadata so a rendered manifest
+ * states which of the two it carries instead of leaving the trust decision implicit.
  */
 export type AgentOperatingRulesPayloadIntegrity = "pinned-digest" | "unverified-self-declared";
 
@@ -158,6 +167,13 @@ export function compareAgentOperatingRulesVersions(left: string, right: string):
   return 0;
 }
 
+/** Whether a declared version is semantically equal to an explicitly retired release. */
+export function isRetiredAgentOperatingRulesVersion(version: string): boolean {
+  return RETIRED_AGENT_OPERATING_RULES_VERSIONS.some(
+    (retiredVersion) => compareAgentOperatingRulesVersions(version, retiredVersion) === 0,
+  );
+}
+
 function payloadDate(content: string): string | null {
   // Same canonical heading the floor keys on, matched anywhere in the payload here because
   // this only reads a date and does not decide trust.
@@ -179,13 +195,14 @@ function sha256(content: string): string {
  * Selects the agent-operating-rules payload to serve, and derives an attestation
  * that describes the bytes actually selected.
  *
- * The embedded baseline is a currency FLOOR, not a ceiling. A stored payload that
- * declares a STRICTLY NEWER version is authoritative — that is how a newly published
- * rules version reaches machines. The baseline is served whenever the stored payload
- * cannot be shown to be current:
+ * The embedded baseline is a currency FLOOR, not a ceiling. Except for releases that
+ * have been explicitly retired, a stored payload that declares a STRICTLY NEWER version
+ * is authoritative — that is how a newly published rules version reaches machines. The
+ * baseline is served whenever the stored payload cannot be shown to be current:
  *
  * - it is empty or declares no version sentinel;
  * - it declares a strictly older version;
+ * - it declares an explicitly retired version;
  * - it declares the baseline version but its bytes do not match
  *   `AGENT_OPERATING_RULES_PAYLOAD_SHA256`. At the one version this module can verify,
  *   the pinned digest is enforced, so a same-version record whose body was edited or
@@ -194,9 +211,10 @@ function sha256(content: string): string {
  * LIMIT OF THIS CHECK — do not read it as tamper-proofing, and do not restate it as a
  * system-wide guarantee. Two limits are real and neither is closed here:
  *
- * 1. The sentinel is self-declared and the payload is unsigned, so a payload that raises
- *    its own sentinel above the baseline IS served verbatim — and it can do more than sit
- *    alongside the real rules. A source that also mimics the managed privilege markers
+ * 1. The sentinel is self-declared and the payload is unsigned, so unless its exact
+ *    semantic version has been explicitly retired, a payload that raises its own sentinel
+ *    above the baseline IS served verbatim — and it can do more than sit alongside the
+ *    real rules. A source that also mimics the managed privilege markers
  *    ties on priority in `deduplicateSemanticPolicySources` and then WINS on version,
  *    EVICTING the genuine baseline from the same render; the collapse happens before
  *    `rejectDuplicateSourceSlugs` runs, so the duplicate-slug guard never sees the
@@ -233,7 +251,8 @@ export function resolveAgentOperatingRulesPayload(
   const baselineOrder = storedVersion === null
     ? null
     : compareAgentOperatingRulesVersions(storedVersion, AGENT_OPERATING_RULES_VERSION);
-  const storedIsCurrent = baselineOrder !== null
+  const storedIsRetired = storedVersion !== null && isRetiredAgentOperatingRulesVersion(storedVersion);
+  const storedIsCurrent = !storedIsRetired && baselineOrder !== null
     && (baselineOrder > 0
       || (baselineOrder === 0 && sha256(stored) === AGENT_OPERATING_RULES_PAYLOAD_SHA256));
 
@@ -327,10 +346,10 @@ function standardConfigInput(payload: AgentOperatingRulesPayload) {
 
 /**
  * Seeds the managed rules config, and repairs it when it is stale or altered — but
- * never downgrades it. A stored payload declaring a strictly newer version keeps its
- * content and only has its record metadata reconciled to describe what it holds. A
- * record at the baseline version whose bytes do not match the pinned digest is repaired
- * back to the canonical payload, so a gutted same-version record is not blessed.
+ * never downgrades it. A stored payload declaring a strictly newer, non-retired version
+ * keeps its content and only has its record metadata reconciled to describe what it
+ * holds. A retired release, or a record at the baseline version whose bytes do not match
+ * the pinned digest, is repaired back to the canonical payload.
  */
 export async function ensureGlobalAgentRulesStandardConfig(store: ConfigStore = resolveConfigStore()): Promise<Config> {
   let existing: Config;

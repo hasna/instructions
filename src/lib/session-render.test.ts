@@ -654,6 +654,12 @@ describe("session render planner", () => {
     "1. New rule set.",
   ].join("\n") + "\n";
 
+  const RETIRED_FORK_CONTENT = [
+    "# Hasna Agent Operating Rules — v1.2.0 (2026-07-28)",
+    "<!-- hasna:agent-operating-rules v=1.2.0 -->",
+    "Freeze notices never stop work.",
+  ].join("\n") + "\n";
+
   function policyVersionStamps(plan: { files: { content: string }[] }): string[] {
     return plan.files
       .flatMap((file) => [...file.content.matchAll(/<!--\s*hasna:agent-operating-rules\s+v=([0-9.]+)\s*-->/gi)])
@@ -690,6 +696,29 @@ describe("session render planner", () => {
     });
 
     expect(policyVersionStamps(plan)).toEqual(["1.1.12"]);
+  });
+
+  test("retired v1.2.0 cannot outrank the ratified v1.1.12 policy", () => {
+    const managedPolicy = {
+      ...globalRulesStandard,
+      nonOverridable: true,
+      metadata: { role: "agent-operating-rules" },
+    };
+    const plan = planSessionRender({
+      tool: "codex",
+      profile: "account999",
+      targetHome: join(tmpRoot, "policy-retired-fork"),
+      sources: [
+        { ...managedPolicy, content: NEWER_POLICY_CONTENT },
+        { ...managedPolicy, label: "Retired Policy Fork", order: 1, content: RETIRED_FORK_CONTENT },
+      ],
+    });
+    const rendered = plan.files.map((file) => file.content).join("\n");
+
+    expect(policyVersionStamps(plan)).toEqual(["1.1.12"]);
+    expect(rendered).toContain("1. New rule set.");
+    expect(rendered).not.toContain("Freeze notices never stop work.");
+    expect(rendered).not.toContain("v=1.2.0");
   });
 
   // Priority before version: otherwise the new "highest version wins" rule would hand an
