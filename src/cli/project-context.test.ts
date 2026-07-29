@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { computeProjectContextSourceHash, type ProjectContextBundleV1 } from "../lib/project-context";
+import { makeTempRoot } from "../lib/test-temp-root";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -59,7 +59,7 @@ describe("project-context CLI", () => {
   });
 
   test("plans from a durable file without writing and applies through the codex alias", () => {
-    const root = mkdtempSync(join(tmpdir(), "instructions-project-context-cli-"));
+    const root = makeTempRoot("instructions-project-context-cli-");
     try {
       const path = join(root, "bundle.json");
       writeFileSync(path, `${JSON.stringify(bundle())}\n`);
@@ -105,7 +105,7 @@ describe("project-context CLI", () => {
   });
 
   test("accepts stdin but records only durable cache provenance", () => {
-    const root = mkdtempSync(join(tmpdir(), "instructions-project-context-cli-"));
+    const root = makeTempRoot("instructions-project-context-cli-");
     try {
       const result = runCli([
         "project-context", "apply",
@@ -124,7 +124,7 @@ describe("project-context CLI", () => {
   });
 
   test("uses explicit stale cache fallback when a requested bundle file is unavailable", () => {
-    const root = mkdtempSync(join(tmpdir(), "instructions-project-context-cli-"));
+    const root = makeTempRoot("instructions-project-context-cli-");
     try {
       const seed = runCli([
         "project-context", "apply",
@@ -153,7 +153,7 @@ describe("project-context CLI", () => {
   });
 
   test("returns a stable JSON error for strict-contract violations", () => {
-    const root = mkdtempSync(join(tmpdir(), "instructions-project-context-cli-"));
+    const root = makeTempRoot("instructions-project-context-cli-");
     try {
       const invalid = { ...bundle(), arbitrary: true };
       const result = runCli([
@@ -178,7 +178,7 @@ describe("project-context CLI", () => {
   });
 
   test("rejects oversized file and stdin input before parsing", () => {
-    const root = mkdtempSync(join(tmpdir(), "instructions-project-context-cli-"));
+    const root = makeTempRoot("instructions-project-context-cli-");
     try {
       const oversized = "x".repeat((8 * 1024) + 1);
       const path = join(root, "oversized.json");

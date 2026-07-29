@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalConfigStore } from "../data/config-store";
 import { getDatabase, resetDatabase } from "../db/database";
@@ -18,6 +17,7 @@ import {
   type SessionInstructionSource,
   type SessionRenderTool,
 } from "./session-render";
+import { tempRootPath } from "./test-temp-root";
 
 const ACCEPTED_RULES_VERSION = "1.1.6";
 const ACCEPTED_SOURCE_SET_VERSION = "2026-07-23";
@@ -47,7 +47,7 @@ beforeEach(() => {
   resetDatabase();
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   db = getDatabase();
-  tmpRoot = join(tmpdir(), `instructions-agent-rules-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  tmpRoot = tempRootPath(`instructions-agent-rules-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 });
 
 afterEach(() => {

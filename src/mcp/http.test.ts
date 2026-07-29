@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createConfig } from "../db/configs.js";
 import { getDatabase, resetDatabase } from "../db/database.js";
@@ -14,6 +13,7 @@ import {
   resolveHttpPort,
   startMcpHttpServer,
 } from "./http.js";
+import { makeTempRoot } from "../lib/test-temp-root";
 
 const servers: Array<{ stop: () => void }> = [];
 
@@ -120,7 +120,7 @@ describe("configs MCP HTTP transport", () => {
   });
 
   it("applies direct and profile dry-runs through one ownership gate", async () => {
-    const home = mkdtempSync(join(tmpdir(), "configs-mcp-ownership-"));
+    const home = makeTempRoot("configs-mcp-ownership-");
     process.env["CONFIGS_HOME"] = home;
     const db = getDatabase();
     const claude = createConfig({

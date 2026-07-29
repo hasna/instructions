@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ANTIGRAVITY_RULE_FILE_CHAR_LIMIT,
@@ -18,6 +17,7 @@ import {
   GLOBAL_AGENT_RULES_STANDARD_CONTENT,
   NO_BRITTLE_HARDCODING_RULE,
 } from "./global-agent-rules-standard";
+import { makeTempRoot } from "./test-temp-root";
 
 const globalIdentity: SessionInstructionSource = {
   id: "global-codewith",
@@ -58,7 +58,7 @@ function restoreEnv(name: string, value: string | undefined): void {
 }
 
 beforeEach(() => {
-  tmpRoot = mkdtempSync(join(tmpdir(), "open-configs-session-render-"));
+  tmpRoot = makeTempRoot("open-configs-session-render-");
   previousRawHome = process.env["HASNA_CONFIGS_HOME"];
   previousHome = process.env["HOME"];
   previousCodewithNativeImports = process.env[CODEWITH_NATIVE_IMPORTS_ENV];

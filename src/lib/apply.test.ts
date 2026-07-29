@@ -2,20 +2,20 @@ import { LocalConfigStore } from "../data/config-store";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig } from "../db/configs";
 import { applyConfig, applyConfigs, applyConfigsWithReport } from "./apply";
 import { ANTIGRAVITY_RULE_FILE_CHAR_LIMIT } from "./session-render";
 import { detectMachineContext, resolveProfileVariables } from "./machine";
 import type { ConfigAgent } from "../types";
+import { tempRootPath } from "./test-temp-root";
 
 let tmpDir: string;
 
 beforeEach(() => {
   resetDatabase();
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
-  tmpDir = join(tmpdir(), `configs-test-${Date.now()}`);
+  tmpDir = tempRootPath(`configs-test-${Date.now()}`);
   mkdirSync(tmpDir, { recursive: true });
 });
 

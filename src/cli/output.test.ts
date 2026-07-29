@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createConfig } from "../db/configs";
 import { getDatabase, resetDatabase } from "../db/database";
 import { addConfigToProfile, createProfile } from "../db/profiles";
+import { makeTempRoot } from "../lib/test-temp-root";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const tempDirs: string[] = [];
@@ -28,7 +28,7 @@ function runCli(args: string[], dbPath: string, home?: string) {
 }
 
 function seedConfigs(count: number): { home: string; dbPath: string } {
-  const home = mkdtempSync(join(tmpdir(), "open-configs-output-cli-"));
+  const home = makeTempRoot("open-configs-output-cli-");
   tempDirs.push(home);
   const dbPath = join(home, "configs.db");
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
@@ -96,7 +96,7 @@ describe("configs list output", () => {
 
 describe("configs apply ownership output", () => {
   test("CLI direct and profile dry-runs report owned instructions and preserve OpenCode settings", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-apply-cli-"));
+    const home = makeTempRoot("open-configs-apply-cli-");
     tempDirs.push(home);
     const dbPath = join(home, "configs.db");
     process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;

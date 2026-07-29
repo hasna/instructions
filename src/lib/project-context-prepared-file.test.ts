@@ -23,8 +23,7 @@
 //     platform rather than only on the one that can produce the defect.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ProjectContextError,
@@ -32,6 +31,7 @@ import {
   projectContextFileOpsDiagnostics,
   writeProjectContextCoordinatedFile,
 } from "./project-context";
+import { makeTempRoot } from "./test-temp-root";
 
 // The modes arm64 macOS actually produced for a 0o644 request, measured on
 // station03 on 2026-07-29, each with a Linux control that returned 0o644 from the
@@ -46,7 +46,7 @@ let tmpRoot = "";
 let previousUmask = 0;
 
 beforeEach(() => {
-  tmpRoot = mkdtempSync(join(tmpdir(), "instructions-prepared-file-"));
+  tmpRoot = makeTempRoot("instructions-prepared-file-");
   // Pin the umask so `0o644` is an exact expectation rather than a machine
   // property. Without this the suite passes or fails depending on the developer's
   // shell, which is the sort of environment coupling that hid this defect.
