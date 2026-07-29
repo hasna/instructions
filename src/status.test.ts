@@ -1,7 +1,6 @@
 import { LocalConfigStore } from "./data/config-store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDatabase, resetDatabase } from "./db/database";
 import { createConfig } from "./db/configs";
@@ -9,13 +8,14 @@ import { createProfile, addConfigToProfile } from "./db/profiles";
 import { registerMachine } from "./db/machines";
 import { getConfigsStatus } from "./status";
 import type { ConfigAgent } from "./types";
+import { tempRootPath } from "./lib/test-temp-root";
 
 let tempDir = "";
 
 beforeEach(() => {
   resetDatabase();
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
-  tempDir = join(tmpdir(), `configs-status-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  tempDir = tempRootPath(`configs-status-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
 });
 

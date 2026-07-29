@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { GLOBAL_AGENT_RULES_STANDARD_CONTENT } from "../lib/global-agent-rules-standard";
+import { makeTempRoot } from "../lib/test-temp-root";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -33,7 +33,7 @@ describe("configs session CLI", () => {
   });
 
   test("selects the gated Codewith native-import adapter from session CLI", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    const home = makeTempRoot("open-configs-session-cli-");
     try {
       mkdirSync(join(home, "sources"), { recursive: true });
       writeFileSync(join(home, "sources", "global.md"), "Global native-import source");
@@ -66,7 +66,7 @@ describe("configs session CLI", () => {
   });
 
   test("fails closed when no sources are provided unless explicitly allowed", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    const home = makeTempRoot("open-configs-session-cli-");
     try {
       const env = {
         HOME: home,
@@ -103,7 +103,7 @@ describe("configs session CLI", () => {
   });
 
   test("expands quoted source and target paths before planning", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    const home = makeTempRoot("open-configs-session-cli-");
     try {
       mkdirSync(join(home, "sources"), { recursive: true });
       writeFileSync(join(home, "sources", "global.md"), "Global CLI source");
@@ -140,7 +140,7 @@ describe("configs session CLI", () => {
   });
 
   test("applies session files only outside dry-run", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    const home = makeTempRoot("open-configs-session-cli-");
     try {
       mkdirSync(join(home, "sources"), { recursive: true });
       writeFileSync(join(home, "sources", "global.md"), "Global CLI apply source");
@@ -192,7 +192,7 @@ describe("configs session CLI", () => {
   });
 
   test("restores an unchanged applied snapshot through the session CLI", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    const home = makeTempRoot("open-configs-session-cli-");
     try {
       const sourcePath = join(home, "global.md");
       const targetHome = join(home, "session-home");
@@ -249,7 +249,7 @@ describe("configs session CLI", () => {
   });
 
   test("loads OpenIdentities configs exports and provider layer aliases", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    const home = makeTempRoot("open-configs-session-cli-");
     try {
       const exportPath = join(home, "instructions.json");
       writeFileSync(exportPath, JSON.stringify({
@@ -309,7 +309,7 @@ describe("configs session CLI", () => {
   });
 
   test("applies canonical identity exports with source paths and filters rule provider blocks", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    const home = makeTempRoot("open-configs-session-cli-");
     try {
       const exportDir = join(home, "identity-export");
       mkdirSync(join(exportDir, "providers"), { recursive: true });
@@ -387,7 +387,7 @@ describe("configs session CLI", () => {
   });
 
   test("deduplicates one semantic policy across config and identity-export transports", () => {
-    const home = mkdtempSync(join(tmpdir(), "open-configs-session-cli-"));
+    const home = makeTempRoot("open-configs-session-cli-");
     try {
       const dbPath = join(home, "instructions.db");
       const env = {

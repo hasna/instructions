@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { scanPackageManagerSecrets } from "./package-manager-guard";
+import { makeTempRoot } from "./test-temp-root";
 
 function withTempRepo(fn: (dir: string) => void) {
-  const dir = mkdtempSync(join(tmpdir(), "configs-package-guard-"));
+  const dir = makeTempRoot("configs-package-guard-");
   try {
     fn(dir);
   } finally {

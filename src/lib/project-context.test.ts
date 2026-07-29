@@ -5,7 +5,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
+  
   readdirSync,
   readFileSync,
   renameSync,
@@ -15,7 +15,6 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   PROJECT_CONTEXT_FRAGMENT_PATH,
@@ -32,6 +31,7 @@ import {
 } from "./project-context";
 import { CODEWITH_NATIVE_IMPORTS_ENV, planSessionRender, type SessionRenderTool } from "./session-render";
 import { applySessionRender } from "./session-apply";
+import { makeTempRoot } from "./test-temp-root";
 
 let tmpRoot = "";
 let previousCodewithNativeImports: string | undefined;
@@ -39,7 +39,7 @@ let previousCodewithNativeImports: string | undefined;
 beforeEach(() => {
   previousCodewithNativeImports = process.env[CODEWITH_NATIVE_IMPORTS_ENV];
   delete process.env[CODEWITH_NATIVE_IMPORTS_ENV];
-  tmpRoot = mkdtempSync(join(tmpdir(), "instructions-project-context-"));
+  tmpRoot = makeTempRoot("instructions-project-context-");
 });
 
 afterEach(() => {

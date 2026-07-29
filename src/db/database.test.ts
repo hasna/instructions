@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { getDatabase, resetDatabase, insertFeedback, uuid, now, slugify } from "./database";
+import { makeTempRoot } from "../lib/test-temp-root";
 
 let originalHome: string | undefined;
 let tempHome: string | null = null;
@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 function useTempHome(): string {
-  tempHome = mkdtempSync(join(tmpdir(), "configs-home-"));
+  tempHome = makeTempRoot("configs-home-");
   process.env["HOME"] = tempHome;
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];

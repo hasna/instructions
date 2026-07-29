@@ -8,7 +8,16 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # The renderer reaches libc through bun:ffi, and a calling convention that is
+    # right on Linux can be wrong on arm64 macOS — that is exactly how a defect
+    # that stopped every macOS machine from writing a single file survived a month
+    # of green Linux runs. `macos-latest` is arm64, the platform that produced it.
+    # Most of the fleet is macOS; a Linux-only matrix does not cover the fleet.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4

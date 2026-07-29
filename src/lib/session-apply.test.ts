@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applySessionRender, checkSessionRenderDrift, restoreSessionRenderSnapshot } from "./session-apply";
 import { planSessionRender, sourcesFromIdentityExport, type SessionInstructionSource, type SessionRenderTool } from "./session-render";
+import { tempRootPath } from "./test-temp-root";
 
 let tmpRoot = "";
 
@@ -40,7 +40,7 @@ const replacementIdentity: SessionInstructionSource = {
 };
 
 beforeEach(() => {
-  tmpRoot = join(tmpdir(), `open-configs-session-apply-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  tmpRoot = tempRootPath(`open-configs-session-apply-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   mkdirSync(tmpRoot, { recursive: true });
 });
 
