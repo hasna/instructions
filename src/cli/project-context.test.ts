@@ -17,10 +17,10 @@ function runCli(args: string[], input?: string) {
   });
 }
 
-function bundle(): ProjectContextBundleV1 {
+function bundle(generatedAt = "2026-07-22T10:00:00.000Z"): ProjectContextBundleV1 {
   const value: ProjectContextBundleV1 = {
     schema: "hasna.projects.project_context_bundle.v1",
-    generated_at: "2026-07-22T10:00:00.000Z",
+    generated_at: generatedAt,
     hash: "",
     revision: "rev-9",
     freshness: "fresh",
@@ -126,13 +126,14 @@ describe("project-context CLI", () => {
   test("uses explicit stale cache fallback when a requested bundle file is unavailable", () => {
     const root = makeTempRoot("instructions-project-context-cli-");
     try {
+      const currentBundle = bundle(new Date().toISOString());
       const seed = runCli([
         "project-context", "apply",
         "--runtime", "agents",
         "--workspace-root", root,
         "--bundle", "-",
         "--json",
-      ], `${JSON.stringify(bundle())}\n`);
+      ], `${JSON.stringify(currentBundle)}\n`);
       expect(seed.status).toBe(0);
 
       const fallback = runCli([
