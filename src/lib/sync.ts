@@ -437,14 +437,14 @@ export async function diffConfig(config: Config, opts: DiffConfigOptions = {}): 
 
   if (config.target_path) {
     const diff = buildDiff(config.content, config.target_path);
-    if (!diff.includes("no diff")) diffs.push(diff);
+    if (diff !== "(no diff — identical)") diffs.push(diff);
   }
 
   if (config.outputs.length > 0) {
     for (const output of config.outputs) {
       const expected = applyTransform(config, output, { configs: contextConfigs });
       const diff = buildDiff(expected, output.target_path);
-      if (!diff.includes("no diff")) diffs.push(diff);
+      if (diff !== "(no diff — identical)") diffs.push(diff);
     }
   }
 

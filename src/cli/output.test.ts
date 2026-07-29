@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -91,6 +91,65 @@ describe("configs list output", () => {
     expect(records).toHaveLength(4);
     expect(records[0]?.content).toContain("xxx");
     expect(records[0]?.outputs).toHaveLength(1);
+  });
+});
+
+describe("configs diff --all output", () => {
+  test("reports every divergent config regardless of diff text", () => {
+    const home = makeTempRoot("open-configs-diff-all-cli-");
+    tempDirs.push(home);
+    const dbPath = join(home, "configs.db");
+    process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
+    resetDatabase();
+    const db = getDatabase();
+
+    const noDiffText = createConfig({
+      name: "No Diff Text",
+      category: "tools",
+      kind: "file",
+      target_path: join(home, "no-diff.txt"),
+      content: "stored no diff text",
+    }, db);
+    writeFileSync(noDiffText.target_path!, "disk no diff text");
+
+    const notFoundText = createConfig({
+      name: "Not Found Text",
+      category: "tools",
+      kind: "file",
+      target_path: join(home, "not-found.txt"),
+      content: "stored not found text",
+    }, db);
+    writeFileSync(notFoundText.target_path!, "disk not found text");
+
+    const missing = createConfig({
+      name: "Missing Target",
+      category: "tools",
+      kind: "file",
+      target_path: join(home, "missing.txt"),
+      content: "stored content",
+    }, db);
+
+    const identical = createConfig({
+      name: "Identical Target",
+      category: "tools",
+      kind: "file",
+      target_path: join(home, "identical.txt"),
+      content: "identical content",
+    }, db);
+    writeFileSync(identical.target_path!, identical.content);
+
+    resetDatabase();
+    delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+
+    const result = runCli(["diff", "--all"], dbPath, home);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(noDiffText.slug);
+    expect(result.stdout).toContain(notFoundText.slug);
+    expect(result.stdout).toContain(missing.slug);
+    expect(result.stdout).toContain("file not found on disk");
+    expect(result.stdout).not.toContain(identical.slug);
+    expect(result.stdout).toContain("3/4 drifted");
   });
 });
 

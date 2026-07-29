@@ -490,7 +490,7 @@ program
       for (const c of configs) {
         if (!c.target_path) continue;
         const diff = await diffConfig(c, { store });
-        if (diff.includes("no diff") || diff.includes("not found")) continue;
+        if (diff === "(no diff — identical)") continue;
         drifted++;
         console.log(chalk.bold(c.slug) + chalk.dim(` (${c.target_path})`));
         console.log(diff);
