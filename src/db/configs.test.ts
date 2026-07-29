@@ -34,6 +34,16 @@ describe("createConfig", () => {
     expect(c2.slug).toBe("same-name-1");
   });
 
+  test("rejects a second config for the same target path", () => {
+    createConfig({ name: "Owner", category: "rules", content: "", target_path: "~/.claude/CLAUDE.md" }, db);
+    expect(() => createConfig({
+      name: "Duplicate",
+      category: "rules",
+      content: "",
+      target_path: "~/.claude/CLAUDE.md",
+    }, db)).toThrow();
+  });
+
   test("stores tags as array", () => {
     const c = createConfig({ name: "Tagged", category: "agent", content: "", tags: ["foo", "bar"] }, db);
     expect(c.tags).toEqual(["foo", "bar"]);
@@ -146,6 +156,14 @@ describe("updateConfig", () => {
     expect(updated.outputs).toEqual([
       { agent: "cursor", target_path: "~/.cursor/rules/claude.mdc", transform: "cursor-mdc" },
     ]);
+  });
+
+  test("rejects an update that would duplicate a target path", () => {
+    createConfig({ name: "Owner", category: "rules", content: "", target_path: "~/.claude/CLAUDE.md" }, db);
+    const other = createConfig({ name: "Other", category: "rules", content: "", target_path: "~/.codex/AGENTS.md" }, db);
+
+    expect(() => updateConfig(other.id, { target_path: "~/.claude/CLAUDE.md" }, db)).toThrow();
+    expect(getConfig(other.id, db).target_path).toBe("~/.codex/AGENTS.md");
   });
 });
 

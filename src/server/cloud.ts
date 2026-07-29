@@ -120,9 +120,11 @@ export async function ensureCloudSchema(): Promise<void> {
   if (schemaEnsured) return schemaEnsured;
   schemaEnsured = (async () => {
     const client = getClient();
-    for (const sql of instructionsSchemaSql()) {
-      await client.execute(sql);
-    }
+    await client.transaction(async (transaction) => {
+      for (const sql of instructionsSchemaSql()) {
+        await transaction.execute(sql);
+      }
+    });
     await getApiKeyStore().ensureSchema();
   })();
   return schemaEnsured;
