@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
-import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, SyncResult } from "../types/index.js";
+import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, SyncResult, SyncToDiskResult } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { applyConfigsWithReport, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
 import { isRetiredOrUnsupportedConfigAgent, retiredOrUnsupportedAgentReason } from "./config-agents.js";
@@ -358,9 +358,9 @@ export interface SyncToDiskOptions {
   category?: ConfigCategory;
 }
 
-export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResult> {
+export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncToDiskResult> {
   const store = opts.store ?? resolveConfigStore();
-  const result: SyncResult = { added: 0, updated: 0, unchanged: 0, skipped: [] };
+  const result: SyncToDiskResult = { added: 0, updated: 0, unchanged: 0, skipped: [], failures: [] };
 
   const allFileConfigs = await store.listConfigs({ kind: "file", ...opts.category ? { category: opts.category } : {} });
   const outputOwners = outputOwnerIdsByTarget(allFileConfigs);
@@ -384,12 +384,12 @@ export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResu
         outputAgent: opts.agent,
       });
       result.skipped.push(...report.skipped.map((entry) => `${entry.path} (${entry.owner})`));
-      if (report.failures.length > 0) throw new Error(report.failures[0]!.message);
+      result.failures.push(...report.failures.map((failure) => failure.message));
       for (const applied of report.results) {
         applied.changed ? result.updated++ : result.unchanged++;
       }
-    } catch {
-      result.skipped.push(config.target_path ?? config.id);
+    } catch (error) {
+      result.failures.push(error instanceof Error ? error.message : String(error));
     }
   }
   return result;

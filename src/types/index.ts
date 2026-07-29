@@ -242,6 +242,10 @@ export interface SyncResult {
   skipped: string[];
 }
 
+export interface SyncToDiskResult extends SyncResult {
+  failures: string[];
+}
+
 // Export/import
 export interface ExportManifest {
   version: string;

@@ -206,6 +206,29 @@ describe("session renderer ownership guard", () => {
     expect(readFileSync(join(targetHome, "themes.json"), "utf-8")).toBe("{}");
   });
 
+  test("malformed renderer manifests fail closed for paths beneath their target home", async () => {
+    const db = getDatabase();
+    const store = new LocalConfigStore(db);
+    const targetHome = join(tmpDir, ".config", "opencode");
+    const manifestPath = join(targetHome, ...SESSION_RENDER_MANIFEST_RELATIVE_PATH.split("/"));
+    mkdirSync(join(manifestPath, ".."), { recursive: true });
+    writeFileSync(manifestPath, "{malformed\n", "utf-8");
+    const target = join(targetHome, "themes.json");
+    const config = createConfig({
+      name: "OpenCode Theme With Unreadable Ownership",
+      category: "agent",
+      agent: "opencode",
+      content: "{}",
+      target_path: target,
+      format: "json",
+    }, db);
+
+    await expect(applyConfig(config, { store })).rejects.toThrow(
+      "Cannot safely determine session renderer ownership",
+    );
+    expect(existsSync(target)).toBe(false);
+  });
+
   test("shared fan-out directories stay writable where the renderer did not render", async () => {
     const db = getDatabase();
     const store = new LocalConfigStore(db);
@@ -272,17 +295,18 @@ describe("session renderer managed path derivation", () => {
     }
   });
 
-  test("no exclusive managed path collides with a config fan-out output directory", () => {
+  test("shared managed paths exactly match config fan-out directory collisions", () => {
     const fanOutDirs = new Set(
       CLAUDE_PROMPT_OUTPUTS
         .map((output) => output.target_path.replace(/^~\//, ""))
         .map((path) => path.split("/").slice(0, -1).join("/"))
         .filter((dir) => dir.length > 0),
     );
-    for (const managed of SESSION_RENDER_EXCLUSIVE_MANAGED_PATHS) {
-      for (const fanOut of fanOutDirs) {
-        expect(fanOut === managed || fanOut.startsWith(`${managed}/`)).toBe(false);
-      }
-    }
+    const collidesWithFanOut = (managed: string) => [...fanOutDirs].some((fanOut) =>
+      fanOut === managed || fanOut.startsWith(`${managed}/`)
+    );
+    expect(new Set(SESSION_RENDER_SHARED_MANAGED_DIRS)).toEqual(
+      new Set(SESSION_RENDER_MANAGED_DIRS.filter(collidesWithFanOut)),
+    );
   });
 });

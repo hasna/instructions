@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -158,5 +158,49 @@ describe("configs apply ownership output", () => {
     expect(existsSync(join(home, ".claude", "CLAUDE.md"))).toBe(false);
     expect(existsSync(join(home, ".gemini", "GEMINI.md"))).toBe(false);
     expect(existsSync(join(home, ".config", "opencode", "opencode.json"))).toBe(false);
+  });
+
+  test("sync to disk keeps owned skips successful and reports write failures separately", () => {
+    const home = makeTempRoot("open-configs-sync-cli-");
+    tempDirs.push(home);
+    const dbPath = join(home, "configs.db");
+    process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
+    resetDatabase();
+    let db = getDatabase();
+    createConfig({
+      name: "Claude Renderer-owned Rules",
+      category: "rules",
+      agent: "claude",
+      content: "legacy claude",
+      target_path: "~/.claude/CLAUDE.md",
+    }, db);
+    resetDatabase();
+    delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+
+    const ownedOnly = runCli(["sync", "--to-disk"], dbPath, home);
+    expect(ownedOnly.status).toBe(0);
+    expect(ownedOnly.stdout).toContain("skipped:1 failures:0");
+    expect(ownedOnly.stdout).toContain("[owned]");
+
+    const blockingFile = join(home, "not-a-directory");
+    writeFileSync(blockingFile, "block child writes");
+    process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
+    resetDatabase();
+    db = getDatabase();
+    createConfig({
+      name: "Unwritable Nested Config",
+      category: "tools",
+      content: "cannot be written",
+      target_path: join(blockingFile, "config.txt"),
+    }, db);
+    resetDatabase();
+    delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+
+    const mixed = runCli(["sync", "--to-disk"], dbPath, home);
+    expect(mixed.status).toBe(1);
+    expect(mixed.stdout).toContain("skipped:1 failures:1");
+    expect(mixed.stdout).toContain("[owned]");
+    expect(mixed.stderr).toContain("[failed]");
+    expect(mixed.stderr).toContain("not-a-directory");
   });
 });

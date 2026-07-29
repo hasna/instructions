@@ -14,7 +14,7 @@ import { importConfigs } from "../lib/import.js";
 import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { applySessionRender, restoreSessionRenderSnapshot } from "../lib/session-apply.js";
-import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
+import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_INSTRUCTION_LAYERS, SESSION_RENDERER_OWNER_ID, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
@@ -30,7 +30,7 @@ import {
 import { getConfigsStatus } from "../status.js";
 import { resolveConfigStore, isCloudMode, formatCliError, type ConfigStore } from "../data/config-store.js";
 import { DEFAULT_LIST_LIMIT, paginate, parseLimit, truncateMiddle, truncateText } from "../lib/compact-output.js";
-import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables } from "../types/index.js";
+import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, Profile, ProfileSelector, ProfileVariables, SyncToDiskResult } from "../types/index.js";
 
 import { createRequire } from "node:module";
 const pkg = createRequire(import.meta.url)("../../package.json") as { version: string };
@@ -106,6 +106,17 @@ function splitCsv(value?: string): string[] | undefined {
   if (!value) return undefined;
   const items = value.split(",").map((item) => item.trim()).filter(Boolean);
   return items.length > 0 ? items : undefined;
+}
+
+function printSyncToDiskResult(label: string, result: SyncToDiskResult): void {
+  const marker = result.failures.length > 0 ? chalk.red("✗") : chalk.green("✓");
+  console.log(marker + ` ${label}: updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length} failures:${result.failures.length}`);
+  for (const skipped of result.skipped) {
+    const status = skipped.includes(`(${SESSION_RENDERER_OWNER_ID})`) ? "[owned]" : "[skipped]";
+    console.log(`${chalk.dim(status)} ${skipped}`);
+  }
+  for (const failure of result.failures) console.error(`${chalk.red("[failed]")} ${failure}`);
+  if (result.failures.length > 0) process.exitCode = 1;
 }
 
 function collectOption(value: string, previous: string[]): string[] {
@@ -575,7 +586,7 @@ program
     }
     if (opts.toDisk) {
       const result = await syncToDisk({ dryRun: opts.dryRun, agent: opts.agent, category: opts.category, store });
-      console.log(chalk.green("✓") + ` Written to disk: updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
+      printSyncToDiskResult("Written to disk", result);
     } else {
       const result = await syncKnown({ dryRun: opts.dryRun, agent: opts.agent, category: opts.category, store });
       console.log(chalk.green("✓") + ` Synced: +${result.added} updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
@@ -1864,7 +1875,7 @@ program
   .option("--dry-run", "preview without writing")
   .action(async (opts) => {
     const result = await syncToDisk({ dryRun: opts.dryRun, agent: opts.agent, store: resolveConfigStore() });
-    console.log(chalk.green("✓") + ` Pushed: updated:${result.updated} unchanged:${result.unchanged} skipped:${result.skipped.length}`);
+    printSyncToDiskResult("Pushed", result);
   });
 
 // ── update ────────────────────────────────────────────────────────────────────

@@ -176,4 +176,33 @@ describe("syncToDisk", () => {
     expect(result.skipped.some((entry) => entry.includes("instructions-session-renderer"))).toBe(true);
     expect(existsSync(antigravityTarget)).toBe(false);
   });
+
+  test("reports owned targets as skips and write errors as failures", async () => {
+    const db = getDatabase();
+    const store = new LocalConfigStore(db);
+    process.env["CONFIGS_HOME"] = tmpDir;
+    createConfig({
+      name: "Renderer-owned Claude Rules",
+      category: "rules",
+      agent: "claude",
+      target_path: "~/.claude/CLAUDE.md",
+      format: "markdown",
+      content: "owned",
+    }, db);
+    const blockingFile = join(tmpDir, "not-a-directory");
+    writeFileSync(blockingFile, "block child writes");
+    createConfig({
+      name: "Unwritable Nested Config",
+      category: "tools",
+      target_path: join(blockingFile, "config.txt"),
+      content: "cannot be written",
+    }, db);
+
+    const result = await syncToDisk({ store });
+
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]).toContain("instructions-session-renderer");
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain("not-a-directory");
+  });
 });

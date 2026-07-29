@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join, parse, relative, sep } from "node:path";
 import {
   SESSION_RENDERER_OWNER_ID,
@@ -53,10 +53,11 @@ export function pathIsSessionRenderManagedDir(absolutePath: string): boolean {
 function readManifestRelativePaths(manifestPath: string): Set<string> | null {
   let stats: ReturnType<typeof statSync>;
   try {
-    if (!existsSync(manifestPath)) return null;
     stats = statSync(manifestPath);
-  } catch {
-    return null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw manifestOwnershipError(manifestPath, error);
   }
   const cached = manifestCache.get(manifestPath);
   if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
@@ -65,20 +66,33 @@ function readManifestRelativePaths(manifestPath: string): Set<string> | null {
   let manifest: SessionRenderManifest;
   try {
     manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as SessionRenderManifest;
-  } catch {
-    return null;
+  } catch (error) {
+    throw manifestOwnershipError(manifestPath, error);
   }
-  if (manifest?.schema !== SESSION_RENDER_SCHEMA || !Array.isArray(manifest.files)) return null;
+  if (manifest?.schema !== SESSION_RENDER_SCHEMA || !Array.isArray(manifest.files)) {
+    throw manifestOwnershipError(manifestPath, "manifest schema or files list is invalid");
+  }
   const writerId = manifest.targetOwner?.writer?.id;
-  if (writerId !== undefined && writerId !== SESSION_RENDERER_OWNER_ID) return null;
+  if (writerId !== undefined && writerId !== SESSION_RENDERER_OWNER_ID) {
+    throw manifestOwnershipError(manifestPath, `unexpected writer ${JSON.stringify(writerId)}`);
+  }
+  if (manifest.files.some((file) => !file || typeof file.relativePath !== "string" || file.relativePath.length === 0)) {
+    throw manifestOwnershipError(manifestPath, "manifest contains an invalid file claim");
+  }
   const relativePaths = new Set(
     manifest.files
-      .map((file) => file?.relativePath)
-      .filter((relativePath): relativePath is string => typeof relativePath === "string")
+      .map((file) => file.relativePath)
       .map((relativePath) => relativePath.replaceAll("\\", "/")),
   );
   manifestCache.set(manifestPath, { mtimeMs: stats.mtimeMs, size: stats.size, relativePaths });
   return relativePaths;
+}
+
+function manifestOwnershipError(manifestPath: string, cause: unknown): Error {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return new Error(
+    `Cannot safely determine session renderer ownership from ${manifestPath}: ${detail}; refusing to write beneath this target home.`,
+  );
 }
 
 /**
