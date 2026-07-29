@@ -2413,17 +2413,25 @@ function modeLiteral(mode: number): string {
   return `0o${(mode & 0o7777).toString(8).padStart(3, "0")}`;
 }
 
-// The staging file must be readable back by its own creator and must never carry a
-// permission the caller did not ask for. A umask legitimately clears bits, so an
-// equality check against the requested mode would reject an ordinary umask 0o077
-// machine; the two properties below hold under every umask and still reject the
-// modes arm64 macOS actually produced for a 0o644 request (0o140 — owner execute,
-// group read, no owner read — and 0o000), and reject a widened mode such as 0o777.
+// The staging file must never carry a permission the caller did not ask for, and
+// must not lose the owner-read bit that the readback depends on. Both properties
+// hold under every umask — a umask clears bits, and clearing bits is not a defect,
+// so an equality check against the requested mode would reject an ordinary umask
+// 0o077 machine. They still reject the modes arm64 macOS actually produced for a
+// 0o644 request (0o140 — owner execute, group read, no owner read — and 0o000),
+// and reject a widened mode such as 0o777.
+//
+// Owner read is conditional on having been requested, because a managed file the
+// user chmod'd to 0o444 or 0o200 hands its own mode back here as the mode to stage
+// with. Demanding owner write would reject a legitimate read-only managed file,
+// and demanding owner read unconditionally would turn a 0o200 file into a mode
+// complaint when the honest failure is the readback that follows.
 export function isPreparedManagedFileModeUsable(requestedMode: number, observedMode: number): boolean {
   const requested = requestedMode & 0o7777;
   const observed = observedMode & 0o7777;
   if ((observed & ~requested) !== 0) return false;
-  return (observed & 0o600) === 0o600;
+  if ((requested & 0o400) !== 0 && (observed & 0o400) === 0) return false;
+  return true;
 }
 
 // Which managed-file operation path this platform will actually take. Exposed so a

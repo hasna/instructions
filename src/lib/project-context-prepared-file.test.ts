@@ -148,6 +148,34 @@ describe("prepared managed file staging", () => {
     });
   }
 
+  test("replaces a managed file the user made read-only, and keeps it read-only", () => {
+    // The mode staged with is the mode of the file being replaced, so a user who
+    // chmod'd their CLAUDE.md to 0o444 pushes 0o444 through the staging guard. This
+    // worked before the guard existed and must keep working.
+    const target = join(tmpRoot, "read-only.md");
+    const original = "managed-read-only\n";
+    const next = "managed-read-only-next\n";
+    writeFileSync(target, original);
+    chmodSync(target, 0o444);
+    const staged: { mode: number | null } = { mode: null };
+
+    writeProjectContextCoordinatedFile({
+      path: target,
+      content: next,
+      workspace_root: tmpRoot,
+      expected_hash: sha256(original),
+      test_hooks: {
+        before_install: (tempPath) => {
+          staged.mode = statSync(tempPath).mode & 0o7777;
+        },
+      },
+    });
+
+    expect(staged.mode).toBe(0o444);
+    expect(statSync(target).mode & 0o7777).toBe(0o444);
+    expect(readFileSync(target, "utf8")).toBe(next);
+  });
+
   test("rejects a staging mode the platform mangled, and accepts every umask-shaped one", () => {
     // Positive control: every mode measured on arm64 macOS must be rejected.
     for (const mangled of DARWIN_MANGLED_MODES) {
@@ -162,6 +190,15 @@ describe("prepared managed file staging", () => {
     expect(isPreparedManagedFileModeUsable(MANAGED_MODE, 0o644)).toBe(true); // umask 0o022
     expect(isPreparedManagedFileModeUsable(MANAGED_MODE, 0o640)).toBe(true); // umask 0o027
     expect(isPreparedManagedFileModeUsable(MANAGED_MODE, 0o600)).toBe(true); // umask 0o077
+    // A managed file the user made read-only hands its own mode back as the mode
+    // to stage with. Demanding owner write here would reject it — the guard must
+    // not turn a legitimate 0o444 managed file into a failed apply.
+    expect(isPreparedManagedFileModeUsable(0o444, 0o444)).toBe(true);
+    expect(isPreparedManagedFileModeUsable(0o444, 0o400)).toBe(true); // umask 0o077
+    expect(isPreparedManagedFileModeUsable(0o444, 0o044)).toBe(false); // lost owner read
+    // Owner read that was never requested is not the mode check's complaint; the
+    // readback that follows is, and it reports the honest condition.
+    expect(isPreparedManagedFileModeUsable(0o200, 0o200)).toBe(true);
   });
 
   test("an unreadable staged file is reported as unreadable, not as a hash race", () => {
