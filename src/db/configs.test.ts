@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { getDatabase, resetDatabase } from "./database";
 import { createConfig, getConfig, listConfigs, updateConfig, deleteConfig, getConfigStats } from "./configs";
+import { listSnapshots } from "./snapshots";
 import type { Database } from "bun:sqlite";
 
 let db: Database;
@@ -120,6 +121,32 @@ describe("updateConfig", () => {
     const updated = updateConfig(c.id, { content: "updated" }, db);
     expect(updated.content).toBe("updated");
     expect(updated.version).toBe(2);
+    expect(listSnapshots(c.id, db)).toEqual([
+      expect.objectContaining({
+        config_id: c.id,
+        content: "hello",
+        version: 1,
+      }),
+    ]);
+  });
+
+  test("snapshots each replaced content version before writing", () => {
+    const c = base();
+    updateConfig(c.id, { content: "v2" }, db);
+    updateConfig(c.id, { content: "v3" }, db);
+
+    expect(listSnapshots(c.id, db).map(({ content, version }) => ({ content, version }))).toEqual([
+      { content: "v2", version: 2 },
+      { content: "hello", version: 1 },
+    ]);
+  });
+
+  test("does not snapshot metadata-only or unchanged-content updates", () => {
+    const c = base();
+    updateConfig(c.id, { tags: ["metadata"] }, db);
+    updateConfig(c.id, { content: "hello" }, db);
+
+    expect(listSnapshots(c.id, db)).toEqual([]);
   });
 
   test("updates name and regenerates slug", () => {

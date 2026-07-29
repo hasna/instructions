@@ -9,6 +9,7 @@ import type {
 } from "../types/index.js";
 import { ConfigNotFoundError } from "../types/index.js";
 import { getDatabase, now, slugify, uuid } from "./database.js";
+import { createSnapshot } from "./snapshots.js";
 
 function rowToConfig(row: ConfigRow): Config {
   let outputs: ConfigOutput[] = [];
@@ -143,32 +144,34 @@ export function updateConfig(
   db?: Database
 ): Config {
   const d = db || getDatabase();
-  const existing = getConfig(idOrSlug, d);
-  const ts = now();
+  return d.transaction(() => {
+    const existing = getConfig(idOrSlug, d);
+    const updates: string[] = ["updated_at = ?", "version = version + 1"];
+    const params: (string | number | null)[] = [now()];
 
-  const updates: string[] = ["updated_at = ?", "version = version + 1"];
-  const params: (string | number | null)[] = [ts];
+    if (input.name !== undefined) {
+      updates.push("name = ?", "slug = ?");
+      params.push(input.name, uniqueSlug(input.name, d, existing.id));
+    }
+    if (input.kind !== undefined) { updates.push("kind = ?"); params.push(input.kind); }
+    if (input.category !== undefined) { updates.push("category = ?"); params.push(input.category); }
+    if (input.agent !== undefined) { updates.push("agent = ?"); params.push(input.agent); }
+    if (input.target_path !== undefined) { updates.push("target_path = ?"); params.push(input.target_path); }
+    if (input.outputs !== undefined) { updates.push("outputs = ?"); params.push(JSON.stringify(input.outputs)); }
+    if (input.format !== undefined) { updates.push("format = ?"); params.push(input.format); }
+    if (input.content !== undefined) { updates.push("content = ?"); params.push(input.content); }
+    if (input.description !== undefined) { updates.push("description = ?"); params.push(input.description); }
+    if (input.tags !== undefined) { updates.push("tags = ?"); params.push(JSON.stringify(input.tags)); }
+    if (input.is_template !== undefined) { updates.push("is_template = ?"); params.push(input.is_template ? 1 : 0); }
+    if (input.synced_at !== undefined) { updates.push("synced_at = ?"); params.push(input.synced_at); }
 
-  if (input.name !== undefined) {
-    updates.push("name = ?", "slug = ?");
-    params.push(input.name, uniqueSlug(input.name, d, existing.id));
-  }
-  if (input.kind !== undefined) { updates.push("kind = ?"); params.push(input.kind); }
-  if (input.category !== undefined) { updates.push("category = ?"); params.push(input.category); }
-  if (input.agent !== undefined) { updates.push("agent = ?"); params.push(input.agent); }
-  if (input.target_path !== undefined) { updates.push("target_path = ?"); params.push(input.target_path); }
-  if (input.outputs !== undefined) { updates.push("outputs = ?"); params.push(JSON.stringify(input.outputs)); }
-  if (input.format !== undefined) { updates.push("format = ?"); params.push(input.format); }
-  if (input.content !== undefined) { updates.push("content = ?"); params.push(input.content); }
-  if (input.description !== undefined) { updates.push("description = ?"); params.push(input.description); }
-  if (input.tags !== undefined) { updates.push("tags = ?"); params.push(JSON.stringify(input.tags)); }
-  if (input.is_template !== undefined) { updates.push("is_template = ?"); params.push(input.is_template ? 1 : 0); }
-  if (input.synced_at !== undefined) { updates.push("synced_at = ?"); params.push(input.synced_at); }
-
-  params.push(existing.id);
-  d.run(`UPDATE configs SET ${updates.join(", ")} WHERE id = ?`, params);
-
-  return getConfigById(existing.id, d);
+    if (input.content !== undefined && input.content !== existing.content) {
+      createSnapshot(existing.id, existing.content, existing.version, d);
+    }
+    params.push(existing.id);
+    d.run(`UPDATE configs SET ${updates.join(", ")} WHERE id = ?`, params);
+    return getConfigById(existing.id, d);
+  })();
 }
 
 export function deleteConfig(idOrSlug: string, db?: Database): void {

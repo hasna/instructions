@@ -8,7 +8,7 @@
  * throws clear errors rather than returning fake no-ops.
  */
 import { randomUUID } from "node:crypto";
-import type { TypedQueryClient } from "../generated/storage-kit/index.js";
+import type { PoolQueryClient, TypedQueryClient } from "../generated/storage-kit/index.js";
 import {
   ConfigNotFoundError,
   ProfileNotFoundError,
@@ -201,7 +201,27 @@ export async function updateConfig(
   idOrSlug: string,
   input: UpdateConfigInput,
 ): Promise<Config> {
-  const existing = await getConfig(client, idOrSlug);
+  if (supportsTransactions(client)) {
+    return client.transaction((transactionClient) =>
+      updateConfigRecord(transactionClient, idOrSlug, input, true)
+    );
+  }
+  return updateConfigRecord(client, idOrSlug, input);
+}
+
+function supportsTransactions(client: TypedQueryClient): client is PoolQueryClient {
+  return typeof (client as Partial<PoolQueryClient>).transaction === "function";
+}
+
+async function updateConfigRecord(
+  client: TypedQueryClient,
+  idOrSlug: string,
+  input: UpdateConfigInput,
+  lockForUpdate = false,
+): Promise<Config> {
+  const existing = lockForUpdate
+    ? await getConfigForUpdate(client, idOrSlug)
+    : await getConfig(client, idOrSlug);
   const sets: string[] = ["updated_at = now()", "version = version + 1"];
   const params: unknown[] = [];
   const set = (col: string, value: unknown, cast = "") => {
@@ -224,12 +244,24 @@ export async function updateConfig(
   if (input.is_template !== undefined) set("is_template", input.is_template);
   if (input.synced_at !== undefined) set("synced_at", input.synced_at, "::timestamptz");
 
+  if (input.content !== undefined && input.content !== existing.content) {
+    await createSnapshotContent(client, existing.id, existing.content, existing.version);
+  }
   params.push(existing.id);
   await client.execute(
     `UPDATE configs SET ${sets.join(", ")} WHERE id = $${params.length}`,
     params,
   );
   return getConfig(client, existing.id);
+}
+
+async function getConfigForUpdate(client: TypedQueryClient, idOrSlug: string): Promise<Config> {
+  const row = await client.get<ConfigDbRow>(
+    "SELECT * FROM configs WHERE id = $1 OR slug = $1 FOR UPDATE",
+    [idOrSlug],
+  );
+  if (!row) throw new ConfigNotFoundError(idOrSlug);
+  return rowToConfig(row);
 }
 
 export async function deleteConfig(client: TypedQueryClient, idOrSlug: string): Promise<void> {
