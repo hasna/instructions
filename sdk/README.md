@@ -1,6 +1,7 @@
 # @hasna/instructions-sdk
 
-Zero-dependency TypeScript client for the `@hasna/instructions` REST API. Works in Node, Bun, Deno, and browser.
+Zero-dependency TypeScript clients for Instructions HTTP services. The package
+works anywhere a standards-compatible `fetch` implementation is available.
 
 ## Install
 
@@ -8,80 +9,93 @@ Zero-dependency TypeScript client for the `@hasna/instructions` REST API. Works 
 bun add @hasna/instructions-sdk
 ```
 
-## Quick Start
+## Supported `/v1` client
+
+`InstructionsV1Client` is generated from `src/server/openapi.ts` and calls the
+authenticated `/v1` API exposed by `instructions-serve`.
 
 ```typescript
-import { ConfigsClient } from "@hasna/instructions-sdk";
+import {
+  InstructionsV1Client,
+  InstructionsV1ApiError,
+} from "@hasna/instructions-sdk";
 
-const client = new ConfigsClient({ baseUrl: "http://localhost:3457" });
-// Or: reads CONFIGS_URL env var
-const client = ConfigsClient.fromEnv?.() ?? new ConfigsClient();
+const client = new InstructionsV1Client({
+  baseUrl: "https://instructions.example.com",
+  apiKey: process.env.HASNA_INSTRUCTIONS_API_KEY,
+});
 
-// Get status (drift detection, template count)
-const status = await client.getStatus();
-console.log(`${status.total} configs, ${status.drifted} drifted`);
+const { configs = [] } = await client.listConfigs({ category: "rules" });
+const { config } = await client.getConfig(configs[0]!.slug!);
 
-// List configs
-const rules = await client.listConfigs({ category: "rules" });
-
-// Get a specific config
-const claudeMd = await client.getConfig("claude-claude-md");
-
-// Sync from disk
-const result = await client.syncKnown({ agent: "claude" });
-
-// Apply a config to disk
-await client.applyConfig("claude-claude-md");
-
-// Profiles
-const profile = await client.createProfile("my-setup");
-await client.applyProfile("my-setup");
-const resolved = await client.resolveProfile();
-await client.applyAutoProfile({ dryRun: true });
-
-// Snapshots
-const snaps = await client.getSnapshots("claude-claude-md");
+try {
+  await client.updateConfig(config!.id!, { description: "Canonical rules" });
+} catch (error) {
+  if (error instanceof InstructionsV1ApiError) {
+    console.error(error.status, error.body);
+  }
+}
 ```
 
-## All Methods (23)
+The API key is sent as `x-api-key`. You can provide a custom `fetch` and extra
+headers:
 
-| Method | Description |
-|--------|-------------|
-| `listConfigs(filter?)` | List configs with optional category/agent/kind/search filter |
-| `getConfig(idOrSlug)` | Get full config including content |
-| `createConfig(input)` | Create a new config |
-| `updateConfig(id, input)` | Update config content/metadata |
-| `deleteConfig(id)` | Delete a config |
-| `applyConfig(id, dryRun?)` | Write config to its target_path on disk |
-| `syncDirectory(dir, direction?, dryRun?)` | Sync a directory with the DB |
-| `syncKnown(opts?)` | Sync known config files from disk |
-| `getStatus()` | Health check: total, drifted, templates, DB path |
-| `getStats()` | Counts by category |
-| `listProfiles()` | List all profiles |
-| `getProfile(id)` | Get profile with its configs |
-| `createProfile(name, desc?, opts?)` | Create a profile with optional selectors/variables |
-| `updateProfile(id, input)` | Update profile name/description |
-| `deleteProfile(id)` | Delete a profile |
-| `applyProfile(id, dryRun?)` | Apply all configs in a profile to disk |
-| `resolveProfile(opts?)` | Resolve the matching machine-aware profile |
-| `applyAutoProfile(opts?)` | Apply the matching machine-aware profile |
-| `listMachines()` | List machines where configs were applied |
-| `registerMachine(hostname?, os?, arch?)` | Register a machine |
-| `createSnapshot(configId)` | Create a version snapshot |
-| `getSnapshots(configId)` | List snapshots for a config |
-| `health()` | Health check |
+```typescript
+const client = new InstructionsV1Client({
+  baseUrl: "http://localhost:3457",
+  apiKey: "...",
+  fetch: globalThis.fetch,
+  headers: { "x-request-source": "automation" },
+});
+```
 
-## Environment Variables
+The generated client currently exposes the operations present in the served
+OpenAPI document:
 
-- `CONFIGS_URL` — base URL for the configs REST API (default: `http://localhost:3457`)
+| Method | HTTP operation |
+| --- | --- |
+| `listConfigs(query?, init?)` | `GET /v1/configs` |
+| `createConfig(body, init?)` | `POST /v1/configs` |
+| `getConfig(id, init?)` | `GET /v1/configs/:id` |
+| `updateConfig(id, body, init?)` | `PATCH /v1/configs/:id` |
+| `deleteConfig(id, init?)` | `DELETE /v1/configs/:id` |
+| `listSnapshots(id, init?)` | `GET /v1/configs/:id/snapshots` |
+| `createSnapshot(id, init?)` | `POST /v1/configs/:id/snapshots` |
+| `listProfiles(init?)` | `GET /v1/profiles` |
+| `createProfile(body, init?)` | `POST /v1/profiles` |
+| `getProfile(id, init?)` | `GET /v1/profiles/:id` |
+| `deleteProfile(id, init?)` | `DELETE /v1/profiles/:id` |
+| `getStats(init?)` | `GET /v1/stats` |
 
-## Part of the @hasna ecosystem
+Responses retain the server envelopes, for example `{ config }` or
+`{ configs, count }`. IDs are URL-encoded by the client. Non-2xx responses
+throw `InstructionsV1ApiError` with `status` and parsed `body` fields.
 
-- [`@hasna/instructions`](https://npm.im/@hasna/instructions) — CLI + MCP + REST server
-- [`@hasna/todos`](https://npm.im/@hasna/todos) — task management
-- [`@hasna/mementos`](https://npm.im/@hasna/mementos) — persistent memory
-- [`@hasna/sessions`](https://npm.im/@hasna/sessions) — session search
-- [`@hasna/attachments`](https://npm.im/@hasna/attachments) — file transfer
+The runtime server has additional routes that are not yet in the OpenAPI
+document or generated client. See the repository's [HTTP API
+reference](../docs/http-api.md) and use direct HTTP for those operations.
+
+## Legacy `ConfigsClient`
+
+The package still exports `ConfigsClient` as a compatibility client for the
+former local `/api` service. It targets routes such as `/api/configs`,
+`/api/sync`, and `/api/profiles`.
+
+Current `instructions-serve` does **not** mount `/api`, so do not use
+`ConfigsClient` with it. `ConfigsClient` also has no `fromEnv()` helper and does
+not read `CONFIGS_URL`; pass `baseUrl` explicitly when using a separate legacy
+server.
+
+## Regeneration
+
+From the repository root:
+
+```bash
+bun run generate:sdk
+```
+
+This rebuilds `sdk/src/v1.generated.ts` from the same OpenAPI document served
+at `/openapi.json`. Do not edit the generated file by hand.
 
 ## License
 

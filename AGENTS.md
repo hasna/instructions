@@ -24,8 +24,12 @@ configs mcp install --claude --profile minimal    # 3 tools (lowest context cost
 | `apply_profile` | standard | Apply all configs in a profile to disk |
 | `search_tools` | standard | Keyword search across tool descriptions |
 | `describe_tools` | standard | Get full docs for specific tools |
+| `delete_config` | full | Delete a config by id or slug |
 | `sync_directory` | full | Sync an arbitrary directory (legacy) |
+| `sync_project` | full | Sync curated project-scoped config files |
 | `get_snapshot` | full | Get historical version of a config |
+| `register_agent`, `heartbeat`, `set_focus`, `list_agents` | full | Ephemeral in-process agent state |
+| `send_feedback` | full | Store feedback through the active store |
 
 ## Workflows
 
@@ -77,11 +81,14 @@ keeps the token value in the runtime environment or secret manager.
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `CONFIGS_DB_PATH` | `~/.configs/configs.db` | Database location |
-| `CONFIGS_PROFILE` | `full` | MCP tool profile (minimal/standard/full) |
-| `CONFIGS_PORT` | `3457` | REST API port |
-| `CONFIGS_HOST` | `localhost` | REST API bind address |
-| `CONFIGS_URL` | `http://localhost:3457` | SDK base URL |
+| `HASNA_INSTRUCTIONS_DB_PATH` | `~/.hasna/instructions/instructions.db` | Local SQLite location |
+| `INSTRUCTIONS_PROFILE` | `full` | MCP tool profile (minimal/standard/full) |
+| `MCP_HTTP_PORT` | `8853` | Loopback MCP HTTP port |
+| `INSTRUCTIONS_PORT` | `3457` | HTTP API server port (`PORT` takes priority) |
+| `INSTRUCTIONS_HOST` | `localhost` | HTTP API bind address (`HOST` takes priority) |
+| `HASNA_INSTRUCTIONS_API_URL` | unset | Client `/v1` base URL; requires the API key too |
+| `HASNA_INSTRUCTIONS_API_KEY` | unset | Client bearer key; requires the API URL too |
+| `HASNA_CONFIGS_HOME` | `~/.hasna/configs` | Session-render storage root |
 
 ## Secret Redaction
 
@@ -106,8 +113,11 @@ third-party excludes.
 
 ## Constraints
 
-- DB is SQLite at `~/.configs/configs.db` (~4KB for 50 configs)
-- Only syncs ~30 known config files (not recursive directory walks)
-- REST server binds to localhost by default (security)
-- Path traversal blocked on all endpoints
-- `POST /api/sync` restricted to home directory paths
+- Local DB is SQLite at `~/.hasna/instructions/instructions.db` by default.
+- Known sync uses a curated set of files and rule directories, not a recursive
+  home-directory walk.
+- MCP HTTP binds to `127.0.0.1`; `instructions-serve` binds to localhost unless
+  configured otherwise.
+- `instructions-serve` exposes authenticated `/v1`, not the removed `/api`
+  surface, and does not mount MCP.
+- Session/project renderers reject path escapes and symlinked managed paths.

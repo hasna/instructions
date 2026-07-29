@@ -1,4 +1,4 @@
-# open-configs
+# @hasna/instructions
 
 AI coding agent configuration manager. Store, version, apply, and share all your AI coding configs.
 
@@ -24,9 +24,15 @@ configs bootstrap               # install full @hasna ecosystem (12 packages)
 configs clean                   # remove orphaned configs
 configs update                  # self-update from npm
 configs template render <id> --env --apply  # render templates with env vars
+configs session plan --tool codex --profile <name> --source repo:rules=./AGENTS.md
+configs project-context plan --runtime codex --workspace-root "$PWD" --bundle ./project-context.json
+configs package-manager-scan --fail-on-findings .
 configs mcp install --claude    # install MCP server with profile
 configs completions zsh         # shell completions
 ```
+
+The complete, code-audited references are in `docs/cli.md`, `docs/mcp.md`, and
+`docs/http-api.md`.
 
 ## Architecture
 
@@ -34,30 +40,30 @@ configs completions zsh         # shell completions
 src/types/index.ts    — all TypeScript types
 src/db/               — SQLite (bun:sqlite): configs, snapshots, profiles, machines
 src/lib/              — apply, sync, redact, export/import, template
-src/cli/index.tsx     — 28 CLI commands (Commander + chalk)
-src/mcp/index.ts      — 16 MCP tools (lean stubs + CONFIGS_PROFILE)
-src/server/index.ts   — Hono REST API (port 3457, serves dashboard + ?fields=)
+src/cli/index.tsx     — 33 native top-level commands plus events/webhooks groups
+src/mcp/index.ts      — 22 MCP tools (lean schemas + INSTRUCTIONS_PROFILE)
+src/server/index.ts   — Hono probes + authenticated Postgres /v1 API
 src/index.ts          — library exports
-sdk/                  — @hasna/instructions-sdk (zero-dep fetch client)
-dashboard/            — React+Vite (5 pages)
+sdk/                  — generated /v1 client plus legacy /api compatibility client
+dashboard/            — legacy /api React+Vite client (not current-server compatible)
 ```
 
 ## Key Design Decisions
 
-- **KNOWN_CONFIGS map** — only sync ~30 curated config files, never recursive dir walk
+- **KNOWN_CONFIGS map** — known sync uses curated files/directories, never a recursive home walk
 - **Secret redaction** — always redact before storing (key-name + value-pattern matching)
 - **Templates** — redacted values become {{VAR}} placeholders, render with `--env` or `--var`
 - **Profiles** — named bundles of configs for full-machine setup
 - **Snapshots** — auto-versioned on every apply
-- **Agent profiles** — CONFIGS_PROFILE=minimal|standard|full for MCP tool filtering
+- **MCP profiles** — INSTRUCTIONS_PROFILE=minimal|standard|full for tool filtering
 - **Bootstrap** — one command installs full 12-package ecosystem
 - **Drift detection** — get_status MCP tool reports which configs changed on disk
-- **Security** — path traversal guard, localhost binding, sync dir restriction, secret redaction
+- **Security** — renderer path/symlink guards, loopback MCP, authenticated `/v1`, and secret redaction
 
 ## Testing
 
 ```bash
-bun test              # 140 tests, 0 failures
+bun test
 ```
 
 ## Publishing

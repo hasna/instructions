@@ -2,7 +2,7 @@
 
 ## Goal
 
-`open-instructions` is the source of truth for Hasna coding-agent prompts. It
+`@hasna/instructions` is the source of truth for Hasna coding-agent prompts. It
 stores canonical instruction fragments, renders them into each agent's native
 files, records provenance, and detects drift.
 
@@ -53,7 +53,7 @@ files should be treated only as migration inputs into Antigravity or `AGENTS.md`
 
 Antigravity compatibility note: Google's current Antigravity documentation still
 uses legacy-named `~/.gemini/...` paths for Antigravity global rules and global
-MCP configuration. `open-instructions` should treat those paths as Antigravity
+MCP configuration. Instructions treats those paths as Antigravity
 outputs only; there must be no active `gemini` agent target.
 
 ## Required Global Rules
@@ -113,20 +113,18 @@ Claude and Qwen should use native hook settings where available. OpenCode,
 Cursor, and Antigravity must use a verified native plugin/config path or an
 explicitly managed wrapper/plugin fallback before hard enforcement is claimed.
 
-## Implementation Notes
+## Implementation invariants
 
-The implementation is incremental:
+- Layer aliases normalize before ordering: `provider` to `tool`, `project` to
+  `repo`, and `identity` to `agent`.
+- Antigravity and Qwen are active render/sync targets; the retired Gemini target
+  is rejected.
+- Codewith remains flattened unless the
+  `HASNA_CONFIGS_CODEWITH_NATIVE_IMPORTS` gate or matching CLI flag is active.
+- `global-agent-rules-standard` and `dangerous-operation-guard-standard` are
+  seeded reference configs.
+- Tests cover layer ordering, provider output paths, Antigravity's
+  12,000-character file limit, target coverage, and seeded policy content.
 
-1. Extend the session render layer model and aliases.
-2. Add active Antigravity support and remove the retired Google agent from active config sync.
-3. Add Qwen Code `QWEN.md` session rendering and track Qwen settings as an
-   active config owner without adding a retired Gemini target.
-4. Keep Codewith behavior compatible with existing flattened renders and the
-   `HASNA_CONFIGS_CODEWITH_NATIVE_IMPORTS` gate.
-5. Seed the managed `global-agent-rules-standard` reference so canonical global
-   prompt content includes the required operating rules.
-6. Seed the managed `dangerous-operation-guard-standard` reference so station01
-   guard requirements can roll out through instructions-managed config.
-7. Add tests that prove layer ordering, Antigravity output paths, the
-   Antigravity 12,000-character rule-file limit, active agent target coverage,
-   and the seeded global rules and dangerous-operation guard content.
+For operational details, see [Session rendering](session-rendering.md) and
+[Storage and sync](storage-and-sync.md).

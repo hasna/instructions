@@ -1,73 +1,37 @@
-# React + TypeScript + Vite
+# Instructions dashboard (legacy API client)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This directory contains a React/Vite dashboard with pages for configs,
+profiles, apply/sync, snapshots, and machines. Its checked-in API client uses
+the former unauthenticated local `/api/*` routes at
+`http://localhost:3457`.
 
-Currently, two official plugins are available:
+Current `instructions-serve` exposes authenticated `/v1/*` and deliberately
+does not mount `/api/*`. As a result, this dashboard is not operational against
+the current server until its client, response shapes, and authentication are
+migrated to `/v1`. The server may still serve `dashboard/dist` as static files
+when a build is present; serving the assets does not restore the old API.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Source layout
 
-## React Compiler
+- `src/api.ts` — fixed-base legacy `/api` client.
+- `src/pages/ConfigsPage.tsx` — search, inspect, and edit config content.
+- `src/pages/ProfilesPage.tsx` — create, inspect, preview, and apply profiles.
+- `src/pages/ApplyPage.tsx` — preview/apply configs and legacy directory sync.
+- `src/pages/HistoryPage.tsx` — inspect config snapshots.
+- `src/pages/MachinesPage.tsx` — machine and category statistics.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Development
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+bun install
+bun run dev
+bun run lint
+bun run build
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The Vite dev server alone does not provide API endpoints. For UI work before
+the `/v1` migration, use a purpose-built mock or a compatible legacy server;
+do not expose an unauthenticated `/api` shim in production.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+See the repository's [HTTP API reference](../docs/http-api.md) for the current
+server contract.

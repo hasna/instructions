@@ -3,9 +3,10 @@
 > Formerly `@hasna/configs`. Same tool, renamed. The MCP server keeps the
 > `configs` name aliased so existing fleet MCP configs keep working.
 
-AI coding agent instruction & configuration manager — store, version, apply, and
-share all your AI coding configs and instruction sources. CLI + MCP + HTTP API
-(`instructions-serve`) + generated SDK + Dashboard.
+AI coding agent instruction and configuration manager — store, version, apply,
+and share coding-agent configs and instruction sources. The supported surfaces
+are the CLI, local MCP server, authenticated `/v1` HTTP API, public library, and
+generated `/v1` SDK client.
 
 [![npm](https://img.shields.io/npm/v/@hasna/instructions)](https://www.npmjs.com/package/@hasna/instructions)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -15,6 +16,16 @@ share all your AI coding configs and instruction sources. CLI + MCP + HTTP API
 ```bash
 npm install -g @hasna/instructions
 ```
+
+## Documentation
+
+- [CLI reference](docs/cli.md)
+- [MCP reference](docs/mcp.md)
+- [HTTP API](docs/http-api.md)
+- [Storage and sync](docs/storage-and-sync.md)
+- [Session rendering](docs/session-rendering.md)
+- [Managed project context](docs/project-context.md)
+- [Managed prompt hierarchy](docs/managed-prompt-hierarchy.md)
 
 ## CLI Usage
 
@@ -30,6 +41,11 @@ instructions profile apply --auto
 instructions package-manager-scan --fail-on-findings .
 instructions package-manager-scan --home --fail-on-findings .
 ```
+
+`configs` is an alias for `instructions`. See the [complete CLI
+reference](docs/cli.md) for every command, argument, option, and alias. The CLI
+also registers the `events` and `webhooks` command groups supplied by
+`@hasna/events`.
 
 Collection commands are compact by default to keep agent terminals and context
 small. Human output is capped at 20 rows unless you pass `--limit`; use
@@ -72,7 +88,9 @@ wildcards and third-party package names fail the guard.
 ## MCP Server
 
 ```bash
-instructions-mcp        # or the aliased binary: configs-mcp
+instructions-mcp                 # HTTP on http://127.0.0.1:8853/mcp
+instructions-mcp --stdio         # stdio transport for an MCP client
+# aliased binary: configs-mcp
 ```
 
 The MCP server identity is intentionally kept as `configs` so the existing
@@ -83,15 +101,18 @@ accept `limit`, `cursor`, and `verbose`. `apply_config` and `apply_profile` omit
 `previous_content` and `new_content` unless `verbose: true` is passed. Use
 `get_config` when full config content is needed.
 
-## HTTP mode (MCP)
+## MCP transports
 
 ```bash
-instructions-mcp --http          # http://127.0.0.1:8807/mcp
-MCP_HTTP=1 instructions-mcp
+instructions-mcp --http          # explicit HTTP mode; HTTP is also the default
+instructions-mcp --port 9000
+MCP_HTTP_PORT=9000 instructions-mcp
+MCP_STDIO=1 instructions-mcp     # explicit stdio mode
 ```
 
-Health: `GET http://127.0.0.1:8807/health`. MCP is also mounted on
-`instructions-serve` at `/mcp`.
+HTTP binds only to `127.0.0.1`. Health is `GET /health`. The MCP endpoint is
+`/mcp`; it is **not** mounted on `instructions-serve`. See the [MCP
+reference](docs/mcp.md) for tool profiles and schemas.
 
 ## HTTP API server (`instructions-serve`)
 
@@ -101,11 +122,18 @@ instructions-serve
 
 Surfaces:
 
-- `GET /health`, `GET /ready`, `GET /version` → `{ status, version, mode }`
+- `GET /health`, `GET /version` → `{ status, version, mode, name }`;
+  `GET /ready` also checks Postgres in cloud mode.
 - `GET /openapi.json`, `GET /v1/openapi.json` → the OpenAPI 3.1 document the SDK
   is generated from.
-- `/v1/*` — versioned cloud API (configs, profiles, snapshots, stats).
-- `/api/*` — the local dashboard/REST surface.
+- `/v1/*` — authenticated versioned API for configs, profiles, snapshots,
+  machines, stats, and feedback.
+
+`instructions-serve` does not expose `/api/*` or `/mcp`. If
+`dashboard/dist/index.html` is present, it serves those files as a static SPA,
+but the checked-in dashboard client still targets the removed `/api` surface
+and is not an operational client for the current server. See the [HTTP API
+reference](docs/http-api.md).
 
 ### Cloud mode (self-hosted, Amendment A1 pure-remote)
 
@@ -123,7 +151,8 @@ instructions-serve migrate
 contracts issue-key --app instructions --scopes 'instructions:*'
 ```
 
-Env: `HASNA_INSTRUCTIONS_DATABASE_URL` (DSN) and
+Env: `HASNA_INSTRUCTIONS_DATABASE_URL` (DSN; `INSTRUCTIONS_DATABASE_URL` and
+`DATABASE_URL` are also accepted) and
 `HASNA_INSTRUCTIONS_API_SIGNING_KEY` (HMAC signing secret; `HASNA_API_SIGNING_KEY`
 and `API_KEY_SIGNING_SECRET` are also accepted). Client apps use
 `INSTRUCTIONS_API_URL` + `INSTRUCTIONS_API_KEY` — never a DSN.
@@ -132,12 +161,15 @@ and `API_KEY_SIGNING_SECRET` are also accepted). Client apps use
 
 `@hasna/instructions-sdk` ships a zero-dependency typed client. The versioned
 `InstructionsV1Client` is generated from the serve OpenAPI document
-(`bun run generate:sdk`).
+(`bun run generate:sdk`) and is the supported client for `instructions-serve`.
+The package also exports the older `ConfigsClient`, which targets the removed
+`/api` surface and is retained only for compatibility with a separate legacy
+server. See the [SDK README](sdk/README.md).
 
 ## Storage Modes
 
-Every CLI command, MCP tool, and SDK method routes through a single `ConfigStore`
-abstraction with two transports:
+CLI and MCP data operations route through a single `ConfigStore` abstraction
+with two transports (the generated SDK calls `/v1` directly):
 
 - **local** — on-box SQLite (`LocalConfigStore`), fully first-class. Used when no
   API env vars are set.
@@ -149,9 +181,16 @@ abstraction with two transports:
 Clients never hold a database DSN. The raw Postgres connection is a server-only
 concern (`instructions-serve`).
 
-## Data Directory
+## Local paths
 
-Local data is stored in `~/.hasna/configs/` (unchanged, for fleet continuity).
+- SQLite DB: `~/.hasna/instructions/instructions.db`, overridable with
+  `HASNA_INSTRUCTIONS_DB_PATH`.
+- Timestamped CLI backups: `~/.hasna/instructions/backups/`.
+- Default session-render root: `~/.hasna/configs/sessions/`, overridable with
+  `HASNA_CONFIGS_HOME`.
+
+`CONFIGS_HOME` overrides the home used when resolving `~/` config targets; it
+does not move the SQLite DB.
 
 ## Session Instruction Rendering
 
