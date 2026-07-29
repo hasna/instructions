@@ -126,13 +126,16 @@ describe("project-context CLI", () => {
   test("uses explicit stale cache fallback when a requested bundle file is unavailable", () => {
     const root = makeTempRoot("instructions-project-context-cli-");
     try {
+      const currentBundle = bundle();
+      currentBundle.generated_at = new Date().toISOString();
+      currentBundle.hash = computeProjectContextSourceHash(currentBundle);
       const seed = runCli([
         "project-context", "apply",
         "--runtime", "agents",
         "--workspace-root", root,
         "--bundle", "-",
         "--json",
-      ], `${JSON.stringify(bundle())}\n`);
+      ], `${JSON.stringify(currentBundle)}\n`);
       expect(seed.status).toBe(0);
 
       const fallback = runCli([
