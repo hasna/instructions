@@ -1750,7 +1750,7 @@ function atomicWriteFile(
     fd = null;
     beforeInstall?.(tempPath);
     assertManagedDirectoryStable(dir, workspaceRoot, directory.identity);
-    if (anchoredFileHash(directory, tempName) !== desiredHash) {
+    if (anchoredPreparedObservation(directory, tempName, path, "before installation").hash !== desiredHash) {
       throw new ProjectContextHashRace(`prepared bytes changed before installation: ${relativePosix(workspaceRoot, path)}`);
     }
     if (expectedHash === undefined) {
@@ -1759,8 +1759,8 @@ function atomicWriteFile(
       }
       directoryChanged = true;
     } else if (expectedHash === null) {
-      const prepared = anchoredFileObservation(directory, tempName);
-      if (!prepared || anchoredFileObservation(directory, targetName) !== null) {
+      const prepared = anchoredPreparedObservation(directory, tempName, path, "before creation");
+      if (anchoredFileObservation(directory, targetName) !== null) {
         throw new ProjectContextHashRace(`managed path appeared before creation: ${relativePosix(workspaceRoot, path)}`);
       }
       if (!directory.ops.linkat(directory.fd, tempName, directory.fd, targetName)) {
@@ -1768,11 +1768,12 @@ function atomicWriteFile(
       }
       directoryChanged = true;
       const installed = anchoredFileObservation(directory, targetName);
+      const stagedHash = anchoredFileHash(directory, tempName);
       if (
         !installed ||
         installed.dev !== prepared.dev ||
         installed.ino !== prepared.ino ||
-        anchoredFileHash(directory, tempName) !== desiredHash ||
+        stagedHash !== desiredHash ||
         installed.hash !== desiredHash
       ) {
         // The target may now contain an ordinary concurrent edit. Preserve the
@@ -1795,7 +1796,7 @@ function atomicWriteFile(
       if (anchoredFileHash(directory, targetName) !== expectedHash) {
         throw new ProjectContextHashRace(`managed path changed before atomic replacement: ${relativePosix(workspaceRoot, path)}`);
       }
-      if (anchoredFileHash(directory, tempName) !== desiredHash) {
+      if (anchoredPreparedObservation(directory, tempName, path, "before atomic replacement").hash !== desiredHash) {
         throw new ProjectContextHashRace(`prepared bytes changed before atomic replacement: ${relativePosix(workspaceRoot, path)}`);
       }
       atomicExchangeEntries(directory.fd, tempName, targetName);
@@ -1921,7 +1922,10 @@ function atomicWritePortable(
     assertManagedDirectoryStable(dir, workspaceRoot, directoryIdentity);
     assertNoSymlinkSegments(workspaceRoot, tempPath);
     assertNoSymlinkSegments(workspaceRoot, path);
-    if (portableFileHash(tempPath, workspaceRoot, maxObservedBytes) !== desiredHash || portableFileHash(path, workspaceRoot, maxObservedBytes) !== null) {
+    if (
+      portablePreparedHash(tempPath, path, workspaceRoot, maxObservedBytes, "before portable creation") !== desiredHash ||
+      portableFileHash(path, workspaceRoot, maxObservedBytes) !== null
+    ) {
       throw new ProjectContextHashRace(`managed path changed before portable creation: ${relativePosix(workspaceRoot, path)}`);
     }
     const prepared = lstatSync(tempPath);
@@ -2000,7 +2004,7 @@ function atomicWritePortableReplacement(
     assertNoSymlinkSegments(workspaceRoot, path);
     if (
       portableFileHash(path, workspaceRoot, maxObservedBytes) !== expectedHash ||
-      portableFileHash(tempPath, workspaceRoot, maxObservedBytes) !== desiredHash
+      portablePreparedHash(tempPath, path, workspaceRoot, maxObservedBytes, "before portable replacement") !== desiredHash
     ) {
       throw new ProjectContextHashRace(`managed path changed before portable replacement: ${relativePosix(workspaceRoot, path)}`);
     }
@@ -2025,6 +2029,33 @@ function atomicWritePortableReplacement(
     }
     throw error;
   }
+}
+
+// The portable counterpart of `anchoredPreparedObservation`. Both paths now name
+// an unreadable staging file the same way: macOS runs the anchored path and
+// Windows the portable one, and a condition that reports differently depending on
+// which platform hit it is how a defect stays unrecognised across a fleet.
+function portablePreparedHash(
+  tempPath: string,
+  path: string,
+  workspaceRoot: string,
+  maxObservedBytes: number | null | undefined,
+  stage: string,
+): string {
+  const unreadable = (cause?: string) => new ProjectContextError(
+    "PROJECT_CONTEXT_PREPARED_FILE_UNREADABLE",
+    `the prepared managed file could not be read back ${stage}: ${relativePosix(workspaceRoot, path)}`,
+    { staged_path: tempPath, stage, ...(cause === undefined ? {} : { cause }) },
+  );
+  let hash: string | null;
+  try {
+    hash = portableFileHash(tempPath, workspaceRoot, maxObservedBytes);
+  } catch (error) {
+    if (error instanceof ProjectContextError || error instanceof ProjectContextHashRace) throw error;
+    throw unreadable((error as Error).message);
+  }
+  if (hash === null) throw unreadable();
+  return hash;
 }
 
 function portableFileHash(
@@ -2052,6 +2083,9 @@ export function writeProjectContextCoordinatedFile(input: {
   max_observed_bytes?: number | null;
   allow_portable_replacement?: boolean;
   force_portable_file_ops?: boolean;
+  test_hooks?: {
+    before_install?: (tempPath: string) => void;
+  };
 }): void {
   atomicWriteFile(
     resolve(input.path),
@@ -2061,7 +2095,7 @@ export function writeProjectContextCoordinatedFile(input: {
     input.expected_hash,
     undefined,
     false,
-    undefined,
+    input.test_hooks?.before_install,
     input.force_portable_file_ops ?? false,
     input.max_observed_bytes,
     input.allow_portable_replacement ?? false,
@@ -2321,20 +2355,93 @@ function openAnchoredDirectory(
   }
 }
 
+// openat(2) is variadic — `int openat(int, const char *, int, ...)` — and `mode`
+// is the variadic argument the kernel reads only when O_CREAT is set. bun:ffi can
+// only declare fixed arguments, and a fixed fourth argument happens to match the
+// Linux integer calling convention while it does not match arm64 macOS, where
+// variadic arguments are passed on the stack rather than in registers. There the
+// kernel read an uninitialised slot: a create asking for 0o644 produced 0o140 in
+// one measurement on station03 and 0o000 in another, never a mode with the owner
+// read bit, so every readback failed and the failure was reported as a hash race
+// on 14 of 16 fleet machines. Creation therefore no longer travels through the FFI
+// declaration at all — it uses the compiled fs binding, which builds the variadic
+// call correctly on every platform — and the directory anchor is re-established by
+// verifying the created inode through the pinned directory fd instead of being
+// assumed from the call. This is one code path on every platform, so the Linux
+// suite exercises exactly what macOS runs. The remaining FFI openat call omits
+// O_CREAT, so the kernel never reads its variadic slot.
 function anchoredOpenExclusive(directory: AnchoredDirectory, name: string, mode: number): number {
-  const fd = directory.ops.openat(
-    directory.fd,
-    name,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-    mode,
-  );
-  if (fd < 0) throw new ProjectContextHashRace(`could not create prepared managed file in ${relativePosix(directory.workspaceRoot, directory.path)}`);
-  const opened = fstatSync(fd);
-  if (!opened.isFile()) {
-    closeSync(fd);
-    throw new ProjectContextHashRace("prepared managed output is not a regular file");
+  const requestedMode = mode & 0o7777;
+  let fd: number;
+  try {
+    fd = openSync(
+      join(directory.path, name),
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      requestedMode,
+    );
+  } catch {
+    throw new ProjectContextHashRace(`could not create prepared managed file in ${relativePosix(directory.workspaceRoot, directory.path)}`);
   }
-  return fd;
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) {
+      throw new ProjectContextHashRace("prepared managed output is not a regular file");
+    }
+    if (!isPreparedManagedFileModeUsable(requestedMode, opened.mode)) {
+      // Fail loudly rather than stage a file the platform made unreadable. Left
+      // unchecked this is invisible until the readback returns nothing and the
+      // caller blames a concurrent writer.
+      throw new ProjectContextError(
+        "PROJECT_CONTEXT_PREPARED_FILE_MODE_REJECTED",
+        `the platform created the prepared managed file with an unusable mode in ${relativePosix(directory.workspaceRoot, directory.path)}`,
+        { requested_mode: modeLiteral(requestedMode), observed_mode: modeLiteral(opened.mode) },
+      );
+    }
+    assertManagedDirectoryStable(directory.path, directory.workspaceRoot, directory.identity);
+    const anchored = anchoredFileObservation(directory, name);
+    if (!anchored || anchored.dev !== opened.dev || anchored.ino !== opened.ino) {
+      throw new ProjectContextHashRace(`prepared managed file is not the one anchored in ${relativePosix(directory.workspaceRoot, directory.path)}`);
+    }
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+function modeLiteral(mode: number): string {
+  return `0o${(mode & 0o7777).toString(8).padStart(3, "0")}`;
+}
+
+// The staging file must be readable back by its own creator and must never carry a
+// permission the caller did not ask for. A umask legitimately clears bits, so an
+// equality check against the requested mode would reject an ordinary umask 0o077
+// machine; the two properties below hold under every umask and still reject the
+// modes arm64 macOS actually produced for a 0o644 request (0o140 — owner execute,
+// group read, no owner read — and 0o000), and reject a widened mode such as 0o777.
+export function isPreparedManagedFileModeUsable(requestedMode: number, observedMode: number): boolean {
+  const requested = requestedMode & 0o7777;
+  const observed = observedMode & 0o7777;
+  if ((observed & ~requested) !== 0) return false;
+  return (observed & 0o600) === 0o600;
+}
+
+// Which managed-file operation path this platform will actually take. Exposed so a
+// test can assert it exercised the directory-anchored path rather than silently
+// measuring the portable fallback, and so an operator can tell the two apart
+// without reading the source.
+export function projectContextFileOpsDiagnostics(): {
+  platform: string;
+  arch: string;
+  anchored_file_ops: boolean;
+  atomic_exchange: boolean;
+} {
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    anchored_file_ops: resolveAnchoredFsOps() !== null,
+    atomic_exchange: resolveAtomicExchange() !== null,
+  };
 }
 
 function anchoredFileObservation(directory: AnchoredDirectory, name: string): AnchoredFileObservation | null {
@@ -2365,6 +2472,30 @@ function anchoredFileObservation(directory: AnchoredDirectory, name: string): An
 
 function anchoredFileHash(directory: AnchoredDirectory, name: string): string | null {
   return anchoredFileObservation(directory, name)?.hash ?? null;
+}
+
+// A readback that fails is not a hash race. `anchoredFileObservation` returns null
+// both when a staged file cannot be opened at all and when it was never there, and
+// comparing that null against the expected digest reported "prepared bytes changed"
+// for a file nobody else had touched — the message sent every reader hunting a
+// concurrent writer. Staged-file readbacks go through here so the unreadable case
+// is named for what it is, and so it is not retried: re-running a broken syscall
+// path cannot succeed on a second attempt, only the hash race can.
+function anchoredPreparedObservation(
+  directory: AnchoredDirectory,
+  name: string,
+  path: string,
+  stage: string,
+): AnchoredFileObservation {
+  const observed = anchoredFileObservation(directory, name);
+  if (!observed) {
+    throw new ProjectContextError(
+      "PROJECT_CONTEXT_PREPARED_FILE_UNREADABLE",
+      `the prepared managed file could not be read back ${stage}: ${relativePosix(directory.workspaceRoot, path)}`,
+      { staged_name: name, stage },
+    );
+  }
+  return observed;
 }
 
 function captureManagedDirectoryIdentity(
