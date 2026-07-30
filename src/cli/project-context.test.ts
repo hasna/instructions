@@ -18,9 +18,15 @@ function runCli(args: string[], input?: string) {
 }
 
 function bundle(): ProjectContextBundleV1 {
+  // generated_at/updated_at are computed relative to now, not hardcoded
+  // absolute dates: this bundle is asserted against a 604800s (7-day) max
+  // staleness window (see the "stale cache fallback" test below), so a fixed
+  // calendar timestamp goes stale and red exactly 7 days after it's written.
+  const generatedAt = new Date(Date.now() - 60_000);
+  const updatedAt = new Date(generatedAt.getTime() - 60_000);
   const value: ProjectContextBundleV1 = {
     schema: "hasna.projects.project_context_bundle.v1",
-    generated_at: "2026-07-22T10:00:00.000Z",
+    generated_at: generatedAt.toISOString(),
     hash: "",
     revision: "rev-9",
     freshness: "fresh",
@@ -33,7 +39,7 @@ function bundle(): ProjectContextBundleV1 {
       kind: "project",
       status: "active",
       path: "/safe/cli-context",
-      updated_at: "2026-07-22T09:59:00.000Z",
+      updated_at: updatedAt.toISOString(),
     },
     links: {
       todos: { state: "linked", project_id: "todo-project", task_list_id: "todo-list" },
