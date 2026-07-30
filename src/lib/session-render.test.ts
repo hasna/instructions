@@ -766,6 +766,71 @@ describe("session render planner", () => {
     expect(plan.files[0]?.content).toContain("Canonical Codewith provider rules.");
   });
 
+  // The `@hasna/identities` package is being renamed to `@hasna/personas`. The render
+  // runs under `set -euo pipefail`, so a canonical export carrying the new package name
+  // against an old renderer aborts on the FIRST home and leaves a partial render — the
+  // failure shape most easily misread as success. These three tests pin the bridge:
+  // the new name is accepted, the old name keeps working, and an unrelated name is still
+  // rejected so the guard is not silently disarmed fleet-wide.
+  const canonicalExportForPackage = (packageName: string) => ({
+    version: 1,
+    package: packageName,
+    exportedAt: "2026-07-01T00:00:00.000Z",
+    sources: [
+      {
+        id: "canonical-provider-codewith",
+        kind: "provider-rules",
+        title: "Canonical Provider Codewith",
+        content: "Canonical Codewith provider rules.",
+        owner: { kind: "provider", id: "codewith" },
+        sensitivity: "internal",
+        precedence: 200,
+        mergePolicy: "append",
+        safety: "standard",
+        nonOverridable: false,
+        ruleIds: [],
+        targetProviders: ["codewith"],
+        providerCompatibility: [],
+        sourcePaths: [],
+        globs: [],
+        hash: "sha256:canonical",
+        provenance: { createdAt: "2026-07-01T00:00:00.000Z", updatedAt: "2026-07-01T00:00:00.000Z" },
+        metadata: {},
+      },
+    ],
+    validation: { valid: true, sourceCount: 1, issues: [], effectiveHash: "sha256:canonical", nonOverridableSafetyRules: [] },
+    metadata: {},
+  });
+
+  test("accepts canonical exports published under the renamed @hasna/personas package", () => {
+    const sources = sourcesFromIdentityExport(canonicalExportForPackage("@hasna/personas"), { tool: "codewith" });
+
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toMatchObject({
+      id: "canonical-provider-codewith",
+      layer: "tool",
+      merge: "append",
+      order: 200,
+    });
+  });
+
+  test("still accepts canonical exports under the legacy @hasna/identities package", () => {
+    const sources = sourcesFromIdentityExport(canonicalExportForPackage("@hasna/identities"), { tool: "codewith" });
+
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toMatchObject({
+      id: "canonical-provider-codewith",
+      layer: "tool",
+      merge: "append",
+      order: 200,
+    });
+  });
+
+  test("still rejects a canonical export from an unrelated package name", () => {
+    expect(() => sourcesFromIdentityExport(canonicalExportForPackage("@hasna/nonsense"), { tool: "codewith" }))
+      .toThrow("Unsupported identity instruction export contract.");
+  });
+
   test("maps kind contract exports to renderer layers and merge policies", () => {
     const sources = sourcesFromIdentityExport({
       contract: "hasna.identities.configs-instructions/v1",

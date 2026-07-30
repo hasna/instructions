@@ -1554,9 +1554,32 @@ export function sourcesFromIdentityExport(
     .filter((source): source is SessionInstructionSource => source !== null);
 }
 
+/**
+ * Package names a canonical identity export may be published under.
+ *
+ * `@hasna/identities` is being renamed to `@hasna/personas`. Both are accepted for the
+ * duration of the migration so that a renderer and an exporter can be upgraded
+ * independently, in either order. This matters because the render runs under
+ * `set -euo pipefail`: a renderer that rejects the name its exporter emits aborts on the
+ * first home and leaves a PARTIAL render behind, which reads far more like success than
+ * like a failure. Accepting both names removes that ordering hazard entirely.
+ *
+ * Deliberately a closed set, not a prefix or wildcard match — this guard is what stops an
+ * arbitrary payload from being rendered into every agent home, so widening it to "anything
+ * @hasna" would disarm it fleet-wide. Drop the legacy entry only once no exporter in the
+ * fleet still emits it.
+ */
+const CANONICAL_IDENTITY_EXPORT_PACKAGES: ReadonlySet<string> = new Set([
+  "@hasna/identities",
+  "@hasna/personas",
+]);
+
 function requireIdentityExportShape(record: Record<string, unknown>): IdentityExportShape {
   if (record["contract"] === "hasna.identities.configs-instructions/v1") return "configs-contract";
-  if (record["version"] === 1 && record["package"] === "@hasna/identities") return "canonical-open-identities";
+  const packageName = record["package"];
+  if (record["version"] === 1 && typeof packageName === "string" && CANONICAL_IDENTITY_EXPORT_PACKAGES.has(packageName)) {
+    return "canonical-open-identities";
+  }
   throw new Error("Unsupported identity instruction export contract.");
 }
 
