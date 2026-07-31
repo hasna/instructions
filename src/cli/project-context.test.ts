@@ -18,9 +18,11 @@ function runCli(args: string[], input?: string) {
 }
 
 function bundle(): ProjectContextBundleV1 {
+  const generatedAt = new Date(Date.now() - 60_000).toISOString();
+  const updatedAt = new Date(Date.now() - 120_000).toISOString();
   const value: ProjectContextBundleV1 = {
     schema: "hasna.projects.project_context_bundle.v1",
-    generated_at: "2026-07-22T10:00:00.000Z",
+    generated_at: generatedAt,
     hash: "",
     revision: "rev-9",
     freshness: "fresh",
@@ -33,7 +35,7 @@ function bundle(): ProjectContextBundleV1 {
       kind: "project",
       status: "active",
       path: "/safe/cli-context",
-      updated_at: "2026-07-22T09:59:00.000Z",
+      updated_at: updatedAt,
     },
     links: {
       todos: { state: "linked", project_id: "todo-project", task_list_id: "todo-list" },

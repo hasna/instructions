@@ -6,6 +6,8 @@ import { createProfile, addConfigToProfile } from "../db/profiles";
 // Test MCP tool logic directly by re-implementing the dispatch
 beforeEach(() => {
   resetDatabase();
+  delete process.env["HASNA_INSTRUCTIONS_API_URL"];
+  delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   getDatabase();
 });
