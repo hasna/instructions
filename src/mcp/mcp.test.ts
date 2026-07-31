@@ -7,7 +7,7 @@ import { createProfile, addConfigToProfile } from "../db/profiles";
 beforeEach(() => {
   resetDatabase();
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
-  getDatabase();
+  getDatabase(":memory:");
 });
 
 describe("MCP tool logic", () => {

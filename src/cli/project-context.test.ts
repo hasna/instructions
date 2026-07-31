@@ -20,7 +20,7 @@ function runCli(args: string[], input?: string) {
 function bundle(): ProjectContextBundleV1 {
   const value: ProjectContextBundleV1 = {
     schema: "hasna.projects.project_context_bundle.v1",
-    generated_at: "2026-07-22T10:00:00.000Z",
+    generated_at: new Date(Date.now() - 60_000).toISOString(),
     hash: "",
     revision: "rev-9",
     freshness: "fresh",

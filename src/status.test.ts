@@ -15,6 +15,7 @@ let tempDir = "";
 beforeEach(() => {
   resetDatabase();
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
+  getDatabase(":memory:");
   tempDir = tempRootPath(`configs-status-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
 });
