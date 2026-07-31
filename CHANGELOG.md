@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.13
+
+Cuts two fixes that were merged to `main` on 2026-07-31 and 2026-08-01 and had no
+release carrying them, so neither reached a single machine. One patch covers both.
+
+- fix(configs): one `target_path`, one row; dry-run reports the primary's own
+  verdict (#32). Two defects with one root: a config's `target_path` was not
+  treated as its identity on disk.
+
+  `instructions add` on a file the store already tracked INSERTED a twin row
+  rather than refusing — `uniqueSlug` appended `-1` and both rows survived. Two
+  rows on one path make `apply` race itself, last writer wins, and nothing
+  reports the conflict. `add` now refuses by default and names the owning rows;
+  `--update` refreshes the existing row in place. Refusing rather than silently
+  updating is deliberate: the stored row may hold redacted or templateized
+  content that the literal bytes on disk would flatten, so overwriting it is the
+  operator's call and not a side effect of re-running `add`. Matching is on the
+  NORMALIZED path, because the same file is spelled several ways across the store
+  — `~/.claude/CLAUDE.md` from `sync`, an absolute path from `add`, or either
+  through a symlinked ancestor — and matching the raw string is what let a twin
+  in through a different spelling of a path that was already owned.
+
+  Separately, every display line is labelled with a path but read `changed`,
+  which ORs in the config's OUTPUTS. A config whose primary file was
+  byte-identical while an output had drifted therefore printed the primary as
+  "changed" — a dry-run reporting work it was not going to do, which is the
+  failure mode that makes a dry-run worth less than not running one. `ApplyResult`
+  now carries `primary_changed`, that target's own verdict, alongside the
+  deliberately-unchanged `changed` aggregate that profile/sync counters and the
+  MCP surface consume. Display surfaces read `primary_changed`; counters keep
+  reading `changed`.
+
+- fix(sync): discover project-root `CODEWITH.md`, not just nested (#33).
+  `PROJECT_CONFIG_FILES` listed `.codewith/CODEWITH.md` but not `CODEWITH.md` at
+  the project root, so a project keeping its instructions in the root file — the
+  common layout — synced nothing and reported success. `syncProject` also walked
+  `.claude/rules` and `.agents/rules` but never `.cursor/rules`, so Cursor rule
+  directories were invisible to project sync; they are now discovered under the
+  `cursor-rules` prefix.
+
+## 0.4.12
+
+- fix(diff): stop printing credential values from disk (#30, #31). `instructions
+  diff` rendered the stored `${VAR}` placeholder against the literal value on
+  disk, so the comparison manufactured plaintext that existed in neither side
+  alone. Backfilled here — 0.4.12 shipped without a changelog entry.
+
+## 0.4.11
+
+- feat(session-render): accept `@hasna/personas` alongside `@hasna/identities`
+  (#27, #29). Backfilled here — 0.4.11 shipped without a changelog entry.
+
 ## 0.4.10
 
 Release cutting #20, the fix for `instructions session apply` being unable to write
