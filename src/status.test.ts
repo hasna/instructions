@@ -14,6 +14,8 @@ let tempDir = "";
 
 beforeEach(() => {
   resetDatabase();
+  delete process.env["HASNA_INSTRUCTIONS_API_URL"];
+  delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   tempDir = tempRootPath(`configs-status-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
@@ -21,6 +23,8 @@ beforeEach(() => {
 
 afterEach(() => {
   resetDatabase();
+  delete process.env["HASNA_INSTRUCTIONS_API_URL"];
+  delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   rmSync(tempDir, { recursive: true, force: true });
 });

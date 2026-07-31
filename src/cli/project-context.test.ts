@@ -7,6 +7,7 @@ import { computeProjectContextSourceHash, type ProjectContextBundleV1 } from "..
 import { makeTempRoot } from "../lib/test-temp-root";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
+const recentBundleGeneratedAt = new Date(Date.now() - 60_000).toISOString();
 
 function runCli(args: string[], input?: string) {
   return spawnSync("bun", ["src/cli/index.tsx", ...args], {
@@ -20,7 +21,7 @@ function runCli(args: string[], input?: string) {
 function bundle(): ProjectContextBundleV1 {
   const value: ProjectContextBundleV1 = {
     schema: "hasna.projects.project_context_bundle.v1",
-    generated_at: "2026-07-22T10:00:00.000Z",
+    generated_at: recentBundleGeneratedAt,
     hash: "",
     revision: "rev-9",
     freshness: "fresh",
