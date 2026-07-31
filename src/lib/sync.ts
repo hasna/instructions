@@ -4,7 +4,7 @@ import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, S
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { applyConfigsWithReport, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
 import { isRetiredOrUnsupportedConfigAgent, retiredOrUnsupportedAgentReason } from "./config-agents.js";
-import { redactContent } from "./redact.js";
+import { redactContent, type RedactFormat } from "./redact.js";
 import { detectMachineContext, templateizeMachineContent } from "./machine.js";
 import { applyTransform } from "./transforms.js";
 
@@ -398,25 +398,122 @@ export async function syncToDisk(opts: SyncToDiskOptions = {}): Promise<SyncResu
 // ── Diff a config against disk ────────────────────────────────────────────────
 export interface DiffConfigOptions {
   store?: ConfigStore;
+  /**
+   * Render the raw disk content, INCLUDING any credential values it holds.
+   *
+   * Off by default and deliberately hard to reach: the CLI refuses it on a
+   * non-TTY, mirroring `secrets get --show`. Everything a tool prints is
+   * persisted verbatim into the session transcript, and agent output is also
+   * served as run evidence — so an unredacted diff writes a live credential
+   * into a durable, fetchable artefact.
+   */
+  showSecrets?: boolean;
 }
 
-function buildDiff(expectedContent: string, targetPath: string): string {
+// Placeholder forms that a redacted stored row can carry. `redact.ts` writes
+// `{{VAR}}` for most formats and `${VAR}` for npmrc auth tokens; `$VAR` and
+// `%VAR%` are accepted because `isReferenceValue` already treats them as safe
+// stored forms.
+const PLACEHOLDER_RE = /\$\{[A-Za-z_][A-Za-z0-9_]*\}|\{\{[A-Za-z_][A-Za-z0-9_]*\}\}|%[A-Za-z_][A-Za-z0-9_]*%|\$[A-Z][A-Z0-9_]*/g;
+
+/**
+ * A stored line carrying a placeholder that the disk line does not carry means
+ * the disk line holds the literal the placeholder stands for. This is the
+ * highest-signal case and it needs NO pattern match: it is a secret by
+ * construction, because the only reason the stored row holds a placeholder is
+ * that redaction put one there at ingest.
+ */
+/**
+ * Pick the redaction dialect for the file actually being read.
+ *
+ * `ConfigFormat` has no `shell` member — `detectFormat` returns `text` for
+ * `~/.zshrc` — so passing a stored `config.format` straight to `redactContent`
+ * silently selects the pattern-only generic redactor for shell files and never
+ * reaches the key-name matching in `redactShell`. Diff is a READ surface and is
+ * the last line before a value hits a transcript, so it resolves the dialect
+ * from the path rather than inheriting that gap.
+ */
+function redactFormatForTarget(targetPath: string, storedFormat: RedactFormat): RedactFormat {
+  const p = targetPath.toLowerCase();
+  if (/(^|\/)\.(zshrc|zprofile|bashrc|bash_profile|profile|zshenv|env)$/.test(p) || p.endsWith(".env")) return "shell";
+  if (/(^|\/)\.(npmrc|yarnrc|curlrc|netrc)$/.test(p)) return "ini";
+  return storedFormat;
+}
+
+function storedPlaceholderIsLiteralOnDisk(storedLine: string, diskLine: string): boolean {
+  const placeholders = storedLine.match(PLACEHOLDER_RE);
+  if (!placeholders) return false;
+  return placeholders.some((p) => !diskLine.includes(p));
+}
+
+function buildDiff(expectedContent: string, targetPath: string, storedFormat: RedactFormat, showSecrets: boolean): string {
   const path = expandPath(targetPath);
   if (!existsSync(path)) return `(file not found on disk: ${path})`;
   const diskContent = readFileSync(path, "utf-8");
   if (diskContent === expectedContent) return "(no diff — identical)";
+  const format = redactFormatForTarget(targetPath, storedFormat);
 
   const stored = expectedContent.split("\n");
   const disk = diskContent.split("\n");
+
+  // Reuse the package's ONE redaction engine — the same one `sync` uses on
+  // ingest and `scan`/`status`/`doctor` use to report findings. A second,
+  // diff-local redactor that could disagree with it would be worse than the gap
+  // it closes.
+  const { content: redactedDiskContent, redacted } = showSecrets
+    ? { content: diskContent, redacted: [] as ReturnType<typeof redactContent>["redacted"] }
+    : redactContent(diskContent, format);
+  const redactedDisk = redactedDiskContent.split("\n");
+  const reasonByLine = new Map<number, string>();
+  for (const r of redacted) if (!reasonByLine.has(r.line)) reasonByLine.set(r.line, r.reason);
+
   const lines: string[] = [`--- stored (DB)`, `+++ disk (${path})`];
   const maxLen = Math.max(stored.length, disk.length);
   for (let i = 0; i < maxLen; i++) {
+    const lineNo = i + 1;
     const s = stored[i];
     const dk = disk[i];
-    if (s === dk) { if (s !== undefined) lines.push(` ${s}`); }
-    else {
+
+    // Compare on RAW content so drift is never hidden; render from redacted
+    // content so the value is never emitted. Comparing on the redacted disk
+    // line instead would make a line that differs ONLY by its credential read
+    // as identical — silently suppressing exactly the drift an operator is
+    // running `diff` to find.
+    if (s === dk) { if (s !== undefined) lines.push(` ${s}`); continue; }
+
+    if (showSecrets || dk === undefined) {
       if (s !== undefined) lines.push(`-${s}`);
       if (dk !== undefined) lines.push(`+${dk}`);
+      continue;
+    }
+
+    const structural = s !== undefined && storedPlaceholderIsLiteralOnDisk(s, dk);
+    const patterned = reasonByLine.has(lineNo);
+
+    if (!structural && !patterned) {
+      if (s !== undefined) lines.push(`-${s}`);
+      lines.push(`+${dk}`);
+      continue;
+    }
+
+    // Structural detection is default-deny: we know the disk line holds a
+    // literal but not which span of it, so no part of that line is emitted.
+    if (structural) {
+      const placeholder = (s!.match(PLACEHOLDER_RE) ?? []).find((p) => !dk.includes(p)) ?? "a placeholder";
+      lines.push(`~line ${lineNo} differs: stored \`${s}\`, disk holds a literal value for ${placeholder} — redacted (use --show-secrets on a TTY to reveal)`);
+      continue;
+    }
+
+    // Pattern detection gives us a safe rendering of the whole line, so show it
+    // when it carries drift beyond the credential itself.
+    const safe = redactedDisk[i] ?? "";
+    const reason = reasonByLine.get(lineNo)!;
+    if (s !== undefined && safe === s) {
+      lines.push(`~line ${lineNo} differs: stored \`${s}\`, disk holds a literal value (${reason}) — redacted (use --show-secrets on a TTY to reveal)`);
+    } else {
+      if (s !== undefined) lines.push(`-${s}`);
+      lines.push(`+${safe}`);
+      lines.push(`~line ${lineNo}: disk value redacted (${reason}) — use --show-secrets on a TTY to reveal`);
     }
   }
   return lines.join("\n");
@@ -435,15 +532,19 @@ export async function diffConfig(config: Config, opts: DiffConfigOptions = {}): 
     return "(generated output — managed by fan-out)";
   }
 
+  const showSecrets = opts.showSecrets ?? false;
+
   if (config.target_path) {
-    const diff = buildDiff(config.content, config.target_path);
+    const diff = buildDiff(config.content, config.target_path, config.format as RedactFormat, showSecrets);
     if (!diff.includes("no diff")) diffs.push(diff);
   }
 
   if (config.outputs.length > 0) {
     for (const output of config.outputs) {
       const expected = applyTransform(config, output, { configs: contextConfigs });
-      const diff = buildDiff(expected, output.target_path);
+      // The output target is a different file from the config's own target, so
+      // derive the redaction format from the path actually being read.
+      const diff = buildDiff(expected, output.target_path, detectFormat(output.target_path) as RedactFormat, showSecrets);
       if (!diff.includes("no diff")) diffs.push(diff);
     }
   }

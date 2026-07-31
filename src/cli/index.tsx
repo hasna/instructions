@@ -474,14 +474,25 @@ program
 // ── diff ─────────────────────────────────────────────────────────────────────
 program
   .command("diff [id]")
-  .description("Show diff between stored config and disk (omit id for --all)")
+  .description("Show diff between stored config and disk (omit id for --all). Credential values on disk are redacted.")
   .option("--all", "diff every known config against disk")
+  .option("--show-secrets", "render credential values from disk verbatim (interactive TTY only)")
   .action(async (id, opts) => {
     try {
+      // Everything printed here is persisted verbatim into the session
+      // transcript and served as run evidence, so an unredacted diff writes a
+      // live credential into a durable, fetchable artefact. Refuse the opt-out
+      // whenever the output is being captured, mirroring `secrets get --show`.
+      if (opts.showSecrets && !process.stdout.isTTY) {
+        console.error(chalk.red("--show-secrets refuses to run on a non-TTY: the output would be captured verbatim into a log or transcript."));
+        console.error(chalk.dim("Run it in an interactive terminal, or use the redacted default."));
+        process.exit(1);
+      }
+      const showSecrets = Boolean(opts.showSecrets);
       const store = resolveConfigStore();
       if (id) {
         const config = await store.getConfig(id);
-        console.log(await diffConfig(config, { store }));
+        console.log(await diffConfig(config, { store, showSecrets }));
         return;
       }
       // --all or no id: diff all known file-type configs
@@ -489,7 +500,7 @@ program
       let drifted = 0;
       for (const c of configs) {
         if (!c.target_path) continue;
-        const diff = await diffConfig(c, { store });
+        const diff = await diffConfig(c, { store, showSecrets });
         if (diff.includes("no diff") || diff.includes("not found")) continue;
         drifted++;
         console.log(chalk.bold(c.slug) + chalk.dim(` (${c.target_path})`));
