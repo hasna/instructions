@@ -251,3 +251,15 @@ export function scanSecrets(content: string, format: RedactFormat): RedactedVar[
 export function hasSecrets(content: string, format: RedactFormat): boolean {
   return scanSecrets(content, format).length > 0;
 }
+
+/**
+ * Is this variable NAME secret-shaped? (`NPM_TOKEN` yes, `PATH`/`HOME` no.)
+ *
+ * Exported so callers reasoning about placeholder names — notably the diff
+ * renderer, which must tell a redaction artefact from an ordinary shell
+ * variable — share this module's single definition of "secret-shaped" instead
+ * of duplicating the pattern and drifting from it.
+ */
+export function isSecretVarName(name: string): boolean {
+  return SECRET_KEY_PATTERN.test(name);
+}

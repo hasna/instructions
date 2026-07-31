@@ -4,7 +4,7 @@ import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, S
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { applyConfigsWithReport, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
 import { isRetiredOrUnsupportedConfigAgent, retiredOrUnsupportedAgentReason } from "./config-agents.js";
-import { redactContent, type RedactFormat } from "./redact.js";
+import { redactContent, isSecretVarName, type RedactFormat } from "./redact.js";
 import { detectMachineContext, templateizeMachineContent } from "./machine.js";
 import { applyTransform } from "./transforms.js";
 
@@ -410,11 +410,60 @@ export interface DiffConfigOptions {
   showSecrets?: boolean;
 }
 
-// Placeholder forms that a redacted stored row can carry. `redact.ts` writes
-// `{{VAR}}` for most formats and `${VAR}` for npmrc auth tokens; `$VAR` and
-// `%VAR%` are accepted because `isReferenceValue` already treats them as safe
-// stored forms.
-const PLACEHOLDER_RE = /\$\{[A-Za-z_][A-Za-z0-9_]*\}|\{\{[A-Za-z_][A-Za-z0-9_]*\}\}|%[A-Za-z_][A-Za-z0-9_]*%|\$[A-Z][A-Z0-9_]*/g;
+// Placeholder forms a redacted stored row can carry, split by whether the form
+// is UNAMBIGUOUS evidence of redaction or merely ordinary variable syntax.
+//
+// `redact.ts` emits exactly two shapes: `{{VARNAME}}` (every format) and
+// `${NPM_TOKEN}` (the npmrc auth-token branch). It never emits a bare `$VAR` or
+// `%VAR%` — those are accepted by `isReferenceValue` only as pre-existing stored
+// forms it declines to re-redact, which is a different question.
+//
+// That distinction is load-bearing. `{{VAR}}` is not valid syntax in any config
+// dialect we store, so its presence means redaction put it there. `${VAR}`,
+// `$VAR` and `%VAR%` are ordinary shell/template/Windows expansions that occur
+// constantly in files carrying no credential at all — `$PATH`, `$HOME`, and
+// every prose mention of them in a markdown rule file. Treating those as proof
+// of redaction made any line that merely MENTIONED a variable suppress as though
+// it held a secret, hiding real drift. Markdown is 77 of 103 registered configs
+// here, so that was the common case, not an edge one.
+const CERTAIN_PLACEHOLDER_RE = /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/g;
+
+// An ambiguous placeholder sitting where redaction actually writes one: as the
+// whole VALUE of an assignment, at end of line, optionally quoted, optionally
+// with a trailing JSON comma. Covers `KEY=${VAR}`, `export KEY="$VAR"`,
+// `"key": "${VAR}"`, `key = "${VAR}"` and the npmrc `:_authToken=${NPM_TOKEN}`.
+const ASSIGNED_PLACEHOLDER_RE = /[=:]\s*(["']?)(\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Z][A-Z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%)\1\s*,?\s*$/;
+
+/**
+ * Placeholders in a stored line that are genuine evidence of redaction.
+ *
+ * Two gates, and BOTH are needed — the name gate alone is not sufficient:
+ *
+ *  - POSITION. Redaction only ever rewrites the value of an assignment. It
+ *    never touches prose. Without this gate, a markdown line that merely
+ *    *documents* a variable suppresses as though it held a credential.
+ *  - NAME. `${NPM_TOKEN}` is secret-shaped; `$PATH` and `$HOME` are not.
+ *
+ * The position gate is what the name gate misses, and the miss is not
+ * hypothetical: `$TOKEN` IS secret-shaped, so the line
+ * "- `echo $TOKEN`, `printf` of a credential-bearing variable" — real prose from
+ * `global-credential-exposure-hygiene.md`, a REGISTERED config — passes the name
+ * gate and would still have been wrongly suppressed. Markdown is the majority of
+ * the registered corpus, and rule files about credentials are exactly the ones
+ * full of these tokens, so prose is the common case rather than an edge one.
+ *
+ * `{{VAR}}` needs neither gate: it is not valid syntax in any dialect we store,
+ * so its presence anywhere means redaction put it there.
+ */
+function redactionPlaceholders(storedLine: string): string[] {
+  const found: string[] = [...(storedLine.match(CERTAIN_PLACEHOLDER_RE) ?? [])];
+  const assigned = storedLine.match(ASSIGNED_PLACEHOLDER_RE);
+  if (assigned) {
+    const name = assigned[3] ?? assigned[4] ?? assigned[5];
+    if (name && isSecretVarName(name)) found.push(assigned[2]!);
+  }
+  return found;
+}
 
 /**
  * A stored line carrying a placeholder that the disk line does not carry means
@@ -441,9 +490,7 @@ function redactFormatForTarget(targetPath: string, storedFormat: RedactFormat): 
 }
 
 function storedPlaceholderIsLiteralOnDisk(storedLine: string, diskLine: string): boolean {
-  const placeholders = storedLine.match(PLACEHOLDER_RE);
-  if (!placeholders) return false;
-  return placeholders.some((p) => !diskLine.includes(p));
+  return redactionPlaceholders(storedLine).some((p) => !diskLine.includes(p));
 }
 
 function buildDiff(expectedContent: string, targetPath: string, storedFormat: RedactFormat, showSecrets: boolean): string {
@@ -499,7 +546,7 @@ function buildDiff(expectedContent: string, targetPath: string, storedFormat: Re
     // Structural detection is default-deny: we know the disk line holds a
     // literal but not which span of it, so no part of that line is emitted.
     if (structural) {
-      const placeholder = (s!.match(PLACEHOLDER_RE) ?? []).find((p) => !dk.includes(p)) ?? "a placeholder";
+      const placeholder = redactionPlaceholders(s!).find((p) => !dk.includes(p)) ?? "a placeholder";
       lines.push(`~line ${lineNo} differs: stored \`${s}\`, disk holds a literal value for ${placeholder} — redacted (use --show-secrets on a TTY to reveal)`);
       continue;
     }
