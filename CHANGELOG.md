@@ -2,8 +2,14 @@
 
 ## 0.4.13
 
-Cuts two fixes that were merged to `main` on 2026-07-31 and 2026-08-01 and had no
+Cuts two fixes that were both merged to `main` on 2026-07-31 (UTC) and had no
 release carrying them, so neither reached a single machine. One patch covers both.
+
+**Operator note — behaviour change.** `instructions add` on a path some config
+row already targets now EXITS 1, where it previously exited 0 and silently
+created a duplicate row. Any script or loop that re-runs `add` idempotently will
+start failing on this version; pass `--update` to refresh the existing row in
+place. Announced as [BREAKING] before the release landed.
 
 - fix(configs): one `target_path`, one row; dry-run reports the primary's own
   verdict (#32). Two defects with one root: a config's `target_path` was not
