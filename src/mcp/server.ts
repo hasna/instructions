@@ -4,6 +4,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { z } from "zod";
 import { resolveConfigStore } from "../data/config-store.js";
 import { applyConfigsWithReport } from "../lib/apply.js";
+import { findConfigsByTargetPath } from "../lib/config-target-identity.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { pagedPayload, summarizeApplyResult, summarizeConfig, summarizeProfile } from "../lib/compact-output.js";
@@ -13,7 +14,7 @@ import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, ConfigOutpu
 const TOOL_DOCS: Record<string, string> = {
   list_configs: "List configs. Params: category?, agent?, kind?, search?, limit?, cursor?, verbose?. Defaults to a paged compact envelope without content; use get_config for full content.",
   get_config: "Get a config by id or slug. Returns full config including content.",
-  create_config: "Create a new config. Required: name, content, category. Optional: agent, target_path, outputs, kind, format, tags, description, is_template.",
+  create_config: "Create a new config. Required: name, content, category. Optional: agent, target_path, outputs, kind, format, tags, description, is_template. Refuses when target_path is already tracked by another config (one target path, one row) — use update_config on the owning row, or delete_config first. kind:'reference' owns no target path and is exempt.",
   update_config: "Update a config by id or slug. Optional: content, name, tags, description, category, agent, target_path, outputs.",
   apply_config: "Apply a config through the shared ownership gate. Params: id_or_slug, dry_run?, verbose?. Returns results plus session-renderer-owned targets that were skipped.",
   sync_directory: "Sync a directory with the DB. Params: dir, direction ('from_disk'|'to_disk'). Returns sync result.",
@@ -110,14 +111,45 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return ok(c);
       }
       case "create_config": {
+        const kind = (args["kind"] as ConfigKind) || undefined;
+        const targetPath = (args["target_path"] as string) || undefined;
+
+        // One target path, one row — the same guard `instructions add` enforces.
+        // Two rows pointing at one file make `apply` race itself, last writer
+        // wins, and nothing reports the conflict. The CLI refused this from
+        // 0.4.13 while this handler still minted twins silently, so the CLI's
+        // refusal read as fleet-wide protection that did not cover the surface
+        // agents actually reach through.
+        //
+        // Routed through findConfigsByTargetPath — the CLI's own helper — so both
+        // surfaces collapse symlinked ancestors and alternate spellings of a path
+        // identically. A guard that differs subtly between two surfaces is its own
+        // defect. Reference configs own no target path and stay exempt, matching
+        // the CLI. Refusing rather than updating is deliberate: the stored row may
+        // hold redacted or templatized content, so overwriting it is the caller's
+        // explicit choice via update_config, not a side effect of create.
+        if (targetPath && kind !== "reference") {
+          const owners = findConfigsByTargetPath(await store.listConfigs(), targetPath);
+          if (owners.length > 0) {
+            const named = owners.map((owner) => `${owner.slug} (${owner.id})`).join(", ");
+            const collision = owners.length > 1
+              ? ` ${owners.length} rows already collide on this path — apply order between them is undefined.`
+              : "";
+            return err(
+              `${targetPath} is already tracked by: ${named}.${collision}` +
+                ` Use update_config on that row to refresh it in place, or delete_config first.`
+            );
+          }
+        }
+
         const c = await store.createConfig({
           name: args["name"] as string,
           content: args["content"] as string,
           category: args["category"] as ConfigCategory,
           agent: (args["agent"] as ConfigAgent) || undefined,
-          target_path: (args["target_path"] as string) || undefined,
+          target_path: targetPath,
           outputs: args["outputs"] as ConfigOutput[] | undefined,
-          kind: (args["kind"] as ConfigKind) || undefined,
+          kind,
           format: (args["format"] as ConfigFormat) || undefined,
           tags: (args["tags"] as string[]) || undefined,
           description: (args["description"] as string) || undefined,
