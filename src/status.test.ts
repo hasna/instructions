@@ -11,8 +11,14 @@ import type { ConfigAgent } from "./types";
 import { tempRootPath } from "./lib/test-temp-root";
 
 let tempDir = "";
+let savedApiUrl: string | undefined;
+let savedApiKey: string | undefined;
 
 beforeEach(() => {
+  savedApiUrl = process.env["HASNA_INSTRUCTIONS_API_URL"];
+  savedApiKey = process.env["HASNA_INSTRUCTIONS_API_KEY"];
+  delete process.env["HASNA_INSTRUCTIONS_API_URL"];
+  delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
   resetDatabase();
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
   tempDir = tempRootPath(`configs-status-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -22,6 +28,10 @@ beforeEach(() => {
 afterEach(() => {
   resetDatabase();
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
+  if (savedApiUrl !== undefined) process.env["HASNA_INSTRUCTIONS_API_URL"] = savedApiUrl;
+  else delete process.env["HASNA_INSTRUCTIONS_API_URL"];
+  if (savedApiKey !== undefined) process.env["HASNA_INSTRUCTIONS_API_KEY"] = savedApiKey;
+  else delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
   rmSync(tempDir, { recursive: true, force: true });
 });
 
