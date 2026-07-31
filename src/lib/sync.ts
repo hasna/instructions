@@ -159,6 +159,7 @@ export const PROJECT_CONFIG_FILES = [
   { file: "AGENTS.md",                 category: "rules" as ConfigCategory,  agent: "codex" as ConfigAgent,  format: "markdown" as ConfigFormat },
   { file: ".codex/AGENTS.md",          category: "rules" as ConfigCategory,  agent: "codex" as ConfigAgent,  format: "markdown" as ConfigFormat },
   { file: ".opencode/AGENTS.md",       category: "rules" as ConfigCategory,  agent: "opencode" as ConfigAgent, format: "markdown" as ConfigFormat },
+  { file: "CODEWITH.md",                category: "rules" as ConfigCategory,  agent: "codewith" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".codewith/CODEWITH.md",      category: "rules" as ConfigCategory,  agent: "codewith" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".aicopilot/AICOPILOT.md",    category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: "AICOPILOT.md",               category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },

@@ -216,6 +216,27 @@ describe("syncProject", () => {
     expect(result.added).toBe(1);
   });
 
+  // Regression: a39a154a — seat charters place CODEWITH.md at the project
+  // root (mirroring CLAUDE.md), exactly like codex's root AGENTS.md and
+  // aicopilot's root AICOPILOT.md. Before this fix, PROJECT_CONFIG_FILES
+  // recognised codewith only at the nested `.codewith/CODEWITH.md` path, so
+  // `sync --project` silently never discovered a root-level CODEWITH.md —
+  // it reported unchanged/added counts for the *other* files in the project
+  // and exited 0, which read as success while never having looked at the
+  // file at all.
+  test("syncs root-level CODEWITH.md from a project dir", async () => {
+    const db = getDatabase();
+    const projDir = join(tmpDir, "codewith-root-project");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "CODEWITH.md"), "# Test Project\n\nHello from codewith.");
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
+    expect(result.added).toBe(1);
+    const configs = listConfigs(undefined, db);
+    expect(configs.length).toBe(1);
+    expect(configs[0]!.agent).toBe("codewith");
+    expect(configs[0]!.content).toBe("# Test Project\n\nHello from codewith.");
+  });
+
   test("syncs Antigravity workspace MCP config from a project dir", async () => {
     const db = getDatabase();
     const projDir = join(tmpDir, "antigravity-mcp-project");
