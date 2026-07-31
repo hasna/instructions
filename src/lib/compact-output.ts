@@ -153,6 +153,8 @@ export interface ApplyResultSummary {
   path: string;
   dry_run: boolean;
   changed: boolean;
+  /** This target's own verdict; `changed` is the config-wide aggregate. */
+  primary_changed: boolean;
   agent?: ApplyResult["agent"];
   transform?: ApplyResult["transform"];
   output_count: number;
@@ -165,6 +167,7 @@ export function summarizeApplyResult(result: ApplyResult): ApplyResultSummary {
     path: result.path,
     dry_run: result.dry_run,
     changed: result.changed,
+    primary_changed: result.primary_changed,
     agent: result.agent,
     transform: result.transform,
     output_count: result.outputs?.length ?? 0,

@@ -227,7 +227,21 @@ export interface ApplyResult {
   previous_content: string | null;
   new_content: string;
   dry_run: boolean;
+  /**
+   * AGGREGATE: true when this config has any work to do — this target OR any of
+   * its outputs. Profile/sync counters and the MCP surface consume it this way,
+   * so its meaning is deliberately unchanged.
+   */
   changed: boolean;
+  /**
+   * This target's OWN verdict: does the file at `path` differ from what would be
+   * written? Distinct from `changed`, which ORs in the outputs — a config whose
+   * primary file is byte-identical but whose outputs drifted has
+   * `primary_changed: false` and `changed: true`. Display surfaces label a line
+   * with `path`, so they must read this one; reading `changed` there reported
+   * "changed" for a file that was not going to change.
+   */
+  primary_changed: boolean;
   agent?: ConfigAgent;
   transform?: ConfigTransform;
   outputs?: ApplyResult[];

@@ -59,6 +59,7 @@ describe("compact output helpers", () => {
       new_content: "new private content",
       dry_run: true,
       changed: true,
+      primary_changed: true,
     };
 
     const summary = summarizeApplyResult(result);

@@ -6,6 +6,7 @@ import { existsSync, lstatSync, readFileSync, readSync, writeSync } from "node:f
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { applyConfigsWithReport, expandPath } from "../lib/apply.js";
+import { findConfigsByTargetPath, findDuplicateTargetPathGroups } from "../lib/config-target-identity.js";
 import { diffConfig, syncKnown, syncToDisk, syncProject, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS } from "../lib/sync.js";
 import { syncFromDir } from "../lib/sync-dir.js";
 import { redactContent, scanSecrets } from "../lib/redact.js";
@@ -382,6 +383,7 @@ program
   .option("-a, --agent <agent>", "agent override")
   .option("-k, --kind <kind>", "kind: file|reference", "file")
   .option("--template", "mark as template (has {{VAR}} placeholders)")
+  .option("--update", "if a config already owns this path, update that row in place instead of refusing")
   .action(async (filePath, opts) => {
     const abs = resolve(filePath);
     if (!existsSync(abs)) {
@@ -393,7 +395,52 @@ program
     const { content, redacted, isTemplate } = redactContent(rawContent, fmt as "shell" | "json" | "toml" | "ini" | "markdown" | "text");
     const targetPath = abs.startsWith(homedir()) ? abs.replace(homedir(), "~") : abs;
     const name = opts.name || filePath.split("/").pop()!;
-    const config = await resolveConfigStore().createConfig({
+    const store = resolveConfigStore();
+
+    // One target path, one row. Without this, a second `add` of a file the store
+    // already tracks INSERTED a twin (uniqueSlug appending `-1`), and two rows on
+    // one path make `apply` race itself — last writer wins, silently. Refusing by
+    // default rather than updating is deliberate: the stored row may hold
+    // redacted or templateized content that the literal bytes on disk would
+    // flatten, so overwriting it is the operator's call, not a side effect of
+    // re-running `add`.
+    const existingOwners = opts.kind === "reference"
+      ? []
+      : findConfigsByTargetPath(await store.listConfigs(), targetPath);
+
+    if (existingOwners.length > 0 && !opts.update) {
+      const owners = existingOwners.map((owner) => `${owner.slug} (${owner.id})`).join(", ");
+      console.error(chalk.red(`${targetPath} is already tracked by: ${owners}`));
+      if (existingOwners.length > 1) {
+        console.error(chalk.red(`  ${existingOwners.length} rows already collide on this path — apply order between them is undefined.`));
+      }
+      console.error(chalk.dim("  Use `instructions add <path> --update` to refresh that row in place,"));
+      console.error(chalk.dim("  `instructions sync` to pull disk changes in, or `instructions delete <id>` first."));
+      process.exit(1);
+    }
+
+    let config: Config;
+    if (existingOwners.length > 0) {
+      const [target, ...rest] = existingOwners;
+      config = await store.updateConfig(target!.id, {
+        content,
+        format: fmt,
+        is_template: (opts.template ?? false) || isTemplate,
+        ...(opts.category ? { category: opts.category as ConfigCategory } : {}),
+        ...(opts.agent ? { agent: opts.agent as ConfigAgent } : {}),
+      });
+      console.log(chalk.green("✓") + ` Updated: ${chalk.bold(config.name)} ${chalk.dim(`(${config.slug})`)}`);
+      if (rest.length > 0) {
+        console.log(chalk.yellow(`  ⚠ ${rest.length} other row(s) still target ${targetPath}: ${rest.map((r) => r.slug).join(", ")}`));
+        console.log(chalk.yellow("    Apply order between them is undefined. Delete the extras."));
+      }
+      if (redacted.length > 0) {
+        console.log(chalk.yellow(`  ⚠ Redacted ${redacted.length} secret(s).`));
+      }
+      return;
+    }
+
+    config = await store.createConfig({
       name,
       kind: (opts.kind as ConfigKind) ?? "file",
       category: (opts.category as ConfigCategory) ?? detectCategory(abs),
@@ -453,12 +500,14 @@ program
         throw new Error(report.failures.map((failure) => failure.message).join("; "));
       }
       for (const result of report.results) {
-        const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.changed ? chalk.green("✓") : chalk.dim("="));
-        const change = result.changed ? "changed" : "unchanged";
+        // Each line is labelled with a path, so each line reports THAT path's own
+        // verdict (`primary_changed`), never the config-wide aggregate.
+        const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.primary_changed ? chalk.green("✓") : chalk.dim("="));
+        const change = result.primary_changed ? "changed" : "unchanged";
         console.log(`${status} ${result.path} ${chalk.dim(`(${change})`)}`);
         for (const output of result.outputs ?? []) {
-          const outputStatus = opts.dryRun ? chalk.yellow("[dry-run]") : (output.changed ? chalk.green("✓") : chalk.dim("="));
-          const outputChange = output.changed ? "changed" : "unchanged";
+          const outputStatus = opts.dryRun ? chalk.yellow("[dry-run]") : (output.primary_changed ? chalk.green("✓") : chalk.dim("="));
+          const outputChange = output.primary_changed ? "changed" : "unchanged";
           console.log(`  ${outputStatus} ${output.path} ${chalk.dim(`[${output.agent}/${output.transform}] (${outputChange})`)}`);
         }
       }
@@ -772,7 +821,9 @@ profileCmd.command("apply [id]").description("Apply all configs in a profile to 
       const results = report.results;
       let changed = 0;
       for (const r of results) {
-        const status = opts.dryRun ? chalk.yellow("[dry-run]") : (r.changed ? chalk.green("✓") : chalk.dim("="));
+        // The line names `r.path`, so it shows that path's own verdict; the
+        // summary counter below stays on the config-wide aggregate.
+        const status = opts.dryRun ? chalk.yellow("[dry-run]") : (r.primary_changed ? chalk.green("✓") : chalk.dim("="));
         console.log(`${status} ${r.path}`);
         if (r.changed) changed++;
       }
@@ -1536,6 +1587,25 @@ program
       secretCount += found.length;
     }
     secretCount === 0 ? pass("No unredacted secrets") : fail(`${secretCount} unredacted secret(s) — run \`configs scan --fix\``);
+
+    // Two rows on one target path means apply order between them is undefined:
+    // whichever runs last wins and nothing reports the conflict. `add` now
+    // refuses to create these, but rows that predate that guard are still here
+    // and are invisible without this check.
+    const duplicateTargets = findDuplicateTargetPathGroups(allConfigs);
+    if (duplicateTargets.length === 0) {
+      pass("No target path is claimed by more than one config");
+    } else {
+      const rowCount = duplicateTargets.reduce((total, group) => total + group.configs.length, 0);
+      fail(`${duplicateTargets.length} target path(s) claimed by more than one config (${rowCount} rows) — apply order between them is undefined`);
+      for (const group of duplicateTargets) {
+        console.log(chalk.yellow(`      ${group.target_path}`));
+        for (const c of group.configs) {
+          console.log(chalk.dim(`        ${c.slug}  (${c.id})  updated ${c.updated_at}`));
+        }
+      }
+      console.log(chalk.dim("      Keep one row per path: `instructions delete <id>` for the extras."));
+    }
 
     console.log(`\n${issues === 0 ? chalk.green("✓ All checks passed") : chalk.yellow(`${issues} issue(s) found`)}`);
   });
