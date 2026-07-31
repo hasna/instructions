@@ -250,6 +250,30 @@ describe("syncProject", () => {
     expect(configs[0]!.target_path).toBe(join(projDir, ".agents", "mcp_config.json"));
   });
 
+  // Regression: a39a154a remediation cycle 1 — an adversarial reviewer built
+  // a synthetic project with `.cursor/rules/security.mdc` and measured
+  // `syncProject` returning +1 (only the sibling .cursor/mcp.json entry in
+  // PROJECT_CONFIG_FILES) while the .mdc rule file itself was never
+  // examined — same failure shape as the CODEWITH.md gap this PR started
+  // from: exit 0, plausible counts, the actual file untouched. Unlike
+  // .claude/rules and .agents/rules, .cursor/rules was missing from the
+  // ruleDir walk entirely. Confirmed against a real fleet workspace: 14
+  // .mdc files under .cursor/rules/, dated 2026-07-23, silently skipped.
+  test("syncs project .cursor/rules/*.mdc", async () => {
+    const db = getDatabase();
+    const projDir = join(tmpDir, "cursor-rules-project");
+    mkdirSync(join(projDir, ".cursor", "rules"), { recursive: true });
+    writeFileSync(join(projDir, ".cursor", "rules", "security.mdc"), "# Security Rule");
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
+    expect(result.added).toBe(1);
+    const configs = listConfigs(undefined, db);
+    expect(configs.length).toBe(1);
+    expect(configs[0]!.agent).toBe("cursor");
+    expect(configs[0]!.category).toBe("rules");
+    expect(configs[0]!.content).toBe("# Security Rule");
+    expect(configs[0]!.target_path).toBe(join(projDir, ".cursor", "rules", "security.mdc"));
+  });
+
   test("syncs project rules/*.md", async () => {
     const db = getDatabase();
     const projDir = join(tmpDir, "rules-project");

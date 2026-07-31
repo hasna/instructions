@@ -214,6 +214,7 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
   for (const ruleDir of [
     { dir: join(absDir, ".claude", "rules"), agent: "claude" as ConfigAgent, namePrefix: "rules" },
     { dir: join(absDir, ".agents", "rules"), agent: "antigravity" as ConfigAgent, namePrefix: "antigravity-rules" },
+    { dir: join(absDir, ".cursor", "rules"), agent: "cursor" as ConfigAgent, namePrefix: "cursor-rules" },
   ]) {
     if (!existsSync(ruleDir.dir)) continue;
     const mdFiles = readdirSync(ruleDir.dir).filter((f) => f.endsWith(".md") || f.endsWith(".mdc"));
