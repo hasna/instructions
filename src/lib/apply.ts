@@ -164,6 +164,7 @@ async function writeConfigResult(
     new_content: renderedContent,
     dry_run: opts.dryRun ?? false,
     changed,
+    primary_changed: changed,
     unresolved_template_vars: [...new Set([
       ...renderedTarget.unresolved,
       ...rendered.unresolved,
@@ -270,12 +271,19 @@ async function applyPreparedConfig(
   if (config.target_path && shouldApplyPrimary) {
     result = await writeConfigResult(config, config.target_path, config.content, opts);
     result.outputs = outputResults;
-    result.changed = result.changed || outputResults.some((output) => output.changed);
+    // `primary_changed` is already this target's own verdict from
+    // writeConfigResult and must survive the aggregation below — the CLI and the
+    // dashboard label this line with `result.path`, so OR-ing the outputs into
+    // the flag they read reported a byte-identical file as "changed".
+    result.changed = result.primary_changed || outputResults.some((output) => output.changed);
     result.unresolved_template_vars = [...new Set([
       ...(result.unresolved_template_vars ?? []),
       ...outputResults.flatMap((output) => output.unresolved_template_vars ?? []),
     ])].sort();
   } else {
+    // No writable primary (no target_path, or it is renderer-owned): the first
+    // output is promoted to the reported result. The spread keeps that output's
+    // own `primary_changed`, which is correct — `path` now names that output.
     result = {
       ...outputResults[0]!,
       outputs: outputResults.slice(1),

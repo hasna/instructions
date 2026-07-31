@@ -42,5 +42,5 @@ export interface Config { id: string; name: string; slug: string; kind: string; 
 export interface Profile { id: string; name: string; slug: string; description: string | null; selectors: { os?: string[]; arch?: string[]; hostnames?: string[] }; variables: Record<string, string>; created_at: string; updated_at: string; }
 export interface Machine { id: string; hostname: string; os: string | null; arch: string | null; last_applied_at: string | null; created_at: string; }
 export interface Snapshot { id: string; config_id: string; content: string; version: number; created_at: string; }
-export interface ApplyResult { config_id: string; path: string; previous_content: string | null; new_content: string; dry_run: boolean; changed: boolean; }
+export interface ApplyResult { config_id: string; path: string; previous_content: string | null; new_content: string; dry_run: boolean; changed: boolean; primary_changed: boolean; }
 export interface SyncResult { added: number; updated: number; unchanged: number; skipped: string[]; }

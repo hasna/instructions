@@ -62,9 +62,10 @@ export default function ApplyPage() {
             <div style={{ display: "flex", gap: 12, marginBottom: 12, fontSize: 13 }}>
               <span style={{ color: result.dry_run ? "#d29922" : "#3fb950" }}>{result.dry_run ? "⚡ Dry run" : "✓ Applied"}</span>
               <span style={{ color: "#8b949e" }}>{result.path}</span>
-              <span style={{ color: result.changed ? "#3fb950" : "#8b949e" }}>{result.changed ? "Changed" : "Unchanged"}</span>
+              {/* Labelled with result.path, so it shows that path's own verdict. */}
+              <span style={{ color: result.primary_changed ? "#3fb950" : "#8b949e" }}>{result.primary_changed ? "Changed" : "Unchanged"}</span>
             </div>
-            {result.changed && (
+            {result.primary_changed && (
               <div>
                 <div style={{ color: "#8b949e", fontSize: 12, marginBottom: 6 }}>Diff (stored → disk):</div>
                 <pre style={{ background: "#0d1117", borderRadius: 6, padding: 14, overflow: "auto", maxHeight: 300, fontSize: 11, margin: 0 }}>
