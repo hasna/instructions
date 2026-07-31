@@ -216,6 +216,27 @@ describe("syncProject", () => {
     expect(result.added).toBe(1);
   });
 
+  // Regression: a39a154a — seat charters place CODEWITH.md at the project
+  // root (mirroring CLAUDE.md), exactly like codex's root AGENTS.md and
+  // aicopilot's root AICOPILOT.md. Before this fix, PROJECT_CONFIG_FILES
+  // recognised codewith only at the nested `.codewith/CODEWITH.md` path, so
+  // `sync --project` silently never discovered a root-level CODEWITH.md —
+  // it reported unchanged/added counts for the *other* files in the project
+  // and exited 0, which read as success while never having looked at the
+  // file at all.
+  test("syncs root-level CODEWITH.md from a project dir", async () => {
+    const db = getDatabase();
+    const projDir = join(tmpDir, "codewith-root-project");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "CODEWITH.md"), "# Test Project\n\nHello from codewith.");
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
+    expect(result.added).toBe(1);
+    const configs = listConfigs(undefined, db);
+    expect(configs.length).toBe(1);
+    expect(configs[0]!.agent).toBe("codewith");
+    expect(configs[0]!.content).toBe("# Test Project\n\nHello from codewith.");
+  });
+
   test("syncs Antigravity workspace MCP config from a project dir", async () => {
     const db = getDatabase();
     const projDir = join(tmpDir, "antigravity-mcp-project");
@@ -227,6 +248,30 @@ describe("syncProject", () => {
     expect(configs[0]!.agent).toBe("antigravity");
     expect(configs[0]!.category).toBe("mcp");
     expect(configs[0]!.target_path).toBe(join(projDir, ".agents", "mcp_config.json"));
+  });
+
+  // Regression: a39a154a remediation cycle 1 — an adversarial reviewer built
+  // a synthetic project with `.cursor/rules/security.mdc` and measured
+  // `syncProject` returning +1 (only the sibling .cursor/mcp.json entry in
+  // PROJECT_CONFIG_FILES) while the .mdc rule file itself was never
+  // examined — same failure shape as the CODEWITH.md gap this PR started
+  // from: exit 0, plausible counts, the actual file untouched. Unlike
+  // .claude/rules and .agents/rules, .cursor/rules was missing from the
+  // ruleDir walk entirely. Confirmed against a real fleet workspace: 14
+  // .mdc files under .cursor/rules/, dated 2026-07-23, silently skipped.
+  test("syncs project .cursor/rules/*.mdc", async () => {
+    const db = getDatabase();
+    const projDir = join(tmpDir, "cursor-rules-project");
+    mkdirSync(join(projDir, ".cursor", "rules"), { recursive: true });
+    writeFileSync(join(projDir, ".cursor", "rules", "security.mdc"), "# Security Rule");
+    const result = await syncProject({ store: new LocalConfigStore(db), projectDir: projDir });
+    expect(result.added).toBe(1);
+    const configs = listConfigs(undefined, db);
+    expect(configs.length).toBe(1);
+    expect(configs[0]!.agent).toBe("cursor");
+    expect(configs[0]!.category).toBe("rules");
+    expect(configs[0]!.content).toBe("# Security Rule");
+    expect(configs[0]!.target_path).toBe(join(projDir, ".cursor", "rules", "security.mdc"));
   });
 
   test("syncs project rules/*.md", async () => {

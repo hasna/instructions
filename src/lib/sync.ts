@@ -159,6 +159,7 @@ export const PROJECT_CONFIG_FILES = [
   { file: "AGENTS.md",                 category: "rules" as ConfigCategory,  agent: "codex" as ConfigAgent,  format: "markdown" as ConfigFormat },
   { file: ".codex/AGENTS.md",          category: "rules" as ConfigCategory,  agent: "codex" as ConfigAgent,  format: "markdown" as ConfigFormat },
   { file: ".opencode/AGENTS.md",       category: "rules" as ConfigCategory,  agent: "opencode" as ConfigAgent, format: "markdown" as ConfigFormat },
+  { file: "CODEWITH.md",                category: "rules" as ConfigCategory,  agent: "codewith" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".codewith/CODEWITH.md",      category: "rules" as ConfigCategory,  agent: "codewith" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: ".aicopilot/AICOPILOT.md",    category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },
   { file: "AICOPILOT.md",               category: "rules" as ConfigCategory,  agent: "aicopilot" as ConfigAgent, format: "markdown" as ConfigFormat },
@@ -213,6 +214,7 @@ export async function syncProject(opts: SyncProjectOptions): Promise<SyncResult>
   for (const ruleDir of [
     { dir: join(absDir, ".claude", "rules"), agent: "claude" as ConfigAgent, namePrefix: "rules" },
     { dir: join(absDir, ".agents", "rules"), agent: "antigravity" as ConfigAgent, namePrefix: "antigravity-rules" },
+    { dir: join(absDir, ".cursor", "rules"), agent: "cursor" as ConfigAgent, namePrefix: "cursor-rules" },
   ]) {
     if (!existsSync(ruleDir.dir)) continue;
     const mdFiles = readdirSync(ruleDir.dir).filter((f) => f.endsWith(".md") || f.endsWith(".mdc"));
