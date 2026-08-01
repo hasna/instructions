@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import type { ApplyResult, Config, ConfigOutput } from "../types/index.js";
+import type { ApplyResult, Config, ConfigFormat, ConfigOutput } from "../types/index.js";
 import { ConfigApplyError } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import type { ProfileVariables } from "../types/index.js";
@@ -18,7 +18,7 @@ import {
   SESSION_RENDERER_OWNER_ID,
 } from "./session-render.js";
 import { sessionRenderOwnsPath } from "./session-render-ownership.js";
-import { isSecretVarName } from "./redact.js";
+import { isSecretVarName, scanSecrets } from "./redact.js";
 import { parseTemplateVars } from "./template.js";
 import { applyTransform } from "./transforms.js";
 
@@ -239,7 +239,11 @@ function renderForApply(
  * redact.ts's own isSecretVarName, so the protected set cannot drift from the
  * set redaction creates.
  */
-function wouldDestroyACredential(targetPath: string, renderedContent: string): string[] {
+function wouldDestroyACredential(
+  targetPath: string,
+  renderedContent: string,
+  format: ConfigFormat,
+): string[] {
   const secretTokens = parseTemplateVars(renderedContent).filter(isSecretVarName);
   if (secretTokens.length === 0) return [];
   let current: string;
@@ -251,16 +255,55 @@ function wouldDestroyACredential(targetPath: string, renderedContent: string): s
     // Unreadable target: assume the worst rather than overwrite blind.
     return secretTokens;
   }
-  // Occurrence COUNTS, not mere presence. A file can hold the placeholder in one
-  // slot and a live value in another slot of the same token — `presence`
-  // anywhere would read that as safe and destroy the live one. Requiring the
-  // current file to carry at least as many as the write would place means every
-  // slot the write touches is already a placeholder.
-  const occurrences = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
-  return secretTokens.filter((name) => {
-    const token = `{{${name}}}`;
-    return occurrences(current, token) < occurrences(renderedContent, token);
-  });
+  // A byte-identical write cannot destroy anything, whatever it contains.
+  if (current === renderedContent) return [];
+
+  // FIRST, AND THE ONLY ONE THAT IS NOT A HEURISTIC: is a live credential
+  // actually sitting in the target right now? `scanSecrets` is the SAME detector
+  // whose output creates these placeholders, so asking it is symmetric with
+  // ingest by construction — the thing that decided "this is a credential" on the
+  // way in is the thing that decides whether one is still there on the way out.
+  //
+  // It answers the question the placeholder arithmetic below only approximates,
+  // and it answers it without position, counting, or line matching: a live secret
+  // on disk cannot survive a write, because the store never holds live values —
+  // redaction is what put the placeholder in the row in the first place.
+  //
+  // It is also what keeps prose free. `~/.claude/rules/credential-exposure.md`
+  // scans as ZERO findings: `isReferenceValue` excludes `{{...}}` outright, and a
+  // markdown row goes through redactGeneric, which matches only real token SHAPES
+  // (`npm_[A-Za-z0-9]{36,}` and friends) and never key names. So that file's
+  // documentation of `NPM_TOKEN` is not mistaken for one, and — unlike any
+  // line- or count-based rule — editing the prose around the placeholder stays
+  // free.
+  if (scanSecrets(current, format).length > 0) return secretTokens;
+
+  // SECOND, as an independent backstop for a credential the detector cannot see
+  // (an unknown key name carrying a value with no recognisable shape). Placeholder
+  // arithmetic, but normalized: `{{NAME:default}}` counts as the same token,
+  // because the renderer preserves that WHOLE form when it cannot resolve the
+  // name, and an exact-string count of `{{NAME}}` therefore scores it zero and is
+  // blind to it. Measured on main @ 4d34861: a stored
+  // `authorization = "{{AUTHORIZATION:fallback}}"` overwrote a live value with the
+  // guard fully armed.
+  //
+  // Kept deliberately as counts rather than promoted to line context. Counting
+  // cannot see a RELOCATION (total conserved, placeholder moved onto the live
+  // slot) — that case is what the scan above exists to catch. Line context would
+  // see the relocation but would ALSO refuse an ordinary prose edit on the line
+  // carrying the placeholder, which blocks the credential-hygiene rules file from
+  // ever shipping an edit. A backstop that fires on correct behaviour is how a
+  // guard gets routed around.
+  return secretTokens.filter((name) => countPlaceholder(current, name) < countPlaceholder(renderedContent, name));
+}
+
+/**
+ * Occurrences of one `{{NAME}}` token, counting the `{{NAME:default}}` spelling as
+ * the same token. `name` reaches here only from the renderer's own capture group,
+ * so it is `[A-Z0-9_]+` and carries no regex metacharacters.
+ */
+function countPlaceholder(content: string, name: string): number {
+  return content.match(new RegExp(`\\{\\{${name}(?::[^}]*)?\\}\\}`, "g"))?.length ?? 0;
 }
 
 async function resolveApplyVariables(opts: ApplyOptions): Promise<ProfileVariables> {
@@ -509,7 +552,7 @@ function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConf
       ...(behavior.primary ? [{ path: behavior.primary.path, content: behavior.primary.content }] : []),
       ...behavior.outputs.map((output) => ({ path: output.path, content: output.content })),
     ];
-    const blocked = [...new Set(targets.flatMap((target) => wouldDestroyACredential(target.path, target.content)))].sort();
+    const blocked = [...new Set(targets.flatMap((target) => wouldDestroyACredential(target.path, target.content, config.format)))].sort();
     if (blocked.length === 0) return true;
     for (const target of targets) {
       skipped.push({
