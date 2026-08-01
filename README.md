@@ -1,11 +1,9 @@
 # @hasna/instructions
 
-> Formerly `@hasna/configs`. Same tool, renamed. The MCP server keeps the
-> `configs` name aliased so existing fleet MCP configs keep working.
-
-AI coding agent instruction & configuration manager — store, version, apply, and
-share all your AI coding configs and instruction sources. CLI + MCP + HTTP API
-(`instructions-serve`) + generated SDK + Dashboard.
+`@hasna/instructions` stores, versions, renders, and applies configuration and
+instruction sources for developers and platform teams operating AI coding
+agents. Install the CLI with `bun add --global @hasna/instructions`; the package
+also provides MCP, HTTP API, and SDK surfaces.
 
 [![npm](https://img.shields.io/npm/v/@hasna/instructions)](https://www.npmjs.com/package/@hasna/instructions)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -13,8 +11,23 @@ share all your AI coding configs and instruction sources. CLI + MCP + HTTP API
 ## Install
 
 ```bash
-npm install -g @hasna/instructions
+bun add --global @hasna/instructions
 ```
+
+## Quick start
+
+```bash
+instructions --help
+instructions init
+instructions list
+instructions profile resolve
+```
+
+## Migrating from `@hasna/configs`
+
+This package was formerly `@hasna/configs`. The `configs` CLI alias and
+`configs-mcp` alias remain available for existing integrations; new usage can
+use the `instructions` names.
 
 ## CLI Usage
 
@@ -286,8 +299,8 @@ push safety, no brittle hardcoding when source-of-truth or reusable abstractions
 exist, autonomous repair, Hasna CLI source-of-truth usage, conversation surface
 routing, and unbudgeted Codewith goals unless a user asks for budgets.
 
-They also seed `dangerous-operation-guard-standard`, the managed station01 guard
-source for risky shell commands, edits, git operations, package installs, and
+They also seed `dangerous-operation-guard-standard`, the managed guard source
+for risky shell commands, edits, git operations, package installs, and
 secret-adjacent access. The guard excludes Gemini CLI, requires Codewith/Codex
 `PreToolUse` to hard-deny or inject context rather than ask for approval, uses
 `PermissionRequest` for Codewith/Codex approvals, records that Qwen `QWEN.md`
