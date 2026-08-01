@@ -505,6 +505,15 @@ program
         const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.primary_changed ? chalk.green("✓") : chalk.dim("="));
         const change = result.primary_changed ? "changed" : "unchanged";
         console.log(`${status} ${result.path} ${chalk.dim(`(${change})`)}`);
+        // A token left standing in a written file used to pass in silence, which
+        // is how a literal {{HOME_DIR}} sat in core.hooksPath long enough to
+        // disable every git hook on the machine. Say so on the write.
+        if (result.unresolved_template_vars?.length) {
+          console.log(
+            `  ${chalk.yellow("!")} left unexpanded: ${result.unresolved_template_vars.map((name) => `{{${name}}}`).join(", ")}` +
+            ` ${chalk.dim("(no value for these; secret placeholders are preserved on purpose)")}`
+          );
+        }
         for (const output of result.outputs ?? []) {
           const outputStatus = opts.dryRun ? chalk.yellow("[dry-run]") : (output.primary_changed ? chalk.green("✓") : chalk.dim("="));
           const outputChange = output.primary_changed ? "changed" : "unchanged";
@@ -830,11 +839,15 @@ profileCmd.command("apply [id]").description("Apply all configs in a profile to 
       for (const skipped of report.skipped) {
         console.log(`${chalk.dim("[owned]")} ${skipped.path} ${chalk.dim(skipped.owner)}`);
       }
-      if (opts.dryRun) {
-        const unresolved = [...new Set(results.flatMap((result) => result.unresolved_template_vars ?? []))];
-        if (unresolved.length > 0) {
-          console.log(chalk.yellow(`Unresolved secret/runtime template references preserved in preview: ${unresolved.join(", ")}`));
-        }
+      // Reported unconditionally, not only on --dry-run. The real-write path is
+      // where behaviour changed most: rendering now PRESERVES a token it cannot
+      // resolve where it previously threw, so a real apply-profile that used to
+      // fail loudly would otherwise write the literal placeholder and say
+      // nothing. A silent write is the defect this whole change exists to close.
+      const unresolved = [...new Set(results.flatMap((result) => result.unresolved_template_vars ?? []))];
+      if (unresolved.length > 0) {
+        const where = opts.dryRun ? "would be left unexpanded" : "left unexpanded";
+        console.log(chalk.yellow(`Unresolved secret/runtime template references ${where}: ${unresolved.join(", ")}`));
       }
       for (const failure of report.failures) {
         console.error(chalk.red(`[failed] ${failure.config_slug}: ${failure.message}`));
