@@ -441,6 +441,10 @@ describe("apply renders machine variables even when the caller supplies none", (
   test("leaves redaction placeholders intact and still expands machine ones in the same file", async () => {
     const db = getDatabase();
     const target = join(tmpDir, "config.toml");
+    // The file already holds the placeholder, so there is no live value in that
+    // slot to lose and the write is safe. (When it holds a real value instead,
+    // the write is refused — see the credential-destruction test below.)
+    writeFileSync(target, 'root = "/stale"\nAuthorization = "{{AUTHORIZATION}}"\n');
     const c = createConfig({
       name: "codex-config-shape",
       category: "tools",
@@ -459,6 +463,77 @@ describe("apply renders machine variables even when the caller supplies none", (
     expect(result.unresolved_template_vars).toEqual(["AUTHORIZATION"]);
   });
 
+  // Reviewer sabinus, P1 on PR #38. Rendering preserves what it cannot resolve,
+  // which is right for prose and wrong for a credential: ~/.codex/config.toml
+  // and ~/.claude.json hold a live secret on disk while their stored rows hold
+  // {{AUTHORIZATION}} / {{PRIMARYAPIKEY}}. Writing the preserved placeholder
+  // would destroy live auth material on every station a fleet apply touches.
+  test("refuses to overwrite a live credential with a preserved secret placeholder", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "config.toml");
+    // Synthetic stand-in for a real token; never a live value.
+    writeFileSync(target, 'root = "/old"\nAuthorization = "synthetic-live-value-0000"\n');
+    const c = createConfig({
+      name: "codex-config-shape",
+      category: "tools",
+      content: 'root = "{{WORKSPACE_ROOT}}"\nAuthorization = "{{AUTHORIZATION}}"\n',
+      target_path: target,
+    }, db);
+
+    const report = await applyConfigsWithReport([c], { store: new LocalConfigStore(db) });
+
+    // The live value survives and the placeholder never reaches disk.
+    const onDisk = readFileSync(target, "utf-8");
+    expect(onDisk).toContain("synthetic-live-value-0000");
+    expect(onDisk).not.toContain("{{AUTHORIZATION}}");
+    // Refused VISIBLY, via the skip channel — not silently, and not by throwing.
+    expect(report.results).toEqual([]);
+    expect(report.failures).toEqual([]);
+    expect(report.skipped.map((s) => s.owner)).toEqual(["unresolved-secret-placeholder"]);
+    expect(report.skipped[0]?.reason).toContain("{{AUTHORIZATION}}");
+  });
+
+  // Reviewer sabinus's follow-up question on the fix itself: is there a shape
+  // where the placeholder is present AND a live value sits in another slot of
+  // the same token? Presence alone would call that safe. Counts do not.
+  test("refuses when one slot holds the placeholder and another holds a live value", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "two-slot.toml");
+    writeFileSync(target, 'a = "{{AUTHORIZATION}}"\nb = "synthetic-live-value-0000"\n');
+    const c = createConfig({
+      name: "two-slot",
+      category: "tools",
+      // The write would place the placeholder in BOTH slots; disk has it in one.
+      content: 'a = "{{AUTHORIZATION}}"\nb = "{{AUTHORIZATION}}"\n',
+      target_path: target,
+    }, db);
+
+    const report = await applyConfigsWithReport([c], { store: new LocalConfigStore(db) });
+
+    expect(report.skipped.map((s) => s.owner)).toEqual(["unresolved-secret-placeholder"]);
+    expect(readFileSync(target, "utf-8")).toContain("synthetic-live-value-0000");
+  });
+
+  test("the refusal is classified by redact.ts, so PROSE placeholders still apply", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "rules.md");
+    writeFileSync(target, "stale\n");
+    const c = createConfig({
+      name: "prose-tokens",
+      category: "rules",
+      // None of these are secret-class under isSecretVarName.
+      content: "Syntax is {{VAR}}, window {{WINDOW_DAYS}}, guide {{GUIDE_TEMPLATE}}.\n",
+      target_path: target,
+    }, db);
+
+    const report = await applyConfigsWithReport([c], { store: new LocalConfigStore(db) });
+
+    // A blanket "unresolved token blocks the write" rule would have stopped this
+    // one too, which would stop shipping rules files agents read.
+    expect(report.skipped).toEqual([]);
+    expect(readFileSync(target, "utf-8")).toContain("{{VAR}}");
+  });
+
   test("an unresolvable placeholder does not stop the write", async () => {
     const db = getDatabase();
     const target = join(tmpDir, "credential-exposure.md");
@@ -471,9 +546,29 @@ describe("apply renders machine variables even when the caller supplies none", (
 
     await applyConfig(c, { store: new LocalConfigStore(db) });
 
-    // This file has no machine tokens at all; it must keep applying exactly as
-    // before. Failing it closed would stop shipping a rules file agents read.
+    // This is the real ~/.claude/rules/credential-exposure.md shape: a rules
+    // file that DOCUMENTS a credential rather than holding one. It must keep
+    // applying — refusing it would stop shipping a rules file agents read, which
+    // is why the credential guard keys on disk state and not on the token name.
     expect(readFileSync(target, "utf-8")).toContain("{{NPM_TOKEN}}");
+  });
+
+  test("a rules file that DOCUMENTS a token keeps updating once it is on disk", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "credential-exposure.md");
+    // Already shipped once, and the stored rule has since been amended.
+    writeFileSync(target, "Do not commit `_authToken={{NPM_TOKEN}}`.\n");
+    const c = createConfig({
+      name: "rules-doc-updated",
+      category: "rules",
+      content: "AMENDED. Do not commit `_authToken={{NPM_TOKEN}}`, ever.\n",
+      target_path: target,
+    }, db);
+
+    const report = await applyConfigsWithReport([c], { store: new LocalConfigStore(db) });
+
+    expect(report.skipped).toEqual([]);
+    expect(readFileSync(target, "utf-8")).toContain("AMENDED");
   });
 
   test("an explicit vars map still wins over the machine default", async () => {
@@ -494,18 +589,24 @@ describe("apply renders machine variables even when the caller supplies none", (
     expect(readFileSync(target, "utf-8")).toBe(`home=${tmpDir}`);
   });
 
-  test("an EMPTY vars map is not a supplied map and still gets the machine default", async () => {
+  // Reviewer sabinus: asking "did the caller supply a map" is the wrong
+  // question. Both an empty map and a map of unrelated keys are "supplied", and
+  // either one left {{HOME_DIR}} on disk. Machine defaults are merged
+  // underneath instead, so no caller-supplied map can skip machine rendering.
+  test.each([
+    ["an empty map", {}],
+    ["a map carrying only unrelated keys", { FOO: "bar" }],
+  ])("machine variables still render when the caller supplies %s", async (_label, vars) => {
     const db = getDatabase();
-    const target = join(tmpDir, "empty-vars.txt");
+    const target = join(tmpDir, `partial-vars-${Object.keys(vars).length}.txt`);
     const c = createConfig({
-      name: "empty-vars",
+      name: `partial-vars-${Object.keys(vars).length}`,
       category: "tools",
       content: "home={{HOME_DIR}}",
       target_path: target,
     }, db);
 
-    // Truthiness would accept {} here and skip rendering — the exact defect.
-    await applyConfig(c, { store: new LocalConfigStore(db), vars: {} });
+    await applyConfig(c, { store: new LocalConfigStore(db), vars });
 
     expect(survivingMachineTokens(readFileSync(target, "utf-8"))).toEqual([]);
   });
