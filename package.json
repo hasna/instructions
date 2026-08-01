@@ -39,7 +39,7 @@
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",
     "seed": "bun run scripts/seed.ts",
-    "prepublishOnly": "bun run build",
+    "prepublishOnly": "bun run scripts/check-publish-hold.ts && bun run build",
     "postinstall": "mkdir -p $HOME/.hasna/instructions $HOME/.hasna/instructions/backups 2>/dev/null || true"
   },
   "keywords": [
