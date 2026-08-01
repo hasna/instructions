@@ -307,6 +307,13 @@ secret-adjacent access. The guard excludes Gemini CLI, requires Codewith/Codex
 is policy context only, and records native hook or wrapper/plugin fallback
 expectations for Claude, Qwen, OpenCode, Cursor, and Antigravity.
 
+The Codewith-only `codewith-shared-todos-storage-standard` requires every
+operational repository, work or research project, coordinator, worker, and loop
+to use the managed shared Todos route. On-box SQLite or file Todos storage is limited
+to disposable repository tests. Projects linkage and sanitized server-route
+verification are required before mutation; unavailable routing fails closed,
+and prior on-box-only evidence must be explicitly reconciled before use.
+
 ## Machine-aware Profiles
 
 `instructions init` seeds two platform profiles:
