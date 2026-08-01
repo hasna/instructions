@@ -156,6 +156,12 @@ export {
   DANGEROUS_OPERATION_GUARD_STANDARD_SLUG,
   ensureDangerousOperationGuardStandardConfig,
 } from "./lib/dangerous-operation-guard-standard.js";
+export {
+  CODEWITH_SHARED_TODOS_STORAGE_POLICY_REFERENCE,
+  CODEWITH_SHARED_TODOS_STORAGE_STANDARD_CONTENT,
+  CODEWITH_SHARED_TODOS_STORAGE_STANDARD_SLUG,
+  ensureCodewithSharedTodosStorageStandardConfig,
+} from "./lib/codewith-shared-todos-storage-standard.js";
 
 // Lib — sync
 export { syncKnown, syncToDisk, syncProject, diffConfig, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS, PROJECT_CONFIG_FILES } from "./lib/sync.js";

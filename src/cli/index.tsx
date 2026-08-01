@@ -20,6 +20,7 @@ import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
 import { ensureDangerousOperationGuardStandardConfig } from "../lib/dangerous-operation-guard-standard.js";
+import { ensureCodewithSharedTodosStorageStandardConfig } from "../lib/codewith-shared-todos-storage-standard.js";
 import {
   ProjectContextError,
   PROJECT_CONTEXT_MAX_INPUT_BYTES,
@@ -1478,6 +1479,7 @@ program
     }
     await ensureGlobalAgentRulesStandardConfig(store);
     await ensureDangerousOperationGuardStandardConfig(store);
+    await ensureCodewithSharedTodosStorageStandardConfig(store);
     await ensureProjectDashboardStandardConfig(store);
 
     // Create default profile

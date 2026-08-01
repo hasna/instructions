@@ -11,6 +11,7 @@ import { ensurePlatformProfiles } from "../src/lib/platform-profiles";
 import { ensureProjectDashboardStandardConfig } from "../src/lib/project-dashboard-standard";
 import { ensureGlobalAgentRulesStandardConfig } from "../src/lib/global-agent-rules-standard";
 import { ensureDangerousOperationGuardStandardConfig } from "../src/lib/dangerous-operation-guard-standard";
+import { ensureCodewithSharedTodosStorageStandardConfig } from "../src/lib/codewith-shared-todos-storage-standard";
 
 const db = getDatabase();
 const store = new LocalConfigStore(db);
@@ -90,6 +91,9 @@ console.log(`  = ${globalAgentRulesStandard.slug}`);
 
 const dangerousOperationGuardStandard = await ensureDangerousOperationGuardStandardConfig(store);
 console.log(`  = ${dangerousOperationGuardStandard.slug}`);
+
+const codewithSharedTodosStorageStandard = await ensureCodewithSharedTodosStorageStandardConfig(store);
+console.log(`  = ${codewithSharedTodosStorageStandard.slug}`);
 
 const projectDashboardStandard = await ensureProjectDashboardStandardConfig(store);
 console.log(`  = ${projectDashboardStandard.slug}`);

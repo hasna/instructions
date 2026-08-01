@@ -14,6 +14,7 @@ import {
   parseAgentOperatingRulesVersion,
   resolveAgentOperatingRulesPayload,
 } from "./global-agent-rules-standard.js";
+import { CODEWITH_SHARED_TODOS_STORAGE_STANDARD_SLUG } from "./codewith-shared-todos-storage-standard.js";
 import {
   composeProjectContextSessionRender,
   observeProjectContextSessionGuard,
@@ -1374,6 +1375,8 @@ export function sourceFromConfig(
   layer?: SessionInstructionLayer,
 ): SessionInstructionSource {
   const isAgentOperatingRules = config.slug === GLOBAL_AGENT_RULES_STANDARD_SLUG;
+  const isNonOverridableManagedPolicy = isAgentOperatingRules
+    || config.slug === CODEWITH_SHARED_TODOS_STORAGE_STANDARD_SLUG;
   // Stored content is authoritative once it declares a current rules version; the
   // embedded baseline only backstops an empty, unversioned, or strictly older record.
   const rules = isAgentOperatingRules ? resolveAgentOperatingRulesPayload(config.content) : null;
@@ -1396,7 +1399,7 @@ export function sourceFromConfig(
         configAgent: config.agent,
       },
     metadata: rules ? { ...rules.metadata } : null,
-    nonOverridable: isAgentOperatingRules,
+    nonOverridable: isNonOverridableManagedPolicy,
   };
 }
 
