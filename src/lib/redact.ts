@@ -231,6 +231,36 @@ function isReferenceValue(value: string): boolean {
 
 export type RedactFormat = "shell" | "json" | "toml" | "ini" | "markdown" | "text" | "yaml";
 
+/**
+ * Pick the redaction dialect for the file actually being read, from its PATH.
+ *
+ * `ConfigFormat` — what a stored row declares — is
+ * `text | json | toml | yaml | markdown | ini` and has NO `shell` member, while
+ * `RedactFormat` does. `detectFormat` returns `text` for any extensionless path,
+ * so `~/.zshrc`, `~/.bashrc` and `~/.npmrc` are all stored as `text`, and `text`
+ * routes to `redactGeneric` — which matches token SHAPES only and never key
+ * names. A credential whose key is secret-class but whose value has no
+ * recognisable shape is therefore invisible on exactly the files most likely to
+ * hold one.
+ *
+ * Resolving the dialect from the path closes that. It is deliberately
+ * PATH-KEYED rather than a widening of `ConfigFormat`: `.md` still resolves to
+ * `markdown`, so a rules file documenting `NPM_TOKEN=...` in prose is not
+ * mistaken for a shell assignment and frozen from ever shipping an edit.
+ *
+ * Exported so every caller that must choose a dialect shares ONE definition.
+ * Two surfaces need it and they must not drift: `diff`, the last read before a
+ * value reaches a transcript, and the `apply` guard, the last check before a
+ * value is overwritten. A per-surface copy is how one of them silently keeps the
+ * gap (todos e4d9c22e).
+ */
+export function redactFormatForTarget(targetPath: string, storedFormat: RedactFormat): RedactFormat {
+  const p = targetPath.toLowerCase();
+  if (/(^|\/)\.(zshrc|zprofile|bashrc|bash_profile|profile|zshenv|env)$/.test(p) || p.endsWith(".env")) return "shell";
+  if (/(^|\/)\.(npmrc|yarnrc|curlrc|netrc)$/.test(p)) return "ini";
+  return storedFormat;
+}
+
 export function redactContent(content: string, format: RedactFormat): RedactResult {
   switch (format) {
     case "shell": return redactShell(content);

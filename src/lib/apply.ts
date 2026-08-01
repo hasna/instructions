@@ -18,7 +18,7 @@ import {
   SESSION_RENDERER_OWNER_ID,
 } from "./session-render.js";
 import { sessionRenderOwnsPath } from "./session-render-ownership.js";
-import { isSecretVarName, scanSecrets } from "./redact.js";
+import { isSecretVarName, redactFormatForTarget, scanSecrets } from "./redact.js";
 import { parseTemplateVars } from "./template.js";
 import { applyTransform } from "./transforms.js";
 
@@ -276,7 +276,24 @@ function wouldDestroyACredential(
   // documentation of `NPM_TOKEN` is not mistaken for one, and — unlike any
   // line- or count-based rule — editing the prose around the placeholder stays
   // free.
-  if (scanSecrets(current, format).length > 0) return secretTokens;
+  //
+  // The dialect is resolved from the TARGET PATH, not from the declared format,
+  // and that is load-bearing rather than tidy. `ConfigFormat` has no `shell`
+  // member and `detectFormat` returns `text` for every extensionless path, so
+  // `~/.zshrc`, `~/.bashrc` and `~/.npmrc` — the three files most likely to hold
+  // a literal credential — arrive here declared `text`, which routes to
+  // `redactGeneric` and matches token SHAPES only, never key names. A credential
+  // with a secret-class KEY and a shapeless VALUE was therefore invisible to this
+  // arm on exactly those files; pair it with a relocation and the count arm below
+  // is blind too, and the write proceeded at rc=0 printing `✓ (changed)`
+  // (todos e4d9c22e, destroying on 0.4.14 and 0.4.15 alike).
+  //
+  // `redactFormatForTarget` is path-keyed rather than a widened union, so `.md`
+  // still resolves to `markdown` and the credential-hygiene rules file — whose
+  // prose contains bare `NPM_TOKEN=` assignments — is not mistaken for a shell
+  // config and frozen from ever shipping an edit. There is a negative control
+  // for exactly that in apply-text-format-credential-guard.test.ts.
+  if (scanSecrets(current, redactFormatForTarget(targetPath, format)).length > 0) return secretTokens;
 
   // SECOND, as an independent backstop for a credential the detector cannot see
   // (an unknown key name carrying a value with no recognisable shape). Placeholder
