@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.15
+
+Ships the two already-merged fixes that stop `apply` destroying live credentials,
+and lifts `PUBLISH_HOLD` under that file's own condition (both named defects
+fixed and merged, with the sha, never one of the two).
+
+**Read this before assuming you were safe.** `PUBLISH_HOLD` stated *"Exposure is
+currently ZERO: installed and npm-latest are both 0.4.14, which predates the #38
+merge."* That is **false**, measured on station01 and station02 rather than
+argued. 0.4.14 carries **no guard at all**, so it destroys on every shape — and
+0.4.12 destroys identically. The route is the one #38 was *fixing*, not the one
+it introduced: ingest redacts a live value to `{{AUTHORIZATION}}` in the stored
+row, and `apply` writes that stored row to disk, exits 0, and prints
+`OK (changed)`. Anyone who ran `instructions apply` against a credential-bearing
+config on 0.4.12 or 0.4.14 lost that value.
+
+**What is closed, and what is NOT.** The common case is closed: a write that
+would put a secret-class placeholder over a live credential is refused, visibly,
+via skip owner `unresolved-secret-placeholder`. **Relocation is still open**
+(todos `e4d9c22e`): when the target carries the placeholder in one slot and a
+live value in another, and the file's declared format is `text` — which
+`detectFormat` returns for any extensionless path such as `~/.zshrc`, `~/.bashrc`
+or `~/.npmrc` — the count backstop is defeated and the value is still destroyed.
+Reproduced by reviewer `tullius` on this candidate. Do not read this release as
+"credential destruction is closed".
+
+The guard is targeted rather than blanket, verified with drifted disk content so
+a write was genuinely required: ordinary configs, non-secret `{{VAR}}` prose, and
+a rules file that *documents* `{{NPM_TOKEN}}` all still apply.
+
+- fix(apply): refuse to overwrite live config with a secret-class placeholder
+  (#40, `06ff066`, todos `e043e6df`). Decides from `scanSecrets` — the same
+  detector that creates these placeholders on ingest — rather than from counting
+  placeholder occurrences, closing the relocation and `{{NAME:default}}` bypasses
+  that defeated a scalar count.
+- fix(apply): refuse a write that would destroy live codex/Claude auth (#39,
+  `e5462f9`, todos `26caf1b9`, incident 620939 from `numitor`). `profile apply`
+  is not a separate code path — it funnels through `applyConfigsWithReport` into
+  the same guard, so one guard closes both verbs.
+
 ## 0.4.14
 
 Carries one fix, merged to `main` on 2026-08-01 (UTC) as #36, with no release
