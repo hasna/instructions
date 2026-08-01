@@ -26,7 +26,14 @@ reaches a transcript) and the `apply` guard (the last check before a value is
 overwritten) cannot drift apart. It is path-keyed rather than a widening of the
 format union, deliberately: `.md` still resolves to `markdown`, so a rules file
 documenting a token assignment in prose is not mistaken for a shell config and
-frozen from ever shipping an edit. There is a negative control for exactly that.
+frozen from ever shipping an edit. There is a negative control for exactly that,
+and **it was vacuous until this release repaired it**: its fixture buried the
+assignment mid-prose (`never write NPM_TOKEN=… anywhere`), which `redactShell`
+does not match, so both dialects returned nothing and the control passed
+whichever one was selected — it stayed green under the exact regression it
+names. The fixture now puts the assignment at line start, as the real rules files
+do. Verified by mutation: forcing `.md` to resolve to `shell` now fails that test
+(9/10), where before the repair it left the suite 10/10.
 
 **Measured in both directions, on the same probe, rather than asserted.** The
 relocation suite run unchanged against 0.4.15 fails 3 of 10 with the live value
@@ -42,9 +49,15 @@ disk, never on an exit code — the whole defect is that the destroying path exi
   not vary.** `.zshrc`, `.zprofile`, `.bashrc`, `.bash_profile`, `.profile`,
   `.zshenv`, `*.env` resolve to `shell`; `.npmrc`, `.yarnrc`, `.curlrc`,
   `.netrc` resolve to `ini`. **Any other extensionless credential-bearing file
-  still resolves to `text` and is still blind on the scan arm** — `~/.aws/credentials`
-  and `~/.pgpass` are real examples that are not in the list. The count backstop
-  is the only thing standing behind those, exactly as before this release.
+  still resolves to `text` and is still blind on the scan arm.** The sharpest
+  case is **`~/.aws/credentials`**: the `ini` dialect *would* catch
+  `aws_secret_access_key`, so that one is blind only because the path is not
+  listed. **`~/.pgpass` is a different and worse shape** — colon-delimited with
+  no key at all, so neither `shell` nor `ini` detects it and adding it to the map
+  would not rescue it. For both, the count backstop is the only thing standing
+  behind the write, exactly as before this release. Measured against the 143 live
+  config rows: **zero target any uncovered credential path**, so nothing in the
+  current fleet state reaches this residual.
 - **A bare `_authToken=` is matched by neither `ini` branch** (the registry branch
   needs the `//host/:` prefix; the generic branch requires the key to start with
   a letter). A separate detector gap, filed rather than widened here.
