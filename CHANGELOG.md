@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.16
+
+Closes **relocation**, the third and last credential-destruction route, which
+0.4.15 shipped with and named as still open in its own entry above.
+
+**What was destroying, and why both guards missed it.** `wouldDestroyACredential`
+scanned with the config's *declared* `ConfigFormat`. That union has no `shell`
+member, and `detectFormat` returns `text` for any extensionless path — so
+`~/.zshrc`, `~/.bashrc` and `~/.npmrc`, the three files most likely to hold a
+literal credential, all arrived declared `text`. `text` routes to
+`redactGeneric`, which matches token *shapes* only and never key names, so a
+credential with a secret-class KEY and a shapeless VALUE was invisible to the
+scan arm on exactly those files. Pair that with a relocation — the placeholder
+moved from prose onto the live slot, total count conserved — and the count
+backstop does not fire either. Both arms blind, and the write proceeded **at
+rc=0 printing `✓ (changed)`**. It destroys on 0.4.14 and 0.4.15 alike; it is not
+a regression from #40, which closed the `toml`/`json`/`ini` instances of the same
+shape and stopped at the format boundary.
+
+**The fix** resolves the redaction dialect from the TARGET PATH rather than from
+the declared format, via `redactFormatForTarget` — promoted from a private
+function in `sync.ts` to a shared export so `diff` (the last read before a value
+reaches a transcript) and the `apply` guard (the last check before a value is
+overwritten) cannot drift apart. It is path-keyed rather than a widening of the
+format union, deliberately: `.md` still resolves to `markdown`, so a rules file
+documenting a token assignment in prose is not mistaken for a shell config and
+frozen from ever shipping an edit. There is a negative control for exactly that.
+
+**Measured in both directions, on the same probe, rather than asserted.** The
+relocation suite run unchanged against 0.4.15 fails 3 of 10 with the live value
+replaced by the placeholder on `.zshrc`, `.npmrc` and `.bashrc`; against 0.4.16
+it passes 10 of 10 with the value intact and the write refused as
+`unresolved-secret-placeholder`. Every assertion is on the SURVIVING BYTES on
+disk, never on an exit code — the whole defect is that the destroying path exits
+0 and reports success, so a status assertion cannot see it.
+
+**What is NOT closed, named rather than left to be discovered.**
+
+- **The dialect map is a fixed list of paths, and that is the axis this fix does
+  not vary.** `.zshrc`, `.zprofile`, `.bashrc`, `.bash_profile`, `.profile`,
+  `.zshenv`, `*.env` resolve to `shell`; `.npmrc`, `.yarnrc`, `.curlrc`,
+  `.netrc` resolve to `ini`. **Any other extensionless credential-bearing file
+  still resolves to `text` and is still blind on the scan arm** — `~/.aws/credentials`
+  and `~/.pgpass` are real examples that are not in the list. The count backstop
+  is the only thing standing behind those, exactly as before this release.
+- **A bare `_authToken=` is matched by neither `ini` branch** (the registry branch
+  needs the `//host/:` prefix; the generic branch requires the key to start with
+  a letter). A separate detector gap, filed rather than widened here.
+- **`diff` still redacts only the disk side of a hunk.** A stored row that itself
+  holds a literal will print it; that is blocked on the ingest defect and is
+  unchanged by this release.
+
 ## 0.4.15
 
 Ships the two already-merged fixes that stop `apply` destroying live credentials,
