@@ -214,7 +214,9 @@ function renderForApply(
  * is what stops the fifth caller repeating it. Todos 26caf1b9.
  */
 async function resolveApplyVariables(opts: ApplyOptions): Promise<ProfileVariables> {
-  if (opts.vars) return opts.vars;
+  // Length, not truthiness: an empty map is not a supplied map, and treating it
+  // as one would reinstate exactly the skip-rendering behaviour being fixed.
+  if (opts.vars && Object.keys(opts.vars).length > 0) return opts.vars;
   const machine = detectMachineContext();
   try {
     const store = opts.store ?? resolveConfigStore();

@@ -839,11 +839,15 @@ profileCmd.command("apply [id]").description("Apply all configs in a profile to 
       for (const skipped of report.skipped) {
         console.log(`${chalk.dim("[owned]")} ${skipped.path} ${chalk.dim(skipped.owner)}`);
       }
-      if (opts.dryRun) {
-        const unresolved = [...new Set(results.flatMap((result) => result.unresolved_template_vars ?? []))];
-        if (unresolved.length > 0) {
-          console.log(chalk.yellow(`Unresolved secret/runtime template references preserved in preview: ${unresolved.join(", ")}`));
-        }
+      // Reported unconditionally, not only on --dry-run. The real-write path is
+      // where behaviour changed most: rendering now PRESERVES a token it cannot
+      // resolve where it previously threw, so a real apply-profile that used to
+      // fail loudly would otherwise write the literal placeholder and say
+      // nothing. A silent write is the defect this whole change exists to close.
+      const unresolved = [...new Set(results.flatMap((result) => result.unresolved_template_vars ?? []))];
+      if (unresolved.length > 0) {
+        const where = opts.dryRun ? "would be left unexpanded" : "left unexpanded";
+        console.log(chalk.yellow(`Unresolved secret/runtime template references ${where}: ${unresolved.join(", ")}`));
       }
       for (const failure of report.failures) {
         console.error(chalk.red(`[failed] ${failure.config_slug}: ${failure.message}`));

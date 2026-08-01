@@ -494,6 +494,22 @@ describe("apply renders machine variables even when the caller supplies none", (
     expect(readFileSync(target, "utf-8")).toBe(`home=${tmpDir}`);
   });
 
+  test("an EMPTY vars map is not a supplied map and still gets the machine default", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "empty-vars.txt");
+    const c = createConfig({
+      name: "empty-vars",
+      category: "tools",
+      content: "home={{HOME_DIR}}",
+      target_path: target,
+    }, db);
+
+    // Truthiness would accept {} here and skip rendering — the exact defect.
+    await applyConfig(c, { store: new LocalConfigStore(db), vars: {} });
+
+    expect(survivingMachineTokens(readFileSync(target, "utf-8"))).toEqual([]);
+  });
+
   test("renders the target_path too, not only the content", async () => {
     const db = getDatabase();
     process.env["CONFIGS_HOME"] = tmpDir;
