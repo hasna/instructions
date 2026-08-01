@@ -251,7 +251,16 @@ function wouldDestroyACredential(targetPath: string, renderedContent: string): s
     // Unreadable target: assume the worst rather than overwrite blind.
     return secretTokens;
   }
-  return secretTokens.filter((name) => !current.includes(`{{${name}}}`));
+  // Occurrence COUNTS, not mere presence. A file can hold the placeholder in one
+  // slot and a live value in another slot of the same token — `presence`
+  // anywhere would read that as safe and destroy the live one. Requiring the
+  // current file to carry at least as many as the write would place means every
+  // slot the write touches is already a placeholder.
+  const occurrences = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
+  return secretTokens.filter((name) => {
+    const token = `{{${name}}}`;
+    return occurrences(current, token) < occurrences(renderedContent, token);
+  });
 }
 
 async function resolveApplyVariables(opts: ApplyOptions): Promise<ProfileVariables> {

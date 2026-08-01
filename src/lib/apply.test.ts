@@ -493,6 +493,27 @@ describe("apply renders machine variables even when the caller supplies none", (
     expect(report.skipped[0]?.reason).toContain("{{AUTHORIZATION}}");
   });
 
+  // Reviewer sabinus's follow-up question on the fix itself: is there a shape
+  // where the placeholder is present AND a live value sits in another slot of
+  // the same token? Presence alone would call that safe. Counts do not.
+  test("refuses when one slot holds the placeholder and another holds a live value", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "two-slot.toml");
+    writeFileSync(target, 'a = "{{AUTHORIZATION}}"\nb = "synthetic-live-value-0000"\n');
+    const c = createConfig({
+      name: "two-slot",
+      category: "tools",
+      // The write would place the placeholder in BOTH slots; disk has it in one.
+      content: 'a = "{{AUTHORIZATION}}"\nb = "{{AUTHORIZATION}}"\n',
+      target_path: target,
+    }, db);
+
+    const report = await applyConfigsWithReport([c], { store: new LocalConfigStore(db) });
+
+    expect(report.skipped.map((s) => s.owner)).toEqual(["unresolved-secret-placeholder"]);
+    expect(readFileSync(target, "utf-8")).toContain("synthetic-live-value-0000");
+  });
+
   test("the refusal is classified by redact.ts, so PROSE placeholders still apply", async () => {
     const db = getDatabase();
     const target = join(tmpDir, "rules.md");
