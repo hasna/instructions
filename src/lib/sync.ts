@@ -4,7 +4,7 @@ import type { Config, ConfigAgent, ConfigCategory, ConfigFormat, ConfigOutput, S
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import { applyConfigsWithReport, expandPath, getConfigHome, normalizeTargetPath } from "./apply.js";
 import { isRetiredOrUnsupportedConfigAgent, retiredOrUnsupportedAgentReason } from "./config-agents.js";
-import { redactContent, isSecretVarName, type RedactFormat } from "./redact.js";
+import { redactContent, isSecretVarName, redactFormatForTarget, type RedactFormat } from "./redact.js";
 import { detectMachineContext, templateizeMachineContent } from "./machine.js";
 import { applyTransform } from "./transforms.js";
 
@@ -474,22 +474,10 @@ function redactionPlaceholders(storedLine: string): string[] {
  * construction, because the only reason the stored row holds a placeholder is
  * that redaction put one there at ingest.
  */
-/**
- * Pick the redaction dialect for the file actually being read.
- *
- * `ConfigFormat` has no `shell` member — `detectFormat` returns `text` for
- * `~/.zshrc` — so passing a stored `config.format` straight to `redactContent`
- * silently selects the pattern-only generic redactor for shell files and never
- * reaches the key-name matching in `redactShell`. Diff is a READ surface and is
- * the last line before a value hits a transcript, so it resolves the dialect
- * from the path rather than inheriting that gap.
- */
-function redactFormatForTarget(targetPath: string, storedFormat: RedactFormat): RedactFormat {
-  const p = targetPath.toLowerCase();
-  if (/(^|\/)\.(zshrc|zprofile|bashrc|bash_profile|profile|zshenv|env)$/.test(p) || p.endsWith(".env")) return "shell";
-  if (/(^|\/)\.(npmrc|yarnrc|curlrc|netrc)$/.test(p)) return "ini";
-  return storedFormat;
-}
+// `redactFormatForTarget` now lives in redact.ts alongside the dialects it
+// selects, because the `apply` guard needs the same resolution and sync.ts
+// already imports apply.ts — importing back would be a cycle. One definition,
+// two surfaces (todos e4d9c22e).
 
 function storedPlaceholderIsLiteralOnDisk(storedLine: string, diskLine: string): boolean {
   return redactionPlaceholders(storedLine).some((p) => !diskLine.includes(p));
