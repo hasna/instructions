@@ -287,15 +287,26 @@ describe("NEGATIVE CONTROLS — the guard stays targeted, never a blanket refusa
   test("the markdown prose control is untouched — `.md` must NOT resolve to shell", async () => {
     const db = getDatabase();
     const target = join(tmpDir, "credential-exposure.md");
-    // The real rules file's shape: a bare secret-class assignment sitting in
-    // PROSE, alongside a prose placeholder. Under the `shell` dialect that
-    // assignment scans as a finding (`NPM_TOKEN` is a secret key name and
-    // `redacted-example` clears MIN_SECRET_VALUE_LEN), the guard refuses, and
-    // ~/.claude/rules/credential-exposure.md could never ship another edit.
-    // `redactFormatForTarget` is path-keyed, so `.md` keeps `markdown` and this
-    // stays free. The placeholder is present on BOTH sides so the count arm is
-    // held constant and this control isolates the DIALECT choice, nothing else.
-    writeFileSync(target, "old rule text\nnever write NPM_TOKEN=redacted-example anywhere\nprose mentions {{NPM_TOKEN}}\n");
+    // The real rules file's shape: a secret-class assignment AT THE START OF A
+    // LINE — which is how ~/.claude/rules/credential-exposure.md and commits.md
+    // actually quote them — alongside a prose placeholder. Under the `shell`
+    // dialect that line scans as a finding (`NPM_TOKEN` is a secret key name and
+    // `redacted-example` clears MIN_SECRET_VALUE_LEN), the guard would refuse,
+    // and those rules files could never ship another edit. `redactFormatForTarget`
+    // is path-keyed, so `.md` keeps `markdown` and this stays free. The
+    // placeholder is present on BOTH sides so the count arm is held constant and
+    // this control isolates the DIALECT choice, nothing else.
+    //
+    // THE LINE-START POSITION IS LOAD-BEARING, NOT COSMETIC. This fixture
+    // previously read `never write NPM_TOKEN=… anywhere`, and `redactShell` does
+    // not match an assignment buried mid-prose: measured
+    // `scanSecrets(line, "shell").length === 0`, so BOTH dialects returned
+    // nothing and the control passed no matter which one was selected. It was
+    // green against the very regression it names — flipping `.md` to `shell`, or
+    // returning `shell` for every path, both left the suite 10/10. A control that
+    // cannot fail is not a control. Measured on this fixture: `shell` 1,
+    // `markdown` 0.
+    writeFileSync(target, "old rule text\nNPM_TOKEN=redacted-example\nprose mentions {{NPM_TOKEN}}\n");
 
     const config = createConfig(
       {
@@ -303,7 +314,7 @@ describe("NEGATIVE CONTROLS — the guard stays targeted, never a blanket refusa
         category: "rules",
         format: "markdown",
         content:
-          "NEW rule text\nnever write NPM_TOKEN=redacted-example anywhere, in any encoding\nprose mentions {{NPM_TOKEN}}\n",
+          "NEW rule text\nNPM_TOKEN=redacted-example\nprose mentions {{NPM_TOKEN}}\nand one more line of guidance\n",
         target_path: target,
       },
       db,
