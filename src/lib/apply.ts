@@ -18,6 +18,8 @@ import {
   SESSION_RENDERER_OWNER_ID,
 } from "./session-render.js";
 import { sessionRenderOwnsPath } from "./session-render-ownership.js";
+import { isSecretVarName } from "./redact.js";
+import { parseTemplateVars } from "./template.js";
 import { applyTransform } from "./transforms.js";
 
 export function getConfigHome(): string {
@@ -74,7 +76,7 @@ export interface ConfigApplySkippedTarget {
   config_id: string;
   config_slug: string;
   path: string;
-  owner: typeof SESSION_RENDERER_OWNER_ID | "equivalent-profile-config" | "retired-provider-config";
+  owner: typeof SESSION_RENDERER_OWNER_ID | "equivalent-profile-config" | "retired-provider-config" | "unresolved-secret-placeholder";
   reason: string;
 }
 
@@ -213,20 +215,64 @@ function renderForApply(
  * them. Defaulting here, at the single funnel every caller passes through,
  * is what stops the fifth caller repeating it. Todos 26caf1b9.
  */
+/**
+ * Secret-class placeholders that would land on a file currently holding
+ * something else in that slot — i.e. a write that would destroy a credential.
+ *
+ * Three states, and only the third is dangerous:
+ *   - the target does not exist          -> nothing to destroy, write it
+ *   - the target already holds the same
+ *     placeholder                        -> it is already a template, not a
+ *                                           live value; rewriting is a no-op in
+ *                                           the slot that matters. This is what
+ *                                           keeps ~/.claude/rules/credential-
+ *                                           exposure.md shipping — a rules file
+ *                                           whose {{NPM_TOKEN}} is prose.
+ *   - the target exists WITHOUT it       -> the slot holds something real.
+ *                                           ~/.codex/config.toml and
+ *                                           ~/.claude.json are exactly this
+ *                                           today; refuse.
+ *
+ * Deciding from observable disk state rather than from the token name is what
+ * separates "documents a credential" from "is a credential", which no name-based
+ * rule can do. Classification of which names are secret-class still comes from
+ * redact.ts's own isSecretVarName, so the protected set cannot drift from the
+ * set redaction creates.
+ */
+function wouldDestroyACredential(targetPath: string, renderedContent: string): string[] {
+  const secretTokens = parseTemplateVars(renderedContent).filter(isSecretVarName);
+  if (secretTokens.length === 0) return [];
+  let current: string;
+  try {
+    const path = expandPath(targetPath);
+    if (!existsSync(path)) return [];
+    current = readFileSync(path, "utf-8");
+  } catch {
+    // Unreadable target: assume the worst rather than overwrite blind.
+    return secretTokens;
+  }
+  return secretTokens.filter((name) => !current.includes(`{{${name}}}`));
+}
+
 async function resolveApplyVariables(opts: ApplyOptions): Promise<ProfileVariables> {
-  // Length, not truthiness: an empty map is not a supplied map, and treating it
-  // as one would reinstate exactly the skip-rendering behaviour being fixed.
-  if (opts.vars && Object.keys(opts.vars).length > 0) return opts.vars;
+  // MERGED, never chosen between. Asking "did the caller supply a map" is the
+  // wrong question — reviewer sabinus measured that `vars: { FOO: "bar" }` is a
+  // supplied map by any such test and still leaves {{HOME_DIR}} unexpanded,
+  // which is the original defect reachable through a caller that passes
+  // something. Machine defaults go underneath; whatever the caller supplies
+  // wins key by key. There is then no map that can skip machine rendering.
   const machine = detectMachineContext();
+  let base: ProfileVariables;
   try {
     const store = opts.store ?? resolveConfigStore();
     const profile = await store.resolveProfileForMachine(machine);
-    return resolveProfileVariables(profile, machine);
+    base = resolveProfileVariables(profile, machine);
   } catch {
     // A profile lookup must never be the reason a config fails to render: the
     // machine context alone already defines every variable this repairs.
-    return machineContextToVariables(machine);
+    base = machineContextToVariables(machine);
   }
+  return { ...base, ...(opts.vars ?? {}) };
 }
 
 function isAntigravityRuleTarget(agent: Config["agent"] | undefined, targetPath: string): boolean {
@@ -435,7 +481,40 @@ function prepareConfigBatch(configs: Config[], opts: ApplyOptions): PreparedConf
     }
     return false;
   });
-  const { configs: deduplicated, duplicates } = deduplicateEquivalentProfileConfigs(activeConfigs, opts);
+  // Rendering preserves a token it cannot resolve, which is correct for prose
+  // and for a file that has no live value to lose — but NOT for a credential.
+  // ~/.codex/config.toml and ~/.claude.json each hold a real secret on disk
+  // while their stored rows hold {{AUTHORIZATION}} / {{PRIMARYAPIKEY}}, so
+  // writing the preserved placeholder would DESTROY live auth material. Before
+  // this change that was prevented only as a side effect of the throwing
+  // renderer; make it explicit and visible instead.
+  //
+  // Classification comes from redact.ts's own isSecretVarName — the same
+  // predicate that decides what becomes a placeholder in the first place — so
+  // the protected set cannot drift away from the set being created. Prose
+  // tokens ({{VAR}}, {{GUIDE_TEMPLATE}}, {{USAGE_DATA}}, {{WINDOW_DAYS}}) are
+  // not secret-class and still apply normally.
+  const renderSafeConfigs = activeConfigs.filter((config) => {
+    const behavior = canonicalConfigApplyBehavior(config, opts, activeConfigs);
+    const targets: Array<{ path: string; content: string }> = [
+      ...(behavior.primary ? [{ path: behavior.primary.path, content: behavior.primary.content }] : []),
+      ...behavior.outputs.map((output) => ({ path: output.path, content: output.content })),
+    ];
+    const blocked = [...new Set(targets.flatMap((target) => wouldDestroyACredential(target.path, target.content)))].sort();
+    if (blocked.length === 0) return true;
+    for (const target of targets) {
+      skipped.push({
+        config_id: config.id,
+        config_slug: config.slug,
+        path: target.path,
+        owner: "unresolved-secret-placeholder",
+        reason: `no value for ${blocked.map((name) => `{{${name}}}`).join(", ")} and the file holds something else there; writing the placeholder would overwrite a live credential`,
+      });
+    }
+    return false;
+  });
+
+  const { configs: deduplicated, duplicates } = deduplicateEquivalentProfileConfigs(renderSafeConfigs, opts);
   for (const duplicate of duplicates) {
     for (const target of configTargets(duplicate, opts, activeConfigs)) {
       skipped.push({
