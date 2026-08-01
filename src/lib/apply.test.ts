@@ -6,7 +6,7 @@ import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig } from "../db/configs";
 import { applyConfig, applyConfigs, applyConfigsWithReport } from "./apply";
 import { ANTIGRAVITY_RULE_FILE_CHAR_LIMIT } from "./session-render";
-import { detectMachineContext, resolveProfileVariables } from "./machine";
+import { detectMachineContext, machineContextToVariables, resolveProfileVariables } from "./machine";
 import type { ConfigAgent } from "../types";
 import { tempRootPath } from "./test-temp-root";
 
@@ -384,5 +384,136 @@ describe("applyConfig", () => {
 
     await expect(applyConfig(stale, { store: new LocalConfigStore(db) })).rejects.toThrow("generated output");
     expect(existsSync(join(tmpDir, ".config", "aicopilot", "AICOPILOT.md"))).toBe(false);
+  });
+});
+
+// Regression: `instructions apply <id>` wrote template placeholders to disk
+// verbatim because it never passed `vars`, so nothing rendered. On station01
+// that put the literal string `{{HOME_DIR}}/.config/hasna/git-hooks/...` into
+// core.hooksPath, git found no hooks, and the mandatory staged-credential
+// secrets scan was inert. Todos 26caf1b9.
+//
+// The assertion is deliberately NOT "no {{...}} survives". The placeholder
+// namespace is shared with src/lib/redact.ts, which stores secrets as
+// {{NPM_TOKEN}}-style placeholders precisely so their values never reach the
+// DB; those MUST survive a render. What must never survive is a token the
+// machine-variable set defines. That set is read from the code rather than
+// listed here, so a tenth machine variable is covered without touching this
+// file.
+describe("apply renders machine variables even when the caller supplies none", () => {
+  const machineVarNames = () => Object.keys(machineContextToVariables(detectMachineContext()));
+
+  const survivingMachineTokens = (rendered: string): string[] =>
+    machineVarNames().filter((name) => rendered.includes(`{{${name}}}`));
+
+  test("expands the gitconfig shape that disabled the git hook chain", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "gitconfig");
+    const c = createConfig({
+      name: "gitconfig",
+      category: "tools",
+      content: [
+        "[core]",
+        "\thooksPath = {{HOME_DIR}}/.config/hasna/git-hooks/no-cursor-coauthor",
+        '[credential "https://github.com"]',
+        "\thelper = !{{BUN_BIN_DIR}}/gh auth git-credential",
+      ].join("\n"),
+      target_path: target,
+    }, db);
+
+    // No `vars` — exactly how the `apply <id>` CLI command calls it.
+    await applyConfig(c, { store: new LocalConfigStore(db) });
+
+    const written = readFileSync(target, "utf-8");
+    expect(survivingMachineTokens(written)).toEqual([]);
+    const machine = detectMachineContext();
+    expect(written).toContain(`${machine.home_dir}/.config/hasna/git-hooks/no-cursor-coauthor`);
+    expect(written).toContain(`!${machine.bun_bin_dir}/gh auth git-credential`);
+  });
+
+  test("POSITIVE CONTROL: the same check fires when a machine token is left unexpanded", () => {
+    // Proves the assertion above can fail. Without this, a render that silently
+    // stopped happening would still show green.
+    const notRendered = "hooksPath = {{HOME_DIR}}/.config/hasna/git-hooks/no-cursor-coauthor";
+    expect(survivingMachineTokens(notRendered)).toEqual(["HOME_DIR"]);
+  });
+
+  test("leaves redaction placeholders intact and still expands machine ones in the same file", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "config.toml");
+    const c = createConfig({
+      name: "codex-config-shape",
+      category: "tools",
+      content: 'root = "{{WORKSPACE_ROOT}}"\nAuthorization = "{{AUTHORIZATION}}"\n',
+      target_path: target,
+    }, db);
+
+    const result = await applyConfig(c, { store: new LocalConfigStore(db) });
+
+    const written = readFileSync(target, "utf-8");
+    expect(survivingMachineTokens(written)).toEqual([]);
+    // The secret placeholder is preserved verbatim: expanding it would write a
+    // live credential to disk, which is the failure redact.ts exists to prevent.
+    expect(written).toContain("{{AUTHORIZATION}}");
+    // ...and the operator is told, rather than it passing silently.
+    expect(result.unresolved_template_vars).toEqual(["AUTHORIZATION"]);
+  });
+
+  test("an unresolvable placeholder does not stop the write", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "credential-exposure.md");
+    const c = createConfig({
+      name: "rules-doc",
+      category: "rules",
+      content: "Do not commit `_authToken={{NPM_TOKEN}}`.\n",
+      target_path: target,
+    }, db);
+
+    await applyConfig(c, { store: new LocalConfigStore(db) });
+
+    // This file has no machine tokens at all; it must keep applying exactly as
+    // before. Failing it closed would stop shipping a rules file agents read.
+    expect(readFileSync(target, "utf-8")).toContain("{{NPM_TOKEN}}");
+  });
+
+  test("an explicit vars map still wins over the machine default", async () => {
+    const db = getDatabase();
+    const target = join(tmpDir, "explicit.txt");
+    const c = createConfig({
+      name: "explicit-vars",
+      category: "tools",
+      content: "home={{HOME_DIR}}",
+      target_path: target,
+    }, db);
+
+    await applyConfig(c, {
+      store: new LocalConfigStore(db),
+      vars: { ...machineContextToVariables(detectMachineContext()), HOME_DIR: tmpDir },
+    });
+
+    expect(readFileSync(target, "utf-8")).toBe(`home=${tmpDir}`);
+  });
+
+  test("renders the target_path too, not only the content", async () => {
+    const db = getDatabase();
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const c = createConfig({
+      name: "templated-target",
+      category: "tools",
+      content: "body",
+      target_path: "{{HOME_DIR}}/nested/templated.txt",
+    }, db);
+
+    await applyConfig(c, { store: new LocalConfigStore(db) });
+
+    // A literal "{{HOME_DIR}}" directory must never be created on disk. An
+    // unrendered target path is not absolute and does not start with "~/", so
+    // expandPath() resolves it against the CURRENT WORKING DIRECTORY — the
+    // unfixed code created ./{{HOME_DIR}}/nested/templated.txt inside the repo
+    // checkout it happened to be run from. Both locations are asserted because
+    // the cwd one is where it actually landed.
+    expect(existsSync(join(tmpDir, "{{HOME_DIR}}"))).toBe(false);
+    expect(existsSync(join(process.cwd(), "{{HOME_DIR}}"))).toBe(false);
+    expect(readFileSync(join(tmpDir, "nested", "templated.txt"), "utf-8")).toBe("body");
   });
 });

@@ -6,7 +6,12 @@ import { ConfigApplyError } from "../types/index.js";
 import { resolveConfigStore, type ConfigStore } from "../data/config-store.js";
 import type { ProfileVariables } from "../types/index.js";
 import { isRetiredOrUnsupportedConfigAgent } from "./config-agents.js";
-import { renderMachineAwareContent, renderMachineAwareContentPreview } from "./machine.js";
+import {
+  detectMachineContext,
+  machineContextToVariables,
+  renderMachineAwareContentPreview,
+  resolveProfileVariables,
+} from "./machine.js";
 import {
   ANTIGRAVITY_RULE_FILE_CHAR_LIMIT,
   SESSION_RENDER_OWNED_CONFIG_TARGETS,
@@ -118,12 +123,9 @@ async function writeConfigResult(
   opts: ApplyOptions,
   meta: Pick<ApplyResult, "agent" | "transform"> = {}
 ): Promise<ApplyResult> {
-  const renderedTarget = opts.vars
-    ? renderForApply(targetPath, opts.vars, opts.dryRun === true)
-    : { content: targetPath, unresolved: [] };
-  const rendered = opts.vars
-    ? renderForApply(content, opts.vars, opts.dryRun === true)
-    : { content, unresolved: [] };
+  const variables = opts.vars ?? {};
+  const renderedTarget = renderForApply(targetPath, variables);
+  const rendered = renderForApply(content, variables);
   const renderedTargetPath = renderedTarget.content;
   const renderedContent = rendered.content;
   const targetAgent = meta.agent ?? config.agent;
@@ -173,16 +175,56 @@ async function writeConfigResult(
   };
 }
 
+/**
+ * Render for apply, expanding every variable the map defines and preserving
+ * every token it does not.
+ *
+ * Preserving is deliberate and is not laxity. The `{{NAME}}` namespace is
+ * shared with the secret redactor in ./redact.ts, which rewrites credential
+ * values to `{{NPM_TOKEN}}`-style placeholders so the values never enter the
+ * store. Those placeholders MUST come out the other side untouched, and files
+ * such as ~/.codex/config.toml carry them in the same file as {{HOME_DIR}} —
+ * so the choice cannot be made per file, only per token.
+ *
+ * Failing the whole write instead would stop shipping configs that apply
+ * correctly today, including a rules file that only ever mentions a token in
+ * prose. Unresolved names are reported on `unresolved_template_vars` so the
+ * caller can surface them rather than have them pass silently.
+ *
+ * Dry-run and real writes now render identically, which is what makes
+ * `--dry-run` a prediction of the write rather than a different computation.
+ */
 function renderForApply(
   content: string,
   variables: ProfileVariables,
-  preview: boolean,
 ): { content: string; unresolved: string[] } {
-  if (preview) return renderMachineAwareContentPreview(content, variables);
-  return {
-    content: renderMachineAwareContent(content, variables),
-    unresolved: [],
-  };
+  return renderMachineAwareContentPreview(content, variables);
+}
+
+/**
+ * The variables an apply renders with when the caller supplies none.
+ *
+ * Every caller used to be trusted to pass `vars`, and four did not: the
+ * `apply <id>` CLI command, the `apply_config` MCP tool, `push`, and
+ * `syncToDir`. A missing map did not degrade rendering, it SKIPPED it, so the
+ * stored template landed on disk verbatim — which put a literal
+ * `{{HOME_DIR}}/.config/hasna/git-hooks/...` into core.hooksPath and left git
+ * running no hooks at all, the mandatory staged-credential secrets scan among
+ * them. Defaulting here, at the single funnel every caller passes through,
+ * is what stops the fifth caller repeating it. Todos 26caf1b9.
+ */
+async function resolveApplyVariables(opts: ApplyOptions): Promise<ProfileVariables> {
+  if (opts.vars) return opts.vars;
+  const machine = detectMachineContext();
+  try {
+    const store = opts.store ?? resolveConfigStore();
+    const profile = await store.resolveProfileForMachine(machine);
+    return resolveProfileVariables(profile, machine);
+  } catch {
+    // A profile lookup must never be the reason a config fails to render: the
+    // machine context alone already defines every variable this repairs.
+    return machineContextToVariables(machine);
+  }
 }
 
 function isAntigravityRuleTarget(agent: Config["agent"] | undefined, targetPath: string): boolean {
@@ -326,7 +368,12 @@ export async function applyConfigsWithReport(
   configs: Config[],
   opts: ApplyOptions = {},
 ): Promise<ConfigApplyPreview> {
-  const prepared = prepareConfigBatch(configs, opts);
+  // Resolved once, before batch preparation, because the batch's duplicate-target
+  // detection and the session-renderer ownership guard both compare RENDERED
+  // target paths. With no variables those guards were comparing a literal
+  // "{{HOME_DIR}}/..." against real homes and so could never match.
+  const effective: ApplyOptions = { ...opts, vars: await resolveApplyVariables(opts) };
+  const prepared = prepareConfigBatch(configs, effective);
   if (prepared.failures.length > 0) {
     return {
       results: [],
@@ -339,7 +386,7 @@ export async function applyConfigsWithReport(
   for (const config of prepared.configs) {
     if (config.kind === "reference" || isRetiredOrUnsupportedConfigAgent(config.agent)) continue;
     try {
-      results.push(await applyPreparedConfig(config, opts));
+      results.push(await applyPreparedConfig(config, effective));
     } catch (error) {
       failures.push({
         config_id: config.id,

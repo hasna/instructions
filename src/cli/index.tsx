@@ -505,6 +505,15 @@ program
         const status = opts.dryRun ? chalk.yellow("[dry-run]") : (result.primary_changed ? chalk.green("✓") : chalk.dim("="));
         const change = result.primary_changed ? "changed" : "unchanged";
         console.log(`${status} ${result.path} ${chalk.dim(`(${change})`)}`);
+        // A token left standing in a written file used to pass in silence, which
+        // is how a literal {{HOME_DIR}} sat in core.hooksPath long enough to
+        // disable every git hook on the machine. Say so on the write.
+        if (result.unresolved_template_vars?.length) {
+          console.log(
+            `  ${chalk.yellow("!")} left unexpanded: ${result.unresolved_template_vars.map((name) => `{{${name}}}`).join(", ")}` +
+            ` ${chalk.dim("(no value for these; secret placeholders are preserved on purpose)")}`
+          );
+        }
         for (const output of result.outputs ?? []) {
           const outputStatus = opts.dryRun ? chalk.yellow("[dry-run]") : (output.primary_changed ? chalk.green("✓") : chalk.dim("="));
           const outputChange = output.primary_changed ? "changed" : "unchanged";
