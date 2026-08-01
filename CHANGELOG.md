@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.4.14
+
+Carries one fix, merged to `main` on 2026-08-01 (UTC) as #36, with no release
+behind it — so the guard existed in `main` and on no machine. Measured in the
+installed 0.4.13 bundle before this release: `findConfigsByTargetPath` appears
+**0** times in `dist/mcp/index.js`, against a positive control of 327
+occurrences of `config` in the same file, proving the probe read the bundle.
+
+**Operator note — behaviour change on the MCP surface.** `create_config` on a
+path some config row already targets now returns an ERROR, where it previously
+returned a created config. Any agent or script calling `create_config`
+idempotently starts failing on this version; call `update_config` on the owning
+row to refresh it in place, or `delete_config` first. This is the same refusal
+`instructions add` has enforced since 0.4.13 — but the [BREAKING] notice for
+that release described the CLI only, and MCP callers were never covered by it.
+
+- fix(mcp): `create_config` enforces the duplicate-target-path guard the CLI
+  added (#36). 0.4.13 made `instructions add` refuse a path the store already
+  tracked, because two rows on one `target_path` make `apply` race itself, last
+  writer wins, and nothing reports the conflict. The MCP's `create_config`
+  handler kept minting twins silently — so the CLI's refusal read as fleet-wide
+  protection while the surface agents actually reach through
+  (`hasna-configs-mcp.service` runs it) was still unguarded. A guard that covers
+  the human path and not the agent path is close to no guard at all, given which
+  one writes more rows.
+
+  Routed through `findConfigsByTargetPath`, the CLI's own helper, rather than a
+  reimplementation, so both surfaces collapse symlinked ancestors and alternate
+  spellings of a path identically — a guard that differs subtly between two
+  surfaces is its own defect. Reference configs own no target path and stay
+  exempt, matching the CLI. Refusing rather than updating is deliberate and
+  matches `add`: the stored row may hold redacted or templatized content that the
+  literal bytes on disk would flatten, so overwriting it is the caller's explicit
+  choice, not a side effect of `create`.
+
+  The regression test drives the real MCP server over a client transport rather
+  than re-implementing the handler — a test that re-implements the handler proves
+  only that the test agrees with itself, which is exactly why the existing suite
+  could never have caught this. Controlled in both directions: 3 fail / 2 pass
+  against the pre-fix bytes, 5 pass / 0 fail against the fix.
+
 ## 0.4.13
 
 Cuts two fixes that were both merged to `main` on 2026-07-31 (UTC) and had no
