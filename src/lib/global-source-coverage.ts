@@ -23,15 +23,30 @@
 
 export const GLOBAL_SOURCE_SLUG_PREFIX = "global-";
 
-// Slugs of true fossils, kept registered for history/audit but never rendered:
-//   - superseded content that has an explicit successor (see the `retired` tag
-//     convention below), or
-//   - a config that exists only to feed a DIFFERENT render path programmatically
-//     (e.g. `global-agent-rules-standard` backstops the agent-operating-rules
-//     payload resolver in global-agent-rules-standard.ts; it is never meant to be
-//     included directly in a tool's GLOBAL_CONFIGS list).
-// A tag is the sanctioned way to mark a source retired; this constant exists only
-// as the name of that tag so callers do not have to guess the string.
+// The sanctioned way to mark a source as a deliberate, JUSTIFIED omission from
+// every render's --config list — a true fossil kept registered for history/audit,
+// like an owner-ruled withdrawal (see `global-hasna-deployment-terms`, knowledge
+// `k_ms5a5hmy_hllrbg`). This constant exists only as the name of that tag so
+// callers do not have to guess the string.
+//
+// CORRECTED 2026-08-02, during PR #51's own remediation (P1 #1: this tag had no
+// way to be applied at all — see `instructions tag` in src/cli/index.tsx). This
+// comment previously also claimed `global-agent-rules-standard` (and its dupes)
+// belong here because the base slug "backstops the agent-operating-rules payload
+// resolver ... and is never meant to be included directly". That is false:
+// `ensureGlobalAgentRulesStandardConfig` (global-agent-rules-standard.ts) only
+// seeds/repairs the STORED row's content on publish — it does not inject that
+// row into any render, so there is no "different path" for a render-coverage
+// check to defer to. Measured 2026-08-02: `global-agent-rules-standard-1/-2/-3`
+// are BYTE-IDENTICAL duplicate rows minted by a live, still-open defect
+// (`43d0c1c0`, `instructions add` re-inserting instead of updating an existing
+// target_path) that fired twice in one evening. Tagging bug output "retired"
+// would hide the bug from the one surface built to catch exactly this, and the
+// family is unbounded — a `-4` would arrive untagged and this checker would
+// (correctly) flag it, which is the point: NEVER special-case a slug by name
+// here. If a source's exclusion is genuinely deliberate, tag that specific row
+// with a reason a human can point to; if it's not deliberate, let it show up
+// as a gap. Only `global-hasna-deployment-terms` carries this tag today.
 export const RETIRED_GLOBAL_SOURCE_TAG = "retired-global-source";
 
 export interface GlobalSourceCoverageConfig {
