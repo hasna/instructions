@@ -210,7 +210,15 @@ async function checkGlobalSourceCoverage(
   const configuredSlugs = plan.manifest.sources
     .map((source) => source.id)
     .filter((id) => id.startsWith(GLOBAL_SOURCE_SLUG_PREFIX));
-  return computeGlobalSourceCoverage(registryConfigs, configuredSlugs);
+  // A source the render itself discarded during planning (semantic-policy dedup,
+  // provider mismatch, ...) already has a skip reason on manifest.skippedSources
+  // (PR #50). Treating it as a plain coverage gap would contradict that reason in
+  // the same JSON response — see global-source-coverage.ts for why this is a
+  // separate bucket rather than "not missing" outright.
+  const skippedSlugs = plan.manifest.skippedSources
+    .map((source) => source.id)
+    .filter((id) => id.startsWith(GLOBAL_SOURCE_SLUG_PREFIX));
+  return computeGlobalSourceCoverage(registryConfigs, configuredSlugs, skippedSlugs);
 }
 
 function stripSessionFileContent(file: SessionRenderFile): Omit<SessionRenderFile, "content"> {
@@ -393,6 +401,38 @@ program
       console.error(chalk.red(formatCliError(e)));
       process.exit(1);
     }
+  });
+
+// ── tag ──────────────────────────────────────────────────────────────────────
+// The only mutation verb for a config's tags. Metadata-only tags (like
+// `retired-global-source`, see global-source-coverage.ts) had no way to be
+// applied short of raw SQL against the store, which is why that mechanism
+// shipped in PR #51 with zero real rows carrying it: the CLI could filter on
+// a tag but never set one on an existing config. `add --update` only refreshes
+// content from a file on disk and cannot add a tag with no corresponding byte
+// change, and there is no tag-bearing file for a purely administrative marker.
+program
+  .command("tag <id>")
+  .description("Add or remove tags on a stored config (metadata-only; content/target_path untouched)")
+  .option("--add <tag>", "tag to add; repeatable", collectOption, [])
+  .option("--remove <tag>", "tag to remove; repeatable", collectOption, [])
+  .option("--json", "output the updated config as JSON")
+  .action(async (id, opts) => {
+    const add = opts.add as string[];
+    const remove = opts.remove as string[];
+    if (add.length === 0 && remove.length === 0) {
+      console.error(chalk.red("Pass at least one --add <tag> or --remove <tag>."));
+      process.exit(1);
+    }
+    const store = resolveConfigStore();
+    const config = await store.getConfig(id);
+    const tagSet = new Set(config.tags);
+    for (const t of add) tagSet.add(t);
+    for (const t of remove) tagSet.delete(t);
+    const nextTags = [...tagSet].sort();
+    const updated = await store.updateConfig(config.id, { tags: nextTags });
+    if (opts.json) { printJson(updated); return; }
+    console.log(chalk.green("✓") + ` Tags on ${chalk.bold(updated.name)} ${chalk.dim(`(${updated.slug})`)}: ${nextTags.join(", ") || chalk.dim("(none)")}`);
   });
 
 // ── add ───────────────────────────────────────────────────────────────────────
