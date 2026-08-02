@@ -22,6 +22,7 @@ import {
   type SessionRenderFileRole,
   type SessionRenderManifest,
   type SessionRenderPlan,
+  type SessionSkippedSource,
 } from "./session-render.js";
 
 export type SessionApplyAction = "create" | "update" | "delete" | "unchanged" | "conflict";
@@ -61,6 +62,8 @@ export interface SessionApplyResult {
   manifestPath: string;
   snapshotPath: string | null;
   env: Record<string, string>;
+  warnings: string[];
+  skippedSources: SessionSkippedSource[];
   files: SessionApplyFileResult[];
   conflicts: SessionApplyFileResult[];
   drift: SessionDriftCheck;
@@ -199,6 +202,8 @@ function applySessionRenderUnlocked(
       manifestPath,
       snapshotPath: null,
       env: plan.env,
+      warnings: plan.warnings,
+      skippedSources: plan.manifest.skippedSources,
       files: results,
       conflicts,
       drift,
@@ -265,6 +270,8 @@ function applySessionRenderUnlocked(
     manifestPath,
     snapshotPath,
     env: plan.env,
+    warnings: plan.warnings,
+    skippedSources: plan.manifest.skippedSources,
     files: results,
     conflicts,
     drift,
