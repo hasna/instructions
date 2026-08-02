@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  accountedGlobalSourceSlugs,
   computeGlobalSourceCoverage,
   expectedGlobalSourceSlugs,
   formatGlobalSourceCoverageWarnings,
   RETIRED_GLOBAL_SOURCE_TAG,
 } from "./global-source-coverage.js";
+import { planSessionRender } from "./session-render.js";
 
 // Regression fixture for todos 102d6d0a / 5dcd60ec: 29 registered `global-*`
 // sources on station01, 16 of them in the hand-maintained GLOBAL_CONFIGS array,
@@ -114,5 +116,40 @@ describe("computeGlobalSourceCoverage — the constructed-shortfall requirement"
     ]);
     expect(result.complete).toBe(true);
     expect(result.unexpectedSlugs).toEqual(["global-hasna-deployment-terms"]);
+  });
+
+  test("a configured global source intentionally collapsed by the real render plan remains accounted for", () => {
+    const olderId = "global-rules-9-9-8";
+    const newerId = "global-rules-9-9-9";
+    const rulesPayload = (version: string, body: string) => [
+      `# Hasna Agent Operating Rules — v${version} (2026-08-02)`,
+      `<!-- hasna:agent-operating-rules v=${version} -->`,
+      body,
+    ].join("\n");
+    const plan = planSessionRender({
+      tool: "claude",
+      profile: "global-coverage-regression",
+      targetHome: "/tmp/global-coverage-regression-home",
+      generatedAt: "2026-08-02T00:00:00.000Z",
+      sources: [
+        { id: olderId, label: "Older rules", layer: "global", order: 0, content: rulesPayload("9.9.8", "Older policy body.") },
+        { id: newerId, label: "Newer rules", layer: "global", order: 1, content: rulesPayload("9.9.9", "Newer policy body.") },
+      ],
+    });
+
+    expect(plan.manifest.sources.map((source) => source.id)).toEqual([newerId]);
+    expect(plan.manifest.skippedSources.map((source) => source.id)).toEqual([olderId]);
+
+    const result = computeGlobalSourceCoverage(
+      [
+        { slug: olderId, category: "agent", tags: [] },
+        { slug: newerId, category: "agent", tags: [] },
+      ],
+      accountedGlobalSourceSlugs(plan.manifest),
+    );
+
+    expect(result.configuredSlugs).toEqual([newerId, olderId].sort());
+    expect(result.missingSlugs).toEqual([]);
+    expect(result.complete).toBe(true);
   });
 });

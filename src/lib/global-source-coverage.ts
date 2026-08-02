@@ -67,6 +67,23 @@ export interface GlobalSourceCoverageResult {
   complete: boolean;
 }
 
+export interface GlobalSourceCoverageManifest {
+  sources: readonly { id: string }[];
+  skippedSources: readonly { id: string }[];
+}
+
+/** Global config ids the caller supplied to a render, whether they survived
+ * composition or were deliberately reported as skipped. A skipped source was
+ * configured and accounted for; treating it as absent recreates the exact
+ * false-positive this coverage check exists to distinguish from a real gap. */
+export function accountedGlobalSourceSlugs(
+  manifest: GlobalSourceCoverageManifest,
+): string[] {
+  return [...manifest.sources, ...manifest.skippedSources]
+    .map((source) => source.id)
+    .filter((id) => id.startsWith(GLOBAL_SOURCE_SLUG_PREFIX));
+}
+
 export function computeGlobalSourceCoverage(
   registryConfigs: readonly GlobalSourceCoverageConfig[],
   configuredSlugs: Iterable<string>,

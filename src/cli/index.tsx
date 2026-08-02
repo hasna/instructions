@@ -16,7 +16,7 @@ import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { applySessionRender, restoreSessionRenderSnapshot } from "../lib/session-apply.js";
 import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
-import { computeGlobalSourceCoverage, formatGlobalSourceCoverageWarnings, GLOBAL_SOURCE_SLUG_PREFIX, type GlobalSourceCoverageResult } from "../lib/global-source-coverage.js";
+import { accountedGlobalSourceSlugs, computeGlobalSourceCoverage, formatGlobalSourceCoverageWarnings, type GlobalSourceCoverageResult } from "../lib/global-source-coverage.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
@@ -207,9 +207,7 @@ async function checkGlobalSourceCoverage(
   store: ConfigStore,
 ): Promise<GlobalSourceCoverageResult> {
   const registryConfigs = await store.listConfigs({});
-  const configuredSlugs = plan.manifest.sources
-    .map((source) => source.id)
-    .filter((id) => id.startsWith(GLOBAL_SOURCE_SLUG_PREFIX));
+  const configuredSlugs = accountedGlobalSourceSlugs(plan.manifest);
   return computeGlobalSourceCoverage(registryConfigs, configuredSlugs);
 }
 
