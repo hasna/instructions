@@ -16,6 +16,7 @@ import { extractTemplateVars } from "../lib/template.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { applySessionRender, restoreSessionRenderSnapshot } from "../lib/session-apply.js";
 import { planSessionRender, resolveSessionPath, sourceFromConfig, sourceFromFilePath, sourcesFromIdentityExport, SESSION_INSTRUCTION_LAYERS, SESSION_RENDER_TOOLS, type SessionInstructionLayer, type SessionInstructionSource, type SessionRenderFile, type SessionRenderPlan, type SessionRenderTool } from "../lib/session-render.js";
+import { accountedGlobalSourceSlugs, computeGlobalSourceCoverage, formatGlobalSourceCoverageWarnings, type GlobalSourceCoverageResult } from "../lib/global-source-coverage.js";
 import { ensurePlatformProfiles } from "../lib/platform-profiles.js";
 import { ensureProjectDashboardStandardConfig } from "../lib/project-dashboard-standard.js";
 import { ensureGlobalAgentRulesStandardConfig } from "../lib/global-agent-rules-standard.js";
@@ -191,6 +192,23 @@ async function collectSessionSources(
   }
 
   return sources.map((source) => replaceIds.has(source.id) ? { ...source, merge: "replace" } : source);
+}
+
+// Reconcile-and-warn for todos 102d6d0a/5dcd60ec: `--config global:<slug>` entries
+// are hand-listed by callers (see render-spec-station01-sh's GLOBAL_CONFIGS array),
+// and a source that is registered but never added to that list disappears from
+// every render silently. This check reads the registry independently of the plan
+// being audited — expected comes from `store.listConfigs`, actual comes from the
+// plan's own resolved sources — so a shortfall is observable rather than
+// definitionally impossible. See src/lib/global-source-coverage.test.ts for the
+// constructed-shortfall proof.
+async function checkGlobalSourceCoverage(
+  plan: SessionRenderPlan,
+  store: ConfigStore,
+): Promise<GlobalSourceCoverageResult> {
+  const registryConfigs = await store.listConfigs({});
+  const configuredSlugs = accountedGlobalSourceSlugs(plan.manifest);
+  return computeGlobalSourceCoverage(registryConfigs, configuredSlugs);
 }
 
 function stripSessionFileContent(file: SessionRenderFile): Omit<SessionRenderFile, "content"> {
@@ -1000,6 +1018,7 @@ sessionCmd.command("plan")
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
   .option("--codewith-native-imports", "select the gated Codewith native @ import adapter")
   .option("--allow-empty-sources", "allow an explicit empty render plan")
+  .option("--check-global-coverage", "warn (non-fatal) when a registered, non-retired global-* source is absent from this render's --config list; expected is read fresh from the registry, independent of this plan (todos 102d6d0a)")
   .option("--json", "output dry-run JSON")
   .action(async (opts) => {
     try {
@@ -1008,7 +1027,8 @@ sessionCmd.command("plan")
         console.error(chalk.red(`Unsupported tool: ${opts.tool}`));
         process.exit(1);
       }
-      const sources = await collectSessionSources(opts, tool, resolveConfigStore());
+      const store = resolveConfigStore();
+      const sources = await collectSessionSources(opts, tool, store);
       const plan = planSessionRender({
         tool,
         profile: opts.profile,
@@ -1019,8 +1039,12 @@ sessionCmd.command("plan")
         allowEmptySources: opts.allowEmptySources,
         sources,
       });
+      const globalCoverage = opts.checkGlobalCoverage ? await checkGlobalSourceCoverage(plan, store) : null;
       if (opts.json) {
-        printJson(planJsonForOutput(plan));
+        printJson({
+          ...planJsonForOutput(plan),
+          ...(globalCoverage ? { globalSourceCoverage: globalCoverage } : {}),
+        });
         return;
       }
       console.log(chalk.bold(`${plan.tool} session render plan`) + chalk.dim(` (${plan.adapter.mode})`));
@@ -1037,6 +1061,10 @@ sessionCmd.command("plan")
       }
       if (plan.warnings.length > 0) {
         for (const warning of plan.warnings) console.log(chalk.yellow(`warning: ${warning}`));
+      }
+      if (globalCoverage) {
+        for (const warning of formatGlobalSourceCoverageWarnings(globalCoverage)) console.log(chalk.yellow(`warning: ${warning}`));
+        if (globalCoverage.complete) console.log(chalk.dim(`global source coverage: ${globalCoverage.expectedSlugs.length}/${globalCoverage.expectedSlugs.length} complete`));
       }
       console.log(chalk.dim("Dry run only. No files were written."));
     } catch (e) {
@@ -1058,6 +1086,7 @@ sessionCmd.command("apply")
   .option("--replace-source <id>", "source id that replaces earlier layers instead of appending", collectOption, [])
   .option("--codewith-native-imports", "select the gated Codewith native @ import adapter")
   .option("--allow-empty-sources", "allow an explicit empty render")
+  .option("--check-global-coverage", "warn (non-fatal) when a registered, non-retired global-* source is absent from this render's --config list; expected is read fresh from the registry, independent of this plan (todos 102d6d0a)")
   .option("--dry-run", "preview writes and conflicts without writing")
   .option("--force", "overwrite existing unmanaged files")
   .option("--json", "output apply JSON")
@@ -1068,7 +1097,8 @@ sessionCmd.command("apply")
         console.error(chalk.red(`Unsupported tool: ${opts.tool}`));
         process.exit(1);
       }
-      const sources = await collectSessionSources(opts, tool, resolveConfigStore());
+      const store = resolveConfigStore();
+      const sources = await collectSessionSources(opts, tool, store);
       const plan = planSessionRender({
         tool,
         profile: opts.profile,
@@ -1079,9 +1109,13 @@ sessionCmd.command("apply")
         allowEmptySources: opts.allowEmptySources,
         sources,
       });
+      const globalCoverage = opts.checkGlobalCoverage ? await checkGlobalSourceCoverage(plan, store) : null;
       const result = applySessionRender(plan, { dryRun: opts.dryRun, force: opts.force });
       if (opts.json) {
-        printJson(result);
+        printJson({
+          ...result,
+          ...(globalCoverage ? { globalSourceCoverage: globalCoverage } : {}),
+        });
         if (result.conflicts.length > 0) process.exitCode = 1;
         return;
       }
@@ -1103,6 +1137,10 @@ sessionCmd.command("apply")
       }
       if (result.warnings.length > 0) {
         for (const warning of result.warnings) console.log(chalk.yellow(`warning: ${warning}`));
+      }
+      if (globalCoverage) {
+        for (const warning of formatGlobalSourceCoverageWarnings(globalCoverage)) console.log(chalk.yellow(`warning: ${warning}`));
+        if (globalCoverage.complete) console.log(chalk.dim(`global source coverage: ${globalCoverage.expectedSlugs.length}/${globalCoverage.expectedSlugs.length} complete`));
       }
       if (result.conflicts.length > 0) {
         console.error(chalk.red(`Conflicts: ${result.conflicts.length}. Re-run with --force to overwrite unmanaged files.`));
