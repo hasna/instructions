@@ -189,6 +189,7 @@ function applySessionRenderUnlocked(
     ...files.map((file) => planFileResult(plan, file, targetHome, previousHashes, previousManifest, options)),
     ...planStaleFileResults(plan, targetHome, previousManifest, currentRelativePaths, options),
   ];
+  assertNotSilentManagedWipeout(plan, results);
   const conflicts = results.filter((result) => result.action === "conflict");
   if (conflicts.length > 0) {
     return {
@@ -992,6 +993,42 @@ function planFileResult(
     newSha256: file.sha256,
     reason: "existing unmanaged file differs; pass force to overwrite",
   };
+}
+
+/**
+ * Guards against d04c7c99: a mode switch (e.g. codewith native-imports ->
+ * flattened-markdown) plans to DELETE every previously managed file under the
+ * adapter's managed directory while creating or updating none there, and does
+ * so silently — `--allow-empty-sources` exists precisely to gate "an explicit
+ * empty render", but it was only ever consulted against the composed
+ * INSTRUCTION SOURCES at plan-build time (see the `orderedSources.length ===
+ * 0` check in planSessionRender). Sources are routinely non-empty even when
+ * the resulting WRITES under the managed directory are zero, so that guard
+ * never fires for this shape, and neither `drift.clean` nor `conflicts`
+ * reports it either — both read healthy right up to the write that empties
+ * the directory.
+ *
+ * This is deliberately scoped to the adapter's OWN managed directory, and
+ * deliberately requires retained-writes to be zero rather than merely fewer
+ * than deletions: a render that trims some stale fragments while still
+ * writing others is ordinary maintenance and must not be blocked by this.
+ */
+function assertNotSilentManagedWipeout(plan: SessionRenderPlan, results: SessionApplyFileResult[]): void {
+  if (plan.allowEmptySources) return;
+  const managedDir = plan.adapter.managedDir;
+  const underManagedDir = (relativePath: string) => relativePath === managedDir || relativePath.startsWith(`${managedDir}/`);
+  const staleDeletions = results.filter((result) => result.action === "delete" && underManagedDir(result.relativePath));
+  if (staleDeletions.length === 0) return;
+  const managedRetained = results.some(
+    (result) => result.action !== "delete" && underManagedDir(result.relativePath),
+  );
+  if (managedRetained) return;
+  throw new SessionApplyError(
+    `Session render plan for ${plan.tool} (${plan.adapter.mode}) would delete ${staleDeletions.length} `
+      + `previously managed file(s) under "${managedDir}" and create or update none there: `
+      + `${staleDeletions.map((result) => result.relativePath).join(", ")}. `
+      + "Pass --allow-empty-sources only for explicit empty renders.",
+  );
 }
 
 function planStaleFileResults(

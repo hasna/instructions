@@ -290,6 +290,17 @@ export interface SessionRenderPlan {
   writable: boolean;
   blocked: boolean;
   blockers: string[];
+  /**
+   * Carries the caller's --allow-empty-sources choice from plan-build time into
+   * apply time. Apply-time emptiness (a plan that deletes every previously
+   * managed file under the adapter's managed directory while creating or
+   * updating none — see planStaleFileResults in session-apply.ts) cannot be
+   * detected here, because it depends on the previous manifest on disk, which
+   * this function never reads. It can only be detected once the stale-file
+   * diff is computed in applySessionRenderUnlocked, so the flag has to travel
+   * on the plan rather than being re-decided there.
+   */
+  allowEmptySources: boolean;
   env: Record<string, string>;
   files: SessionRenderFile[];
   manifest: SessionRenderManifest;
@@ -1347,6 +1358,7 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
     writable: !blocked,
     blocked,
     blockers,
+    allowEmptySources,
     env,
     files,
     manifest,
