@@ -166,6 +166,9 @@ describe("configs session CLI", () => {
 
       expect(dryRun.status).toBe(0);
       expect(existsSync(join(home, "session-home", "AGENTS.md"))).toBe(false);
+      const dryRunResult = JSON.parse(dryRun.stdout) as { warnings: string[]; skippedSources: unknown[] };
+      expect(dryRunResult.warnings).toEqual([]);
+      expect(dryRunResult.skippedSources).toEqual([]);
 
       const apply = runCli([
         "session",
@@ -429,7 +432,7 @@ describe("configs session CLI", () => {
         validation: { valid: true },
       }));
 
-      const result = runCli([
+      const applyArgs = [
         "session",
         "apply",
         "--tool",
@@ -442,11 +445,31 @@ describe("configs session CLI", () => {
         "global:global-agent-rules-standard",
         "--identity-export",
         exportPath,
-        "--json",
-      ], env);
+      ];
+
+      const dryRun = runCli([...applyArgs, "--dry-run", "--json"], env);
+      expect(dryRun.status).toBe(0);
+      const dryRunResult = JSON.parse(dryRun.stdout) as {
+        warnings: string[];
+        skippedSources: Array<{ id: string; reason: string }>;
+      };
+      expect(dryRunResult.skippedSources.map((source) => source.id)).toEqual(["identity-agent-operating-rules"]);
+      expect(dryRunResult.warnings.some((warning) => warning.includes("identity-agent-operating-rules"))).toBe(true);
+
+      const humanDryRun = runCli([...applyArgs, "--dry-run"], env);
+      expect(humanDryRun.status).toBe(0);
+      expect(humanDryRun.stdout).toContain('warning: Instruction source "identity-agent-operating-rules" was not rendered');
+
+      const result = runCli([...applyArgs, "--json"], env);
 
       expect(result.status).toBe(0);
-      const applied = JSON.parse(result.stdout) as { manifestPath: string };
+      const applied = JSON.parse(result.stdout) as {
+        manifestPath: string;
+        warnings: string[];
+        skippedSources: Array<{ id: string }>;
+      };
+      expect(applied.skippedSources.map((source) => source.id)).toEqual(["identity-agent-operating-rules"]);
+      expect(applied.warnings.some((warning) => warning.includes("identity-agent-operating-rules"))).toBe(true);
       const manifest = JSON.parse(readFileSync(applied.manifestPath, "utf8")) as {
         sources: Array<{ id: string }>;
       };

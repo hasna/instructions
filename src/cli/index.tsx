@@ -1101,6 +1101,9 @@ sessionCmd.command("apply")
         console.log(`  ${status.padEnd(18)} ${file.relativePath} ${chalk.dim(file.newSha256.slice(0, 12))}`);
         if (file.reason) console.log(chalk.dim(`    ${file.reason}`));
       }
+      if (result.warnings.length > 0) {
+        for (const warning of result.warnings) console.log(chalk.yellow(`warning: ${warning}`));
+      }
       if (result.conflicts.length > 0) {
         console.error(chalk.red(`Conflicts: ${result.conflicts.length}. Re-run with --force to overwrite unmanaged files.`));
         process.exitCode = 1;
