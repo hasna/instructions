@@ -640,11 +640,31 @@ function applyAgentOperatingRulesFloor(
   };
 }
 
+/**
+ * A source the render deliberately discarded, and why.
+ *
+ * Every path that removes a source produces one of these. That is the whole point:
+ * discarding is legitimate, discarding INVISIBLY is not. Before todos `0c7ffd33` the
+ * collapse below returned a shorter array and said nothing, so an operator comparing the
+ * slugs they passed against `manifest.sources` saw one vanish with rc=0, `warnings: []`
+ * and `skippedSources: []` — three surfaces that all agreed nothing had happened. The
+ * loss was misdiagnosed for a day as a cap at fifteen sources, because a silent
+ * subtraction looks exactly like a limit.
+ */
+function skippedSource(source: OrderedSessionInstructionSource, reason: string): SessionSkippedSource {
+  return {
+    id: source.id,
+    label: source.resolvedLabel,
+    targetProviders: source.targetProviders ?? [],
+    reason,
+  };
+}
+
 function normalizeSources(
   sources: SessionInstructionSource[],
   tool: SessionRenderTool,
   allowEmptySources: boolean,
-): OrderedSessionInstructionSource[] {
+): { sources: OrderedSessionInstructionSource[]; skipped: SessionSkippedSource[] } {
   const normalized = sources
     .map((source, index) => {
       if (!source.id.trim()) throw new Error("Session instruction source id is required.");
@@ -671,7 +691,8 @@ function normalizeSources(
       }
       return normalized;
     });
-  const ordered = deduplicateSemanticPolicySources(normalized)
+  const deduplicated = deduplicateSemanticPolicySources(normalized);
+  const ordered = deduplicated.selected
     .sort((a, b) =>
       SESSION_LAYER_RANK[a.resolvedLayer] - SESSION_LAYER_RANK[b.resolvedLayer] ||
       a.resolvedOrder - b.resolvedOrder ||
@@ -679,7 +700,7 @@ function normalizeSources(
     );
   rejectDuplicateSourceSlugs(ordered);
   rejectDuplicateRulePaths(ordered);
-  return ordered;
+  return { sources: ordered, skipped: deduplicated.skipped };
 }
 
 /**
@@ -694,9 +715,12 @@ function normalizeSources(
  */
 function deduplicateSemanticPolicySources(
   sources: OrderedSessionInstructionSource[],
-): OrderedSessionInstructionSource[] {
+): { selected: OrderedSessionInstructionSource[]; skipped: SessionSkippedSource[] } {
   const selected: OrderedSessionInstructionSource[] = [];
+  const skipped: SessionSkippedSource[] = [];
   const policySources = new Map<string, { index: number; version: string; normalizedContent: string }>();
+  const collapseReason = (winner: OrderedSessionInstructionSource, key: string) =>
+    `superseded by "${winner.id}": sources declaring the semantic policy ${key} collapse to one so a single instruction home cannot carry two rule-set versions`;
   for (const source of sources) {
     const sentinel = source.content.match(AGENT_OPERATING_RULES_SENTINEL_PATTERN);
     if (!sentinel) {
@@ -721,15 +745,22 @@ function deduplicateSemanticPolicySources(
     }
     const current = selected[existing.index]!;
     const priorityOrder = semanticPolicySourcePriority(source) - semanticPolicySourcePriority(current);
-    if (priorityOrder < 0) continue;
-    if (priorityOrder === 0 && versionOrder <= 0) continue;
+    // The incumbent wins: the ARRIVING source is the one being discarded.
+    if (priorityOrder < 0 || (priorityOrder === 0 && versionOrder <= 0)) {
+      skipped.push(skippedSource(source, collapseReason(current, key)));
+      continue;
+    }
+    // The arriving source wins: the INCUMBENT is the one being discarded. Reporting only
+    // the first case would leave exactly the eviction an operator is most likely to care
+    // about — a payload they explicitly passed losing to a later one — unreported.
+    skipped.push(skippedSource(current, collapseReason(source, key)));
     selected[existing.index] = {
       ...source,
       resolvedOrder: current.resolvedOrder,
     };
     policySources.set(key, { index: existing.index, version, normalizedContent });
   }
-  return selected;
+  return { selected, skipped };
 }
 
 function semanticPolicySourcePriority(source: OrderedSessionInstructionSource): number {
@@ -764,14 +795,28 @@ function filterProviderOnlyBlocks(content: string, tool: SessionRenderTool): str
   return output.join("\n");
 }
 
-function composeSources(sources: OrderedSessionInstructionSource[]): OrderedSessionInstructionSource[] {
+function composeSources(
+  sources: OrderedSessionInstructionSource[],
+): { sources: OrderedSessionInstructionSource[]; skipped: SessionSkippedSource[] } {
   let start = -1;
   for (let i = 0; i < sources.length; i++) {
     if (sources[i]!.resolvedMerge === "replace") start = i;
   }
-  if (start < 0) return sources;
-  const protectedSources = sources.slice(0, start).filter((source) => source.nonOverridable);
-  return [...protectedSources, ...sources.slice(start)];
+  if (start < 0) return { sources, skipped: [] };
+  const earlier = sources.slice(0, start);
+  const protectedSources = earlier.filter((source) => source.nonOverridable);
+  // The second silent-drop path, and it is the same defect as the collapse above: a
+  // replace-merge source legitimately discards every earlier overridable layer, and said
+  // nothing about it. Non-overridable sources survive and are not reported, because
+  // nothing was lost.
+  const replacer = sources[start]!;
+  const skipped = earlier
+    .filter((source) => !source.nonOverridable)
+    .map((source) => skippedSource(
+      source,
+      `superseded by "${replacer.id}": a replace-merge source discards earlier overridable instruction layers`,
+    ));
+  return { sources: [...protectedSources, ...sources.slice(start)], skipped };
 }
 
 function sectionForSource(source: OrderedSessionInstructionSource): string {
@@ -1220,7 +1265,16 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
   const targetOwner = resolveSessionTargetOwnership(input, { targetHome, targetKind });
   const blocked = blockers.length > 0;
   const allowEmptySources = input.allowEmptySources === true;
-  const orderedSources = composeSources(normalizeSources(input.sources, input.tool, allowEmptySources));
+  const normalized = normalizeSources(input.sources, input.tool, allowEmptySources);
+  const composed = composeSources(normalized.sources);
+  const orderedSources = composed.sources;
+  // Caller-supplied entries first (provider filtering, done before the render was even
+  // asked for), then everything this render discarded itself.
+  const skippedSources: SessionSkippedSource[] = [
+    ...(input.skippedSources ?? []),
+    ...normalized.skipped,
+    ...composed.skipped,
+  ];
   if (orderedSources.length === 0 && !allowEmptySources) {
     throw new Error("Session render has no instruction sources. Pass --allow-empty-sources only for explicit empty renders.");
   }
@@ -1229,6 +1283,10 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
   const warnings = [
     ...(orderedSources.length === 0 ? ["No instruction sources were provided."] : []),
     ...blockers,
+    // `skippedSources` is the structured surface an automated consumer reads; `warnings`
+    // is what the human CLI output prints. A discarded source has to reach both, or the
+    // operator running the command by hand stays exactly as blind as before.
+    ...skippedSources.map((entry) => `Instruction source "${entry.id}" was not rendered: ${entry.reason}`),
   ];
   if (input.providerConfig && input.tool !== "opencode") {
     throw new Error("Provider base config is supported only for OpenCode session renders.");
@@ -1311,7 +1369,7 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
       })),
       ...(projectContext ? [projectContext.source] : []),
     ],
-    skippedSources: input.skippedSources ?? [],
+    skippedSources,
     files: files.map((file) => ({
       path: file.path,
       relativePath: file.relativePath,
