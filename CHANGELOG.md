@@ -30,10 +30,19 @@ than assumed present.
 **`instructions tag <id> --add/--remove <tag>`** (#52) ships the mechanism for
 the `retired-global-source` tag that #51 introduced and could not set. Exactly
 one production row carries it: `global-hasna-deployment-terms`, the owner-ruled
-withdrawal of 2026-07-29. The byte-identical `global-agent-rules-standard-1/-2/-3`
+withdrawal of 2026-07-29. The byte-identical `global-agent-rules-standard-N`
 rows are deliberately **not** tagged — they are the output of an active
 duplicate-minting defect (`43d0c1c0`), and tagging them would mark a live bug's
 output as intentional in the one surface built to reveal it.
+
+That family is **not finite and this entry deliberately does not enumerate it**:
+read the current membership from the registry rather than from this paragraph.
+An adversarial review of the 0.4.18 bump found it had already grown past the
+three rows an earlier draft named, five of the additions predating that draft.
+A count written here acquires the same shelf life the wrong one had, which is
+the argument for the tag being content-driven rather than a slug list — a
+synthetic member surfaces as a gap with no code change and no slug
+special-casing.
 
 ## 0.4.16
 
