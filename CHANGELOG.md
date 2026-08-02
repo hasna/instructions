@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.18
+
+Publishes the three source-visibility commits that landed on `main` after the
+0.4.17 release commit and had no release of their own. **No behaviour in the
+render itself changes in this release** — the collapse and override rules are
+byte-identical; what changes is that a discarded source is now reported instead
+of vanishing.
+
+**`session plan` / `session apply` now name every source the render discards**
+(#50, todos `0c7ffd33`). `deduplicateSemanticPolicySources` collapses every
+source whose content carries the `<!-- hasna:agent-operating-rules v=X.Y.Z -->`
+sentinel down to one, by priority-then-version, and `composeSources` discards
+earlier overridable layers ahead of a `merge:"replace"` source. Both were
+silent: `manifest.warnings` and `manifest.skippedSources` existed and neither
+was ever populated, so a lost source was invisible in the exit code, the
+warnings surface and the manifest alike. Both eviction directions now record
+the discarded source **and** the source that superseded it.
+
+The exit status is deliberately still 0. A policy collapse is a legitimate
+outcome, and the fleet render runs `session apply` under `set -euo pipefail`
+across every profile home — failing hard would abort the sweep mid-flight and
+leave a partial render, which is a worse failure than the one being reported.
+
+**Registered `global-*` sources are reconciled against render coverage** (#51),
+so a source that is registered but reaches no rendered home is surfaced rather
+than assumed present.
+
+**`instructions tag <id> --add/--remove <tag>`** (#52) ships the mechanism for
+the `retired-global-source` tag that #51 introduced and could not set. Exactly
+one production row carries it: `global-hasna-deployment-terms`, the owner-ruled
+withdrawal of 2026-07-29. The byte-identical `global-agent-rules-standard-N`
+rows are deliberately **not** tagged — they are the output of an active
+duplicate-minting defect (`43d0c1c0`), and tagging them would mark a live bug's
+output as intentional in the one surface built to reveal it.
+
+That family is **not finite and this entry deliberately does not enumerate it**:
+read the current membership from the registry rather than from this paragraph.
+An adversarial review of the 0.4.18 bump found it had already grown past the
+three rows an earlier draft named, five of the additions predating that draft.
+A count written here acquires the same shelf life the wrong one had, which is
+the argument for the tag being content-driven rather than a slug list — a
+synthetic member surfaces as a gap with no code change and no slug
+special-casing.
+
 ## 0.4.16
 
 Closes **relocation**, the third and last credential-destruction route, which
