@@ -822,4 +822,132 @@ describe("session apply writer", () => {
     expect(codewith).toContain("Resolved path-only apply content.");
     expect(codewith).toContain("Rule path: rules/path-only-apply.md");
   });
+
+  // Regression coverage for todos d04c7c99: `session apply --tool codewith`
+  // WITHOUT --codewith-native-imports planned to delete all previously
+  // managed fragment files and create zero replacements, while
+  // `drift.clean` stayed true and `conflicts` stayed empty throughout. The
+  // assertions below deliberately inspect the PLAN CONTENT (files, actions,
+  // what is actually left on disk) rather than exit codes or `drift.clean` —
+  // a check against those fields is exactly what this defect defeats.
+  describe("refuses a render that silently empties a previously managed directory", () => {
+    const manySources: SessionInstructionSource[] = Array.from({ length: 5 }, (_, index) => ({
+      id: `codewith-source-${index}`,
+      label: `Codewith Source ${index}`,
+      layer: "global",
+      order: index,
+      content: `Managed codewith content for source ${index}.`,
+    }));
+
+    test("codewith native-imports -> flattened mode switch is refused, and nothing is deleted", () => {
+      const targetHome = targetFor("codewith-mode-switch-wipeout");
+      const native = applySessionRender(planSessionRender({
+        tool: "codewith",
+        profile: "account999",
+        targetHome,
+        codewithNativeImports: true,
+        sources: manySources,
+        generatedAt: "2026-08-01T00:00:00.000Z",
+      }));
+      const fragmentPaths = native.files
+        .filter((file) => file.relativePath.startsWith(".hasna/instructions/"))
+        .map((file) => file.relativePath);
+      expect(fragmentPaths).toHaveLength(5);
+      for (const relativePath of fragmentPaths) {
+        expect(existsSync(join(targetHome, relativePath))).toBe(true);
+      }
+
+      const flattenedPlan = planSessionRender({
+        tool: "codewith",
+        profile: "account999",
+        targetHome,
+        sources: manySources,
+        generatedAt: "2026-08-01T00:01:00.000Z",
+      });
+
+      expect(() => applySessionRender(flattenedPlan)).toThrow(/would delete 5 .*create or update none/);
+      expect(() => applySessionRender(flattenedPlan, { dryRun: true })).toThrow(/would delete 5/);
+
+      // The refusal must be real, not cosmetic: every fragment the plan
+      // wanted to delete must still exist on disk after the throw.
+      for (const relativePath of fragmentPaths) {
+        expect(existsSync(join(targetHome, relativePath))).toBe(true);
+      }
+    });
+
+    test("the same mode switch proceeds and deletes the fragments when --allow-empty-sources is explicit", () => {
+      const targetHome = targetFor("codewith-mode-switch-explicit");
+      const native = applySessionRender(planSessionRender({
+        tool: "codewith",
+        profile: "account999",
+        targetHome,
+        codewithNativeImports: true,
+        sources: manySources,
+        generatedAt: "2026-08-01T00:00:00.000Z",
+      }));
+      const fragmentPaths = native.files
+        .filter((file) => file.relativePath.startsWith(".hasna/instructions/"))
+        .map((file) => file.relativePath);
+      expect(fragmentPaths).toHaveLength(5);
+
+      const flattenedPlan = planSessionRender({
+        tool: "codewith",
+        profile: "account999",
+        targetHome,
+        sources: manySources,
+        allowEmptySources: true,
+        generatedAt: "2026-08-01T00:01:00.000Z",
+      });
+      const applied = applySessionRender(flattenedPlan);
+
+      expect(applied.conflicts).toHaveLength(0);
+      const deleteActions = applied.files.filter((file) => file.action === "delete").map((file) => file.relativePath);
+      expect(deleteActions.sort()).toEqual([...fragmentPaths].sort());
+      for (const relativePath of fragmentPaths) {
+        expect(existsSync(join(targetHome, relativePath))).toBe(false);
+      }
+      expect(existsSync(join(targetHome, "CODEWITH.md"))).toBe(true);
+    });
+
+    test("a legitimate render that still writes managed files is never blocked by this guard", () => {
+      const targetHome = targetFor("claude-partial-fragment-replacement");
+      applySessionRender(planSessionRender({
+        tool: "claude",
+        profile: "account999",
+        targetHome,
+        sources: [globalIdentity, agentIdentity, obsoleteIdentity],
+        generatedAt: "2026-08-01T00:00:00.000Z",
+      }));
+
+      // Replaces one fragment (obsolete -> replacement) while keeping the
+      // other two. This deletes zero previously managed files outright and
+      // must apply cleanly, exactly as it did before this guard existed.
+      const applied = applySessionRender(planSessionRender({
+        tool: "claude",
+        profile: "account999",
+        targetHome,
+        sources: [globalIdentity, agentIdentity, replacementIdentity],
+        generatedAt: "2026-08-01T00:01:00.000Z",
+      }));
+
+      expect(applied.applied).toBe(true);
+      expect(applied.conflicts).toHaveLength(0);
+      expect(existsSync(join(targetHome, ".hasna", "instructions", "03-replacement-policy.md"))).toBe(true);
+    });
+
+    test("a first-ever render into an empty target home is never blocked by this guard", () => {
+      const targetHome = targetFor("codewith-first-ever-render");
+      const applied = applySessionRender(planSessionRender({
+        tool: "codewith",
+        profile: "account999",
+        targetHome,
+        sources: manySources,
+        generatedAt: "2026-08-01T00:00:00.000Z",
+      }));
+
+      expect(applied.applied).toBe(true);
+      expect(applied.conflicts).toHaveLength(0);
+      expect(applied.files.filter((file) => file.action === "delete")).toHaveLength(0);
+    });
+  });
 });
