@@ -153,3 +153,82 @@ describe("computeGlobalSourceCoverage — the constructed-shortfall requirement"
     expect(result.complete).toBe(true);
   });
 });
+
+describe("computeGlobalSourceCoverage — production-shaped reconciliation (P1 #1)", () => {
+  // Live production shape measured 2026-08-02. IMPORTANT CORRECTION mid-remediation
+  // (fabricius, relaying a second agent's measurement): global-agent-rules-standard-1/
+  // -2/-3 are NOT a static, intentionally-excluded "backstop family". They are
+  // byte-identical (sha256 8b236086b82e) output of a LIVE, currently-unfixed defect
+  // (`43d0c1c0`: `instructions add` mints a duplicate row for an existing target_path)
+  // that fired twice in the 40 minutes before this test was written. Tagging them
+  // `retired-global-source` would mark the OUTPUT OF AN ACTIVE BUG as intentional
+  // design — hiding it from exactly the surface this checker exists to surface it on
+  // — and the family is unbounded (a `-4`, `-5`, ... will keep minting untagged).
+  //
+  // The claim this task's original brief carried — "the base slug
+  // global-agent-rules-standard feeds the embedded-baseline fallback via a different
+  // render path, so it never needs to be in --config" — was checked against
+  // `ensureGlobalAgentRulesStandardConfig` (global-agent-rules-standard.ts) and does
+  // NOT hold: that function only maintains the STORED row's content (seed/repair on
+  // publish), it does not inject the row into any render bypassing the --config list.
+  // A sibling claim that it renders via three homes' rendered fragments was
+  // independently refuted. So the base slug's exclusion from GLOBAL_CONFIGS is an
+  // UNVERIFIED design choice, not a confirmed one — it is left as a visible gap
+  // rather than silently exempted, so a human resolves it instead of this checker
+  // guessing.
+  //
+  // Only ONE row in this family gets the tag: global-hasna-deployment-terms, which is
+  // a genuine, dated, owner-ruled withdrawal (knowledge k_ms5a5hmy_hllrbg) — the exact
+  // case RETIRED_GLOBAL_SOURCE_TAG's own doc comment describes, and the only row in
+  // this whole set with a real justification behind it rather than an inherited,
+  // unverified assumption. It was applied against the live production registry via
+  // the new `instructions tag` command (src/cli/index.tsx), not asserted here as a
+  // fait accompli.
+  const PROD_SHAPED_REGISTRY = [
+    { slug: "global-hasna-deployment-terms", category: "agent", tags: [RETIRED_GLOBAL_SOURCE_TAG] },
+    { slug: "global-agent-rules-standard", category: "agent", tags: ["global", "mandatory"] },
+    { slug: "global-agent-rules-standard-1", category: "agent", tags: [] },
+    { slug: "global-agent-rules-standard-2", category: "agent", tags: [] },
+    { slug: "global-agent-rules-standard-3", category: "agent", tags: [] },
+    { slug: "global-fix-once", category: "agent", tags: [] },
+    { slug: "global-no-mcp-use-clis", category: "agent", tags: [] },
+  ];
+  const liveArrayConfiguredSlugs = ["global-fix-once", "global-no-mcp-use-clis"];
+
+  test("the owner-withdrawn source alone is excluded from expected; the mint-bug family and base slug remain VISIBLE GAPS", () => {
+    const result = computeGlobalSourceCoverage(PROD_SHAPED_REGISTRY, liveArrayConfiguredSlugs);
+    expect(result.expectedSlugs).not.toContain("global-hasna-deployment-terms");
+    // These four are deliberately NOT suppressed: they are either active-bug output
+    // or an unverified exclusion, and this checker's job is to surface them, not
+    // hide them behind a tag nobody can justify.
+    expect(result.missingSlugs.sort()).toEqual([
+      "global-agent-rules-standard",
+      "global-agent-rules-standard-1",
+      "global-agent-rules-standard-2",
+      "global-agent-rules-standard-3",
+    ].sort());
+    expect(result.complete).toBe(false);
+  });
+
+  test("a NEWLY MINTED duplicate (-4, from the same live defect) shows up as a gap with zero code changes here", () => {
+    // This is the property that rules out a hardcoded slug list as a fix: the
+    // checker must not need to know the family's membership to correctly report
+    // an as-yet-unseen member as missing. Registering -4 and re-running proves it.
+    const registryWithMint = [
+      ...PROD_SHAPED_REGISTRY,
+      { slug: "global-agent-rules-standard-4", category: "agent", tags: [] },
+    ];
+    const result = computeGlobalSourceCoverage(registryWithMint, liveArrayConfiguredSlugs);
+    expect(result.missingSlugs).toContain("global-agent-rules-standard-4");
+  });
+
+  test("an unrelated genuine gap in the same registry still reports missing (the check has not gone vacuous)", () => {
+    const registryWithGenuineGap = [
+      ...PROD_SHAPED_REGISTRY,
+      { slug: "global-a-tenth-genuine-gap", category: "agent", tags: [] },
+    ];
+    const result = computeGlobalSourceCoverage(registryWithGenuineGap, liveArrayConfiguredSlugs);
+    expect(result.missingSlugs).toContain("global-a-tenth-genuine-gap");
+    expect(result.complete).toBe(false);
+  });
+});
