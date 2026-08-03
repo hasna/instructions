@@ -15,18 +15,12 @@ name: Release npm package
 # provenance stops being produced and this workflow will not tell you.
 
 on:
-  push:
-    tags:
-      - "npm/instructions/v*"
-  # A dry run exercises every gate and the OIDC token mint without publishing.
-  # This workflow has never run, so there is a way to prove the wiring before a
-  # real release depends on it.
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Run every gate but do not publish"
-        type: boolean
-        default: true
+  # repository_dispatch runs the workflow definition from protected `main`, not
+  # from the tag whose package contents will be published. A tag-push or manual
+  # branch dispatch would let that unreviewed ref rewrite its own release checks
+  # while retaining this workflow filename and npm environment binding.
+  repository_dispatch:
+    types: [npm-release]
 
 concurrency:
   group: hasna-instructions-npm-release
@@ -49,10 +43,45 @@ jobs:
       # workflow deliberately carries no npm token of any kind.
       id-token: write
     steps:
+      - name: Validate release request
+        id: request
+        env:
+          RELEASE_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^npm/instructions/v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release dispatch requires client_payload.tag in npm/instructions/v<semver> form"
+            exit 1
+          fi
+          echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ steps.request.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify release commit is on protected main
+        env:
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+            echo "::error::release tag ${RELEASE_TAG} does not exist"
+            exit 1
+          fi
+          release_sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          checkout_sha="$(git rev-parse HEAD)"
+          if [ "${checkout_sha}" != "${release_sha}" ]; then
+            echo "::error::checked out ${checkout_sha}, but tag ${RELEASE_TAG} resolves to ${release_sha}"
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "${release_sha}" refs/remotes/origin/main; then
+            echo "::error::tag ${RELEASE_TAG} points to ${release_sha}, which is not in protected main history"
+            exit 1
+          fi
+          echo "tag ${RELEASE_TAG} resolves to protected-main commit ${release_sha}"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -82,28 +111,20 @@ jobs:
 
       - name: Bind the tag to the package version
         id: version
+        env:
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
         run: |
           set -euo pipefail
           pkg_name="$(node -p "require('./package.json').name")"
           pkg_version="$(node -p "require('./package.json').version")"
           echo "name=${pkg_name}" >> "$GITHUB_OUTPUT"
           echo "version=${pkg_version}" >> "$GITHUB_OUTPUT"
-          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
-            echo "manual run: ${pkg_name}@${pkg_version} from ${GITHUB_REF_NAME}"
-            exit 0
-          fi
-          case "${GITHUB_REF_NAME}" in
-            npm/instructions/v*)
-              tag_version="${GITHUB_REF_NAME#npm/instructions/v}" ;;
-            *)
-              echo "::error::tag ${GITHUB_REF_NAME} does not match a recognised release tag prefix"
-              exit 1 ;;
-          esac
+          tag_version="${RELEASE_TAG#npm/instructions/v}"
           if [ "${tag_version}" != "${pkg_version}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} carries version ${tag_version} but package.json declares ${pkg_version}"
+            echo "::error::tag ${RELEASE_TAG} carries version ${tag_version} but package.json declares ${pkg_version}"
             exit 1
           fi
-          echo "tag ${GITHUB_REF_NAME} agrees with package.json ${pkg_version}"
+          echo "tag ${RELEASE_TAG} agrees with package.json ${pkg_version}"
 
       # npm versions are immutable, so a version that already exists can never
       # be replaced by this run. Failing here names that plainly instead of
@@ -125,7 +146,7 @@ jobs:
         run: bun run typecheck
 
       - name: Test
-        run: bun test
+        run: bun run test
 
       - name: Build
         run: bun run build
@@ -137,11 +158,9 @@ jobs:
       # has been reported not to hold in practice, and passing the flag is a
       # no-op when it is already automatic.
       - name: Publish to npm via OIDC trusted publishing
-        if: github.event_name == 'push' || inputs.dry_run == false
         run: npm publish --provenance --access public
 
       - name: Verify the published version from the registry
-        if: github.event_name == 'push' || inputs.dry_run == false
         run: |
           set -euo pipefail
           name="${{ steps.version.outputs.name }}"
