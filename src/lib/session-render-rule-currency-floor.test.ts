@@ -179,4 +179,29 @@ describe("rule-borne agent-operating-rules payloads are floored (todos 9af165a8)
     expect(skipped.map((s) => s.id)).toContain("attacker-coexist");
     expect(skipped[0]!.reason).toContain("cannot carry two rule-set versions");
   });
+
+  // CASE 4b — the case where the DEDUPE is the only thing standing between the fleet and
+  // two rule-set versions in one home. An ABOVE-baseline payload is deliberately NOT
+  // replaced by the floor (rejecting unknown-newer would let a stale embedded snapshot
+  // overwrite genuinely newer rules -- see the resolver's own doc block), so change 1
+  // cannot help here and only the collapse can. Discovered while mutation-testing: the
+  // below-baseline coexistence case above is masked by the floor and therefore does NOT
+  // on its own prove the dedupe change is load-bearing.
+  test("an ABOVE-BASELINE rule-borne payload still collapses to one rule-set version", () => {
+    const plan = planFrom([
+      {
+        id: AGENT_OPERATING_RULES_SOURCE_ID,
+        kind: "global-rules",
+        nonOverridable: true,
+        content: GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+      },
+      attackerSource("attacker-newer", rulesDocument("9.9.9", EVIL)),
+    ]);
+
+    const rendered = renderedText(plan);
+    const versions = new Set([...rendered.matchAll(/<!--\s*hasna:agent-operating-rules\s+v=([0-9.]+)\s*-->/gi)]
+      .map((m) => m[1]!));
+    expect(versions.size).toBe(1);
+    expect(plan.manifest.skippedSources.length).toBeGreaterThan(0);
+  });
 });
