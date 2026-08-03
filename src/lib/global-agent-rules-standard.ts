@@ -200,7 +200,17 @@ function sha256(content: string): string {
  *    ties on priority in `deduplicateSemanticPolicySources` and then WINS on version,
  *    EVICTING the genuine baseline from the same render; the collapse happens before
  *    `rejectDuplicateSourceSlugs` runs, so the duplicate-slug guard never sees the
- *    collision. Nothing in these bytes distinguishes a genuine future rules version from
+ *    collision. That eviction was REACHABLE and is now narrowed, not closed: the managed
+ *    source id `hasna-agent-operating-rules` earns precedence in
+ *    `semanticPolicySourcePriority` alongside the managed slug, so the canonical source no
+ *    longer merely ties with any export that sets `nonOverridable`, and an eviction by an
+ *    unverified payload is reported in `skippedSources` and in `warnings` instead of
+ *    passing as a routine collapse. An export that also mimics a canonical id still ties
+ *    and still wins on version. Ordering by `payloadIntegrity` instead was tried and
+ *    rejected: the pinned digest describes the EMBEDDED snapshot, so preferring it would
+ *    freeze a home carrying that snapshot beside a newly published rules document — the
+ *    same downgrade this floor exists to prevent, arriving by the selection path.
+ *    Nothing in these bytes distinguishes a genuine future rules version from
  *    an inflated one. Rejecting
  *    above-baseline versions was considered and deliberately NOT done: the canonical
  *    rules document ships from `@hasna/identities`, which legitimately runs ahead of the
@@ -211,15 +221,24 @@ function sha256(content: string): string {
  *    channel), not a comparison. Until then the choice is recorded rather than hidden:
  *    every payload carries `payloadIntegrity`, which is `unverified-self-declared`
  *    whenever bytes were accepted on their version claim alone.
- * 2. This function guards only the payloads routed through it, and the render pipeline
- *    routes exactly one field: `source.content`. `normalizeSources` floors that, so a
- *    claiming source is covered whether it came from the config store, an identity export,
- *    or a file. `source.rules[].content` is NOT floored — `normalizeInstructionRules` only
- *    filters provider blocks, `normalizeIdentityRules` copies rule bodies straight out of
- *    export JSON, and `deduplicateSemanticPolicySources` inspects only `source.content`.
- *    So a sentinel carried inside a RULE is neither floored nor deduped nor attested, on
- *    the same untrusted export transport this floor otherwise defends. That predates this
- *    guard and is tracked as a follow-up; do not read the choke point as covering it.
+ * 2. This function guards only the payloads routed through it. The render pipeline routes
+ *    BOTH `source.content` and `source.rules[].content`: `normalizeSources` floors the
+ *    first and `normalizeInstructionRules` floors the second through
+ *    `applyAgentOperatingRulesFloorToRule`, both before provider filtering, and
+ *    `deduplicateSemanticPolicySources` reads a declaration from either field. A claiming
+ *    source or rule is therefore covered whether it came from the config store, an
+ *    identity export, or a file.
+ *
+ *    The rule half was NOT covered until hasna/instructions#54, and this note used to say
+ *    so in present tense. Until then a sentinel carried inside a RULE was neither floored
+ *    nor deduped nor attested on the same untrusted export transport this floor otherwise
+ *    defends, so an export installed a below-baseline NON-OVERRIDABLE rules document by
+ *    putting it in `rules[]` instead of `content`.
+ *
+ *    What remains uncovered is narrower and is stated so the choke point is not read as
+ *    total: an unprivileged rule that merely QUOTES the rules mid-body is deliberately not
+ *    floored (the F2 false positive), and a rule under a privileged parent IS floored even
+ *    when it only quotes them.
  *
  *    The attestation is also PER-RENDER, not durable: a repair is recorded in the manifest
  *    of the render that performed it, so fleet-wide auditing needs those manifests
