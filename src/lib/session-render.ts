@@ -6,10 +6,12 @@ import type { Config } from "../types/index.js";
 import {
   AGENT_OPERATING_RULES_HEADING_PATTERN,
   AGENT_OPERATING_RULES_ROLE,
+  AGENT_OPERATING_RULES_PAYLOAD_SHA256,
   AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY,
   AGENT_OPERATING_RULES_SENTINEL_PATTERN,
   AGENT_OPERATING_RULES_SOURCE_ID,
   GLOBAL_AGENT_RULES_STANDARD_SLUG,
+  type AgentOperatingRulesPayloadIntegrity,
   compareAgentOperatingRulesVersions,
   parseAgentOperatingRulesVersion,
   resolveAgentOperatingRulesPayload,
@@ -831,22 +833,80 @@ function normalizeSources(
  * collapse and one home rendered TWO contradictory rule-set versions with `skipped: []`
  * and `warnings: []` — measured on 088b862, v115 and v116 side by side (todos `9af165a8`).
  */
+interface SemanticPolicyDeclaration {
+  version: string;
+  normalizedContent: string;
+  integrity: AgentOperatingRulesPayloadIntegrity;
+}
+
+/**
+ * Whether the bytes about to be compared were checked against a digest this build pins.
+ *
+ * This is the ONLY signal available at selection time that the payload's own author does
+ * not control. `nonOverridable`, the source id, `metadata.role`, `kind` and the sentinel
+ * VERSION are all fields an identity export writes for itself; two candidates arriving on
+ * the same export are indistinguishable by any of them. The digest is computed here from
+ * the bytes against {@link AGENT_OPERATING_RULES_PAYLOAD_SHA256}, so it cannot be asserted
+ * into existence by a payload. Same predicate `resolveAgentOperatingRulesPayload` uses —
+ * this reads the value rather than inventing a new trust signal.
+ */
+function semanticPolicyIntegrity(body: string): AgentOperatingRulesPayloadIntegrity {
+  return sha256(body) === AGENT_OPERATING_RULES_PAYLOAD_SHA256 ? "pinned-digest" : "unverified-self-declared";
+}
+
 function semanticPolicyDeclaration(
   source: OrderedSessionInstructionSource,
-): { version: string; normalizedContent: string } | null {
+): SemanticPolicyDeclaration | null {
   const normalize = (value: string) => value.replace(/\r\n/g, "\n").trim();
   const sentinel = source.content.match(AGENT_OPERATING_RULES_SENTINEL_PATTERN);
   if (sentinel) {
-    return { version: sentinel[1]!, normalizedContent: normalize(source.content) };
+    return {
+      version: sentinel[1]!,
+      normalizedContent: normalize(source.content),
+      integrity: semanticPolicyIntegrity(source.content),
+    };
   }
   for (const rule of source.resolvedRules) {
     const body = rule.content ?? "";
     if (!claimsAgentOperatingRulesPolicy(source, body)) continue;
     const ruleSentinel = body.match(AGENT_OPERATING_RULES_SENTINEL_PATTERN);
     if (!ruleSentinel) continue;
-    return { version: ruleSentinel[1]!, normalizedContent: normalize(body) };
+    return {
+      version: ruleSentinel[1]!,
+      normalizedContent: normalize(body),
+      integrity: semanticPolicyIntegrity(body),
+    };
   }
   return null;
+}
+
+/**
+ * The losing source with its policy payload removed and everything else intact, or null
+ * when the policy WAS the whole source.
+ *
+ * Before this, losing the collapse discarded the entire source. A valid `@hasna/identities`
+ * export may carry ordinary content plus several `rules[]` entries beside a policy rule;
+ * promoting that one rule to a declaration for the whole source and then skipping the
+ * source deleted unrelated safety and operational instructions from the rendered home,
+ * with only a source-level skip record and no copy of what was lost. That is a home
+ * carrying LESS than the ratified rule set, which is the failure this collapse exists to
+ * prevent arriving by a different door (hasna/instructions#54, @agent-chief-strategy P1).
+ *
+ * Every declaring carrier is removed, not just the one `semanticPolicyDeclaration`
+ * happened to report: a source whose content AND a rule both declare would otherwise keep
+ * the second copy and defeat the collapse it just lost.
+ */
+function withoutSemanticPolicyPayloads(
+  source: OrderedSessionInstructionSource,
+): OrderedSessionInstructionSource | null {
+  const content = AGENT_OPERATING_RULES_SENTINEL_PATTERN.test(source.content) ? "" : source.content;
+  const resolvedRules = source.resolvedRules.filter((rule) => {
+    const body = rule.content ?? "";
+    return !(AGENT_OPERATING_RULES_SENTINEL_PATTERN.test(body) && claimsAgentOperatingRulesPolicy(source, body));
+  });
+  const hasPathReferences = (source.sourcePaths ?? []).length > 0;
+  if (!content.trim() && resolvedRules.length === 0 && !hasPathReferences) return null;
+  return { ...source, content, resolvedRules };
 }
 
 function deduplicateSemanticPolicySources(
@@ -854,20 +914,48 @@ function deduplicateSemanticPolicySources(
 ): { selected: OrderedSessionInstructionSource[]; skipped: SessionSkippedSource[] } {
   const selected: OrderedSessionInstructionSource[] = [];
   const skipped: SessionSkippedSource[] = [];
-  const policySources = new Map<string, { index: number; version: string; normalizedContent: string }>();
-  const collapseReason = (winner: OrderedSessionInstructionSource, key: string) =>
-    `superseded by "${winner.id}": sources declaring the semantic policy ${key} collapse to one so a single instruction home cannot carry two rule-set versions`;
+  const policySources = new Map<string, {
+    index: number;
+    version: string;
+    normalizedContent: string;
+    integrity: AgentOperatingRulesPayloadIntegrity;
+  }>();
+  const collapseReason = (
+    winner: OrderedSessionInstructionSource,
+    key: string,
+    partial: boolean,
+    displacesVerified: boolean,
+  ) =>
+    `superseded by "${winner.id}": sources declaring the semantic policy ${key} collapse to one so a single instruction home cannot carry two rule-set versions`
+    + (partial
+      ? "; only the policy payload was removed and this source's other instructions still render"
+      : "")
+    + (displacesVerified
+      ? "; WARNING the surviving payload is unverified-self-declared and displaced a digest-verified one on its own version claim"
+      : "");
+  // A loser is stripped rather than deleted where it carries anything else, and the skip
+  // record says which of the two happened.
+  const discard = (
+    loser: OrderedSessionInstructionSource,
+    winner: OrderedSessionInstructionSource,
+    key: string,
+    displacesVerified: boolean,
+  ) => {
+    const remainder = withoutSemanticPolicyPayloads(loser);
+    skipped.push(skippedSource(loser, collapseReason(winner, key, remainder !== null, displacesVerified)));
+    return remainder;
+  };
   for (const source of sources) {
     const declaration = semanticPolicyDeclaration(source);
     if (!declaration) {
       selected.push(source);
       continue;
     }
-    const { version, normalizedContent } = declaration;
+    const { version, normalizedContent, integrity } = declaration;
     const key = AGENT_OPERATING_RULES_SEMANTIC_POLICY_KEY;
     const existing = policySources.get(key);
     if (!existing) {
-      policySources.set(key, { index: selected.length, version, normalizedContent });
+      policySources.set(key, { index: selected.length, version, normalizedContent, integrity });
       selected.push(source);
       continue;
     }
@@ -880,28 +968,81 @@ function deduplicateSemanticPolicySources(
     }
     const current = selected[existing.index]!;
     const priorityOrder = semanticPolicySourcePriority(source) - semanticPolicySourcePriority(current);
+    // SELECTION IS PRIORITY-THEN-VERSION, and the version half is NOT a trust decision.
+    //
+    // The reachable eviction reported on hasna/instructions#54 was a `9.9.9` payload
+    // displacing the genuine rules at EQUAL priority. It was reachable because
+    // `semanticPolicySourcePriority` credited only {@link GLOBAL_AGENT_RULES_STANDARD_SLUG}
+    // while {@link claimsAgentOperatingRulesPolicy} recognises {@link
+    // AGENT_OPERATING_RULES_SOURCE_ID} as the managed identity too — so the canonical
+    // managed source tied with an ordinary export instead of outranking it, and the
+    // attacker-chosen version number became the tiebreak. That asymmetry is fixed in
+    // `semanticPolicySourcePriority`.
+    //
+    // ORDERING BY INTEGRITY INSTEAD WAS TRIED AND REJECTED, recorded so it is not
+    // re-proposed as an obvious improvement. Ranking `pinned-digest` above
+    // `unverified-self-declared` closes the equal-priority case, and it also inverts
+    // `collapses to the newer version regardless of source ordering` in
+    // `session-render.test.ts`: the pinned digest describes THIS BUILD's embedded snapshot,
+    // so "verified" and "stale" are the same payload, and preferring it would freeze any
+    // home that carries the old snapshot beside a newly published rules document on the
+    // snapshot. That is the downgrade the floor exists to prevent, arriving by the
+    // selection path instead.
+    //
+    // WHAT REMAINS OPEN, because a comparison cannot close it: every field here is one the
+    // payload writes about itself, so an export that also mimics the canonical source id
+    // ties on priority and wins on version again. Selection is precedence, not
+    // authentication — closing it needs a signed payload or a digest delivered by the
+    // package channel. Until then the residual is made LOUD rather than silent: when an
+    // unverified payload displaces a digest-verified one, the skip reason says so, and
+    // `planSessionRender` turns every skip reason into a warning line.
+    const displacesVerified = existing.integrity === "pinned-digest"
+      && integrity === "unverified-self-declared";
+    const arrivingWins = priorityOrder > 0
+      || (priorityOrder === 0 && versionOrder > 0);
     // The incumbent wins: the ARRIVING source is the one being discarded.
-    if (priorityOrder < 0 || (priorityOrder === 0 && versionOrder <= 0)) {
-      skipped.push(skippedSource(source, collapseReason(current, key)));
+    if (!arrivingWins) {
+      const remainder = discard(source, current, key, false);
+      if (remainder) selected.push(remainder);
       continue;
     }
     // The arriving source wins: the INCUMBENT is the one being discarded. Reporting only
     // the first case would leave exactly the eviction an operator is most likely to care
     // about — a payload they explicitly passed losing to a later one — unreported.
-    skipped.push(skippedSource(current, collapseReason(source, key)));
+    const remainder = discard(current, source, key, displacesVerified);
     selected[existing.index] = {
       ...source,
       resolvedOrder: current.resolvedOrder,
     };
-    policySources.set(key, { index: existing.index, version, normalizedContent });
+    // Appended rather than left in place: the winner takes the incumbent's slot, and
+    // `normalizeSources` re-sorts on layer/order/id immediately after, so the remainder
+    // returns to its own position rather than to the end of the render.
+    if (remainder) selected.push(remainder);
+    policySources.set(key, { index: existing.index, version, normalizedContent, integrity });
   }
   return { selected, skipped };
 }
 
+/**
+ * Precedence among sources declaring the same semantic policy.
+ *
+ * BOTH canonical managed ids are credited, and the omission of the second one was the
+ * reachable defect behind hasna/instructions#54: {@link claimsAgentOperatingRulesPolicy}
+ * treats {@link GLOBAL_AGENT_RULES_STANDARD_SLUG} and {@link AGENT_OPERATING_RULES_SOURCE_ID}
+ * as the same managed identity, but only the first earned precedence here. A render whose
+ * genuine policy source carried the SECOND id therefore tied with any ordinary export that
+ * set `nonOverridable`, and the tie fell through to the sentinel VERSION — which the
+ * export writes for itself. An export stamping `9.9.9` evicted the genuine rules and
+ * rendered in their place as the non-overridable policy.
+ *
+ * This is PRECEDENCE, not authentication. Every input is self-declared, so an export that
+ * also mimics a canonical id ties again; see the ordering note in
+ * `deduplicateSemanticPolicySources` for why a digest comparison cannot substitute.
+ */
 function semanticPolicySourcePriority(source: OrderedSessionInstructionSource): number {
   let priority = 0;
   if (source.nonOverridable) priority += 4;
-  if (source.id === GLOBAL_AGENT_RULES_STANDARD_SLUG) priority += 2;
+  if (source.id === GLOBAL_AGENT_RULES_STANDARD_SLUG || source.id === AGENT_OPERATING_RULES_SOURCE_ID) priority += 2;
   if (source.metadata?.["role"] === AGENT_OPERATING_RULES_ROLE) priority += 1;
   return priority;
 }

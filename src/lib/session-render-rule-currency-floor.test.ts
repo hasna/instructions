@@ -187,7 +187,13 @@ describe("rule-borne agent-operating-rules payloads are floored (todos 9af165a8)
   // cannot help here and only the collapse can. Discovered while mutation-testing: the
   // below-baseline coexistence case above is masked by the floor and therefore does NOT
   // on its own prove the dedupe change is load-bearing.
-  test("an ABOVE-BASELINE rule-borne payload still collapses to one rule-set version", () => {
+  //
+  // THIS TEST ASSERTED THE WRONG PROPERTY AND PASSED ON THE DEFECT IT WAS ADDED TO CATCH.
+  // It checked that exactly ONE version rendered, never WHICH one — and the dedupe was
+  // picking the attacker's `9.9.9` body and skipping the genuine source, which satisfies
+  // "one version" perfectly (hasna/instructions#54, factory run_c55a208b9840). A count
+  // where an identity was needed. Every assertion below names the survivor.
+  test("an ABOVE-BASELINE rule-borne payload loses to the digest-verified source", () => {
     const plan = planFrom([
       {
         id: AGENT_OPERATING_RULES_SOURCE_ID,
@@ -199,9 +205,120 @@ describe("rule-borne agent-operating-rules payloads are floored (todos 9af165a8)
     ]);
 
     const rendered = renderedText(plan);
+    // WHICH version survives, not how many.
     const versions = new Set([...rendered.matchAll(/<!--\s*hasna:agent-operating-rules\s+v=([0-9.]+)\s*-->/gi)]
       .map((m) => m[1]!));
-    expect(versions.size).toBe(1);
-    expect(plan.manifest.skippedSources.length).toBeGreaterThan(0);
+    expect([...versions]).toEqual([AGENT_OPERATING_RULES_VERSION]);
+    expect(rendered).not.toContain("v=9.9.9");
+    expect(rendered).not.toContain(EVIL);
+    // ...and WHICH source was discarded. The genuine source must still be rendering.
+    expect(plan.manifest.skippedSources.map((s) => s.id)).toEqual(["attacker-newer"]);
+    expect(plan.manifest.sources.map((s) => s.id)).toContain(AGENT_OPERATING_RULES_SOURCE_ID);
+  });
+
+  // CASE 5 — COMPANION SURVIVAL. `semanticPolicyDeclaration` promotes a policy found in
+  // ONE rule to a declaration for the WHOLE source, and losing the collapse used to skip
+  // that whole source: its ordinary content and its unrelated rules disappeared from the
+  // rendered home with nothing but a source-level skip record, so the home ended up
+  // carrying LESS than the ratified rule set (@agent-chief-strategy NO_GO on #54).
+  //
+  // This is the in-memory twin of @agent-chief-planning's manifest-to-disk bijection gate:
+  // a dropped companion is a manifest reference with no rendered body behind it.
+  test("a losing source keeps its unrelated content and rules; only the policy is removed", () => {
+    const COMPANION_SOURCE_CONTENT = "COMPANION-SOURCE-MARKER: escalate incidents before acting.";
+    const COMPANION_RULE_CONTENT = "COMPANION-RULE-MARKER: never force-push a protected branch.";
+
+    const plan = planFrom([
+      {
+        id: AGENT_OPERATING_RULES_SOURCE_ID,
+        kind: "global-rules",
+        nonOverridable: true,
+        content: GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+      },
+      {
+        id: "bundled-policy-and-companions",
+        kind: "global-rules",
+        label: "Bundled Export",
+        nonOverridable: true,
+        content: COMPANION_SOURCE_CONTENT,
+        rules: [
+          { id: "stale-operating-rules", label: "Operating Rules", content: rulesDocument("9.9.9", EVIL) },
+          { id: "branch-protection", label: "Branch Protection", content: COMPANION_RULE_CONTENT },
+        ],
+      },
+    ]);
+
+    const rendered = renderedText(plan);
+    // The companions survive — this is the finding.
+    expect(rendered).toContain("COMPANION-SOURCE-MARKER");
+    expect(rendered).toContain("COMPANION-RULE-MARKER");
+    // The policy payload does not.
+    expect(rendered).not.toContain(EVIL);
+    expect(rendered).not.toContain("v=9.9.9");
+    const versions = new Set([...rendered.matchAll(/<!--\s*hasna:agent-operating-rules\s+v=([0-9.]+)\s*-->/gi)]
+      .map((m) => m[1]!));
+    expect([...versions]).toEqual([AGENT_OPERATING_RULES_VERSION]);
+
+    // Every rule the surviving source still declares has a rendered body behind it: the
+    // policy rule is gone from the manifest too, not merely absent from the output.
+    const bundled = plan.manifest.sources.find((s) => s.id === "bundled-policy-and-companions");
+    expect(bundled).toBeDefined();
+    expect(bundled!.rules.map((r) => r.id)).toEqual(["branch-protection"]);
+
+    // The partial collapse is REPORTED and says it was partial.
+    const skipped = plan.manifest.skippedSources;
+    expect(skipped.map((s) => s.id)).toEqual(["bundled-policy-and-companions"]);
+    expect(skipped[0]!.reason).toContain("cannot carry two rule-set versions");
+    expect(skipped[0]!.reason).toContain("other instructions still render");
+  });
+
+  // CASE 6 — THE BOUND ON CASE 4b, stated as a test so it cannot be read as a stronger
+  // guarantee than it is. When NEITHER candidate matches the pinned digest the integrity
+  // axis ties and version ordering decides exactly as before. This is the measured fleet
+  // shape (v1.1.16 beside v1.1.24 against a v1.1.6 baseline), and it must keep resolving
+  // to the newer document — an integrity rule that also downgraded this case would freeze
+  // homes on a stale snapshot.
+  test("BOUND: with neither payload digest-verified, the NEWER one still wins", () => {
+    const older = rulesDocument("8.0.0", "Older unverified body. OLDER-MARKER.");
+    const newer = rulesDocument("9.9.9", "Newer unverified body. NEWER-MARKER.");
+    const plan = planFrom([
+      attackerSource("unverified-older", older),
+      attackerSource("unverified-newer", newer),
+    ]);
+
+    const rendered = renderedText(plan);
+    expect(rendered).toContain("NEWER-MARKER");
+    expect(rendered).not.toContain("OLDER-MARKER");
+    expect(plan.manifest.skippedSources.map((s) => s.id)).toEqual(["unverified-older"]);
+  });
+
+  // CASE 7 — THE RESIDUAL, asserted rather than described. Selection is precedence and not
+  // authentication: every field it reads is one the payload writes about itself, so a
+  // sufficiently privileged export still evicts the digest-verified rules. That case is
+  // NOT silent — the skip reason names it, and `planSessionRender` turns every skip reason
+  // into a warning line, so a monitor can see "unverified payload displaced a verified
+  // one" without reading the bodies.
+  //
+  // The genuine source here deliberately does NOT set `nonOverridable`, which is the shape
+  // that loses. A rendered fleet home whose managed source carries the flag outranks this
+  // attacker (case 4b); this test covers what happens when it does not.
+  test("RESIDUAL: an unverified payload that DOES win says so in the skip record", () => {
+    const plan = planFrom([
+      {
+        id: AGENT_OPERATING_RULES_SOURCE_ID,
+        kind: "global-rules",
+        content: GLOBAL_AGENT_RULES_STANDARD_CONTENT,
+      },
+      attackerSource("attacker-privileged", rulesDocument("9.9.9", EVIL)),
+    ]);
+
+    // It really did win — otherwise the assertion below would be vacuous.
+    expect(renderedText(plan)).toContain("v=9.9.9");
+
+    const skipped = plan.manifest.skippedSources;
+    expect(skipped.map((s) => s.id)).toEqual([AGENT_OPERATING_RULES_SOURCE_ID]);
+    expect(skipped[0]!.reason).toContain("unverified-self-declared and displaced a digest-verified one");
+    // ...and it reaches the operator-facing warnings, not only the structured surface.
+    expect(plan.manifest.warnings.join("\n")).toContain("unverified-self-declared and displaced a digest-verified one");
   });
 });
