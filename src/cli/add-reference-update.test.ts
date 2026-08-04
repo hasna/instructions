@@ -71,6 +71,31 @@ describe("instructions add --kind reference — one name, one row", () => {
     expect(rows.length).toBe(1);
   });
 
+  test("refuses a case/punctuation variant of a name a config already owns (todos 195272ae, Finding 1)", () => {
+    const root = makeTempRoot("configs-add-ref-dup-case-");
+    const source = join(root, "rule.md");
+    writeFileSync(source, "alpha\n");
+
+    const first = runCli(["add", source, "--name", "Sample Rule", "--kind", "reference"], isolatedEnv(root));
+    expect(first.status).toBe(0);
+
+    // A different exact string that slugifies to the same identity. Before
+    // this fix, findReferenceConfigsByName's slug branch compared against the
+    // EXISTING row's stored `.slug` column, which for a fresh, un-colliding
+    // row equals slugify(its own name) — so this specific single-collision
+    // shape actually already worked pre-fix. The defect this test guards is
+    // the population immediately downstream of it: once this second add is
+    // (correctly) refused, the store must still hold exactly one row, so a
+    // LATER re-ingest under either spelling never has two same-identity rows
+    // to go blind between (see the --update test below for what happens if
+    // it does, e.g. via the MCP create_config path this file does not cover).
+    const second = runCli(["add", source, "--name", "sample rule", "--kind", "reference"], isolatedEnv(root));
+
+    expect(second.status).not.toBe(0);
+    expect(referenceRowsNamed(root, "Sample Rule").length).toBe(1);
+    expect(referenceRowsNamed(root, "sample rule").length).toBe(0);
+  });
+
   test("--update refreshes the existing reference row in place instead of adding one", () => {
     const root = makeTempRoot("configs-add-ref-update-");
     const source = join(root, "rule.md");
@@ -129,6 +154,56 @@ describe("instructions add --kind reference — one name, one row", () => {
     expect(added.status).toBe(0);
     expect(referenceRowsNamed(root, "rule-one").length).toBe(1);
     expect(referenceRowsNamed(root, "rule-two").length).toBe(1);
+  });
+
+  test("--update on a name colliding only after slugification warns about the sibling instead of staying silent (todos 195272ae, Finding 1)", () => {
+    const root = makeTempRoot("configs-add-ref-case-collision-");
+
+    // `add`'s own guard now refuses to create this pair through the CLI (this
+    // fix also prevents the corruption at creation time, not only detects it
+    // afterward — see the CLI-level `add` test above for the byte-identical
+    // case). To exercise --update against a pair that ALREADY exists — e.g.
+    // left over from before this fix shipped, or created via the MCP
+    // create_config path, which still has no reference-kind guard at all
+    // (see mcp/create-config-target-guard.test.ts) — seed both rows directly
+    // at the DB layer, the same pattern doctor-reference-duplicates.test.ts
+    // uses.
+    const seed = spawnSync(
+      "bun",
+      [
+        "-e",
+        `
+        import { createConfig } from "./src/db/configs.ts";
+        createConfig({ name: "Sample Rule", category: "rules", content: "one\\n", kind: "reference" });
+        createConfig({ name: "sample rule", category: "rules", content: "two\\n", kind: "reference" });
+        `,
+      ],
+      { cwd: repoRoot, encoding: "utf8", env: { ...process.env, ...isolatedEnv(root), HASNA_INSTRUCTIONS_API_URL: undefined, HASNA_INSTRUCTIONS_API_KEY: undefined } },
+    );
+    expect(seed.status).toBe(0);
+    expect(referenceRowsNamed(root, "Sample Rule").length).toBe(1);
+    expect(referenceRowsNamed(root, "sample rule").length).toBe(1);
+
+    const source = join(root, "rule.md");
+    writeFileSync(source, "three\n");
+    const updated = runCli(["add", source, "--name", "Sample Rule", "--kind", "reference", "--update"], isolatedEnv(root));
+    expect(updated.status).toBe(0);
+
+    // Both rows must still exist — this is about visibility, not merging them.
+    const exact = referenceRowsNamed(root, "Sample Rule");
+    const sibling = referenceRowsNamed(root, "sample rule");
+    expect(exact.length).toBe(1);
+    expect(sibling.length).toBe(1);
+
+    // Exactly one of the two now carries the new content; whichever the CLI
+    // picked as the row to refresh, the OTHER must be reported, not silently
+    // skipped. Before this fix `rest` was empty for this pair and neither the
+    // "N other row(s) still share this name" warning nor any trace of the
+    // sibling appeared anywhere in the command's output.
+    const contents = [exact[0]!.content, sibling[0]!.content];
+    expect(contents.filter((c) => c === "three\n").length).toBe(1);
+    expect(contents.filter((c) => c === "one\n" || c === "two\n").length).toBe(1);
+    expect(`${updated.stdout}${updated.stderr}`).toContain("other row(s) still share this name");
   });
 
   test("file-kind add/--update behavior is unchanged by this fix", () => {
