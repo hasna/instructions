@@ -6,7 +6,7 @@ import { existsSync, lstatSync, readFileSync, readSync, writeSync } from "node:f
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { applyConfigsWithReport, expandPath } from "../lib/apply.js";
-import { findConfigsByTargetPath, findDuplicateTargetPathGroups } from "../lib/config-target-identity.js";
+import { findConfigsByTargetPath, findDuplicateTargetPathGroups, findReferenceConfigsByName, findDuplicateReferenceNameGroups } from "../lib/config-target-identity.js";
 import { diffConfig, syncKnown, syncToDisk, syncProject, detectCategory, detectAgent, detectFormat, KNOWN_CONFIGS } from "../lib/sync.js";
 import { syncFromDir } from "../lib/sync-dir.js";
 import { redactContent, scanSecrets } from "../lib/redact.js";
@@ -448,31 +448,61 @@ program
     const name = opts.name || filePath.split("/").pop()!;
     const store = resolveConfigStore();
 
-    // One target path, one row. Without this, a second `add` of a file the store
-    // already tracks INSERTED a twin (uniqueSlug appending `-1`), and two rows on
-    // one path make `apply` race itself — last writer wins, silently. Refusing by
-    // default rather than updating is deliberate: the stored row may hold
-    // redacted or templateized content that the literal bytes on disk would
-    // flatten, so overwriting it is the operator's call, not a side effect of
-    // re-running `add`.
+    // One identity, one row. Without this, a second `add` of something the
+    // store already tracks INSERTED a twin (uniqueSlug appending `-1`), and two
+    // rows on one identity make `apply`/`session render` race each other — last
+    // writer wins, silently. Refusing by default rather than updating is
+    // deliberate: the stored row may hold redacted or templateized content that
+    // the literal bytes on disk would flatten, so overwriting it is the
+    // operator's call, not a side effect of re-running `add`.
+    //
+    // A file-kind config's identity is its target_path (one file, one owner).
+    // A reference-kind config owns no target_path — it is not mirrored 1:1 onto
+    // one file, so `findConfigsByTargetPath` never matches it, by design (see
+    // that function's doc comment) — its identity is its NAME instead (via
+    // slug). Before this fix `existingOwners` was hardcoded to `[]` for
+    // reference kind, so `--update` had no row to find at any setting and every
+    // re-ingest of a reference config silently minted a duplicate. Fixed per
+    // todos 757cefdb, evidenced 2026-08-04: 20/20 reference-kind rows in the
+    // fleet store had target_path=null, so this was not a corner case — it is
+    // the population that carries managed operating-rules content.
+    const allConfigs = await store.listConfigs();
     const existingOwners = opts.kind === "reference"
-      ? []
-      : findConfigsByTargetPath(await store.listConfigs(), targetPath);
+      ? findReferenceConfigsByName(allConfigs, name)
+      : findConfigsByTargetPath(allConfigs, targetPath);
+    const isReference = opts.kind === "reference";
+    const identityLabel = isReference ? `Reference config "${name}"` : targetPath;
+    const identityNoun = isReference ? "name" : "path";
 
     if (existingOwners.length > 0 && !opts.update) {
       const owners = existingOwners.map((owner) => `${owner.slug} (${owner.id})`).join(", ");
-      console.error(chalk.red(`${targetPath} is already tracked by: ${owners}`));
+      console.error(chalk.red(`${identityLabel} is already tracked by: ${owners}`));
       if (existingOwners.length > 1) {
-        console.error(chalk.red(`  ${existingOwners.length} rows already collide on this path — apply order between them is undefined.`));
+        console.error(chalk.red(`  ${existingOwners.length} rows already collide on this ${identityNoun} — apply order between them is undefined.`));
       }
       console.error(chalk.dim("  Use `instructions add <path> --update` to refresh that row in place,"));
-      console.error(chalk.dim("  `instructions sync` to pull disk changes in, or `instructions delete <id>` first."));
+      if (isReference) {
+        console.error(chalk.dim("  or `instructions delete <id>` first."));
+      } else {
+        console.error(chalk.dim("  `instructions sync` to pull disk changes in, or `instructions delete <id>` first."));
+      }
       process.exit(1);
     }
 
     let config: Config;
     if (existingOwners.length > 0) {
       const [target, ...rest] = existingOwners;
+      // Preserve provenance: capture the row's current content and version as a
+      // snapshot BEFORE it is overwritten, whenever the content is actually
+      // changing. This is the same primitive `apply.ts` already uses to protect
+      // a disk file's previous content right before a render overwrites it
+      // (`store.createSnapshot`) — applied here at the DB-write boundary
+      // instead, so a content edit via `add --update` is recoverable via
+      // `instructions snapshot list/restore` even before anything is ever
+      // applied or rendered again.
+      if (content !== target!.content) {
+        await store.createSnapshot(target!.id, target!.content, target!.version);
+      }
       config = await store.updateConfig(target!.id, {
         content,
         format: fmt,
@@ -482,7 +512,7 @@ program
       });
       console.log(chalk.green("✓") + ` Updated: ${chalk.bold(config.name)} ${chalk.dim(`(${config.slug})`)}`);
       if (rest.length > 0) {
-        console.log(chalk.yellow(`  ⚠ ${rest.length} other row(s) still target ${targetPath}: ${rest.map((r) => r.slug).join(", ")}`));
+        console.log(chalk.yellow(`  ⚠ ${rest.length} other row(s) still share this ${identityNoun}: ${rest.map((r) => r.slug).join(", ")}`));
         console.log(chalk.yellow("    Apply order between them is undefined. Delete the extras."));
       }
       if (redacted.length > 0) {
@@ -1693,6 +1723,26 @@ program
         }
       }
       console.log(chalk.dim("      Keep one row per path: `instructions delete <id>` for the extras."));
+    }
+
+    // Same failure, the reference-kind identity axis: a reference config's
+    // identity is its NAME, not a target_path (it has none). Before todos
+    // 757cefdb, `add --update` had no way to find an existing reference row at
+    // all, so every re-ingest minted a fresh one — this reports rows that
+    // accumulated during that window so they can be reconciled by hand.
+    const duplicateReferenceNames = findDuplicateReferenceNameGroups(allConfigs);
+    if (duplicateReferenceNames.length === 0) {
+      pass("No reference config name is claimed by more than one row");
+    } else {
+      const rowCount = duplicateReferenceNames.reduce((total, group) => total + group.configs.length, 0);
+      fail(`${duplicateReferenceNames.length} reference name(s) claimed by more than one row (${rowCount} rows) — only one is live in the next render`);
+      for (const group of duplicateReferenceNames) {
+        console.log(chalk.yellow(`      ${group.name}`));
+        for (const c of group.configs) {
+          console.log(chalk.dim(`        ${c.slug}  (${c.id})  updated ${c.updated_at}`));
+        }
+      }
+      console.log(chalk.dim("      Keep one row per name: `instructions delete <id>` for the extras."));
     }
 
     console.log(`\n${issues === 0 ? chalk.green("✓ All checks passed") : chalk.yellow(`${issues} issue(s) found`)}`);
