@@ -206,6 +206,56 @@ describe("instructions add --kind reference — one name, one row", () => {
     expect(`${updated.stdout}${updated.stderr}`).toContain("other row(s) still share this name");
   });
 
+  test("--update targets the EXACT name match, not the alphabetically-first colliding row (todos 195272ae, Finding 2)", () => {
+    const root = makeTempRoot("configs-add-ref-update-exact-");
+
+    // Same seeded pair as the test above, but this time the update is
+    // requested by the LOWERCASE name. SQLite's default BINARY collation sorts
+    // uppercase before lowercase ('S' = 0x53 < 's' = 0x73), so
+    // `ORDER BY category, name` — what `listConfigs` actually runs — always
+    // returns "Sample Rule" before "sample rule" for this pair, regardless of
+    // which one the caller named. Before this fix, `add`'s `[target, ...rest]
+    // = existingOwners` destructure took whichever row sorted first with no
+    // preference for an exact `name` match, so asking to update "sample rule"
+    // silently overwrote "Sample Rule" instead — the wrong row, with no error
+    // and no indication in the "✓ Updated: <name>" line, which itself printed
+    // the WRONG config's name.
+    const seed = spawnSync(
+      "bun",
+      [
+        "-e",
+        `
+        import { createConfig } from "./src/db/configs.ts";
+        createConfig({ name: "Sample Rule", category: "rules", content: "one\\n", kind: "reference" });
+        createConfig({ name: "sample rule", category: "rules", content: "two\\n", kind: "reference" });
+        `,
+      ],
+      { cwd: repoRoot, encoding: "utf8", env: { ...process.env, ...isolatedEnv(root), HASNA_INSTRUCTIONS_API_URL: undefined, HASNA_INSTRUCTIONS_API_KEY: undefined } },
+    );
+    expect(seed.status).toBe(0);
+    expect(referenceRowsNamed(root, "Sample Rule").length).toBe(1);
+    expect(referenceRowsNamed(root, "sample rule").length).toBe(1);
+
+    const source = join(root, "rule.md");
+    writeFileSync(source, "three\n");
+    const updated = runCli(["add", source, "--name", "sample rule", "--kind", "reference", "--update"], isolatedEnv(root));
+    expect(updated.status).toBe(0);
+
+    const exact = referenceRowsNamed(root, "Sample Rule");
+    const targeted = referenceRowsNamed(root, "sample rule");
+    expect(exact.length).toBe(1);
+    expect(targeted.length).toBe(1);
+
+    // The row actually named "sample rule" must carry the new content — NOT
+    // "Sample Rule", which the caller never named.
+    expect(targeted[0]!.content).toBe("three\n");
+    expect(exact[0]!.content).toBe("one\n");
+
+    // The confirmation line must name the row that was actually touched.
+    expect(`${updated.stdout}${updated.stderr}`).toContain("sample-rule-1");
+    expect(`${updated.stdout}${updated.stderr}`).toContain("other row(s) still share this name");
+  });
+
   test("file-kind add/--update behavior is unchanged by this fix", () => {
     const root = makeTempRoot("configs-add-file-unaffected-");
     const target = join(root, "sample.md");

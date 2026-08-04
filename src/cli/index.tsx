@@ -491,7 +491,26 @@ program
 
     let config: Config;
     if (existingOwners.length > 0) {
-      const [target, ...rest] = existingOwners;
+      // Prefer the row whose stored name EXACTLY matches what the caller
+      // named, over whichever row `listConfigs`'s `ORDER BY category, name`
+      // happens to sort first. `existingOwners` can hold more than one row
+      // for a reference config once two rows collide only via the slug
+      // fallback (see findReferenceConfigsByName's case/punctuation clause,
+      // config-target-identity.ts) — e.g. "Sample Rule" and "sample rule".
+      // SQLite's default BINARY collation sorts uppercase before lowercase,
+      // so `existingOwners[0]` for that pair is always "Sample Rule"
+      // regardless of which one `--name` actually asked for. Without this,
+      // `add --update --name "sample rule"` silently overwrote "Sample
+      // Rule"'s content instead — the wrong row, with no error, and the
+      // confirmation line itself named the wrong config. Fixed per todos
+      // 195272ae, Finding 2. File-kind identity has no such ambiguity (a
+      // path's owners do not carry a comparable "exact name" concept), so
+      // this only changes behaviour for reference-kind configs; file-kind
+      // `existingOwners` still resolves to its first (and, in practice,
+      // only) entry exactly as before.
+      const exactIndex = isReference ? existingOwners.findIndex((owner) => owner.name === name) : -1;
+      const target = exactIndex >= 0 ? existingOwners[exactIndex] : existingOwners[0];
+      const rest = existingOwners.filter((owner) => owner.id !== target!.id);
       // Preserve provenance: capture the row's current content and version as a
       // snapshot BEFORE it is overwritten, whenever the content is actually
       // changing. This is the same primitive `apply.ts` already uses to protect
