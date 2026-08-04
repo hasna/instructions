@@ -82,4 +82,35 @@ describe("instructions doctor — reference-name duplicates", () => {
     expect(doctor.stdout).toContain("reference name(s) claimed by more than one row");
     expect(doctor.stdout).toContain("Twin Rule");
   });
+
+  test("reports a pre-existing duplicate that differs only by case (todos 195272ae, Finding 1)", () => {
+    const root = makeTempRoot("doctor-ref-dup-case-");
+
+    // Same seeding shape as the byte-identical case above, but the two names
+    // differ only in case. This is the exact pair findReferenceConfigsByName
+    // treats as one identity (config-target-identity.ts's doc comment) and
+    // the one the pre-fix grouping-by-exact-`name` missed: `doctor` reported
+    // clean while `add --update` matched only the exact-name row and left the
+    // other silently untouched (see add-reference-update.test.ts).
+    const seed = spawnSync(
+      "bun",
+      [
+        "-e",
+        `
+        import { createConfig } from "./src/db/configs.ts";
+        createConfig({ name: "Sample Rule", category: "rules", content: "one", kind: "reference" });
+        createConfig({ name: "sample rule", category: "rules", content: "two", kind: "reference" });
+        `,
+      ],
+      { cwd: repoRoot, encoding: "utf8", env: { ...process.env, ...isolatedEnv(root), HASNA_INSTRUCTIONS_API_URL: undefined, HASNA_INSTRUCTIONS_API_KEY: undefined, HASNA_INSTRUCTIONS_STORAGE_MODE: undefined } },
+    );
+    expect(seed.status).toBe(0);
+
+    const doctor = runCli(["doctor"], isolatedEnv(root));
+    expect(doctor.status).toBe(0);
+    expect(doctor.stdout).toContain("reference name(s) claimed by more than one row");
+    // The reported label is one of the two colliding rows' own name — either
+    // is a correct answer; this defect specifically hid the pair entirely.
+    expect(doctor.stdout).toMatch(/Sample Rule|sample rule/);
+  });
 });

@@ -23,12 +23,16 @@ import { makeTempRoot } from "../lib/test-temp-root";
 
 const servers: Array<{ stop: () => void }> = [];
 let configsHome: string;
+let savedApiUrl: string | undefined;
+let savedApiKey: string | undefined;
 
 beforeEach(() => {
   // Isolation, per open defect b19d3d37: HASNA_INSTRUCTIONS_DB_PATH is consulted
   // ONLY by LocalConfigStore. resolveConfigStore() returns the CloudConfigStore
   // whenever the API vars are set, so setting DB_PATH alone does NOT isolate —
   // it silently writes into the shared fleet store. Both API vars must be unset.
+  savedApiUrl = process.env["HASNA_INSTRUCTIONS_API_URL"];
+  savedApiKey = process.env["HASNA_INSTRUCTIONS_API_KEY"];
   delete process.env["HASNA_INSTRUCTIONS_API_URL"];
   delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
@@ -48,6 +52,16 @@ afterEach(() => {
   resetDatabase();
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   delete process.env["CONFIGS_HOME"];
+  // Restore ambient state — see http.test.ts's afterEach for the measured
+  // consequence (todos 195272ae, Finding 2) of deleting these two vars without
+  // restoring them: under bun test's default non-isolated runner, every test
+  // file shares one process.env, so the leak silently masks the very hazard
+  // this beforeEach's own comment (defect b19d3d37) documents, for every test
+  // file that runs afterward in the same process.
+  if (savedApiUrl !== undefined) process.env["HASNA_INSTRUCTIONS_API_URL"] = savedApiUrl;
+  else delete process.env["HASNA_INSTRUCTIONS_API_URL"];
+  if (savedApiKey !== undefined) process.env["HASNA_INSTRUCTIONS_API_KEY"] = savedApiKey;
+  else delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
 });
 
 async function withClient<T>(fn: (call: CallTool) => Promise<T>): Promise<T> {
@@ -193,6 +207,67 @@ describe("MCP create_config duplicate-target-path guard", () => {
       const second = await call("create_config", { name: "Pathless Two", category: "rules", content: "b" });
       expect(first.isError).toBe(false);
       expect(second.isError).toBe(false);
+    });
+  });
+
+  it("refuses a second reference row on a name an existing reference row already owns (todos 195272ae, Finding 1)", async () => {
+    // Exemption from the target-path guard above is not exemption from ANY
+    // identity check. A reference config's identity is its NAME (see
+    // config-target-identity.ts's doc comment) — the CLI has enforced this
+    // since todos 757cefdb (add-reference-update.test.ts), but this handler
+    // is the surface agents actually reach through, and until this fix it had
+    // no such check at all: calling create_config with kind:"reference" and a
+    // name that already exists always minted a fresh duplicate row, with
+    // nothing to stop it and nothing to warn about it.
+    await withClient(async (call) => {
+      const first = await call("create_config", {
+        name: "Reference Guide",
+        category: "rules",
+        content: "first",
+        kind: "reference",
+      });
+      expect(first.isError).toBe(false);
+      const firstSlug = JSON.parse(first.text).slug as string;
+
+      const second = await call("create_config", {
+        name: "Reference Guide",
+        category: "rules",
+        content: "second",
+        kind: "reference",
+      });
+
+      expect(second.isError).toBe(true);
+      expect(second.text).toContain("is already tracked by");
+      expect(second.text).toContain(firstSlug);
+
+      const list = await call("list_configs", { limit: 100, kind: "reference" });
+      expect(list.text).not.toContain("second");
+    });
+  });
+
+  it("refuses a case/punctuation variant of a name an existing reference row already owns (todos 195272ae, Finding 1)", async () => {
+    await withClient(async (call) => {
+      const first = await call("create_config", {
+        name: "Reference Guide",
+        category: "rules",
+        content: "first",
+        kind: "reference",
+      });
+      expect(first.isError).toBe(false);
+      const firstSlug = JSON.parse(first.text).slug as string;
+
+      // Different exact string, same identity once slugified — the case this
+      // fix's unit tests reproduce in config-target-identity.test.ts.
+      const second = await call("create_config", {
+        name: "reference guide",
+        category: "rules",
+        content: "second",
+        kind: "reference",
+      });
+
+      expect(second.isError).toBe(true);
+      expect(second.text).toContain("is already tracked by");
+      expect(second.text).toContain(firstSlug);
     });
   });
 });

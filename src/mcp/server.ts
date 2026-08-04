@@ -4,7 +4,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { z } from "zod";
 import { resolveConfigStore } from "../data/config-store.js";
 import { applyConfigsWithReport } from "../lib/apply.js";
-import { findConfigsByTargetPath } from "../lib/config-target-identity.js";
+import { findConfigsByTargetPath, findReferenceConfigsByName } from "../lib/config-target-identity.js";
 import { syncFromDir, syncToDir } from "../lib/sync-dir.js";
 import { detectMachineContext, resolveProfileVariables } from "../lib/machine.js";
 import { pagedPayload, summarizeApplyResult, summarizeConfig, summarizeProfile } from "../lib/compact-output.js";
@@ -14,7 +14,7 @@ import type { ConfigAgent, ConfigCategory, ConfigFormat, ConfigKind, ConfigOutpu
 const TOOL_DOCS: Record<string, string> = {
   list_configs: "List configs. Params: category?, agent?, kind?, search?, limit?, cursor?, verbose?. Defaults to a paged compact envelope without content; use get_config for full content.",
   get_config: "Get a config by id or slug. Returns full config including content.",
-  create_config: "Create a new config. Required: name, content, category. Optional: agent, target_path, outputs, kind, format, tags, description, is_template. Refuses when target_path is already tracked by another config (one target path, one row) — use update_config on the owning row, or delete_config first. kind:'reference' owns no target path and is exempt.",
+  create_config: "Create a new config. Required: name, content, category. Optional: agent, target_path, outputs, kind, format, tags, description, is_template. Refuses when target_path is already tracked by another config (one target path, one row) — use update_config on the owning row, or delete_config first. kind:'reference' owns no target path and is exempt from that check, but is instead refused when its name (or a case/punctuation variant of it) already tracks another reference config.",
   update_config: "Update a config by id or slug. Optional: content, name, tags, description, category, agent, target_path, outputs.",
   apply_config: "Apply a config through the shared ownership gate. Params: id_or_slug, dry_run?, verbose?. Returns results plus session-renderer-owned targets that were skipped.",
   sync_directory: "Sync a directory with the DB. Params: dir, direction ('from_disk'|'to_disk'). Returns sync result.",
@@ -137,6 +137,38 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
               : "";
             return err(
               `${targetPath} is already tracked by: ${named}.${collision}` +
+                ` Use update_config on that row to refresh it in place, or delete_config first.`
+            );
+          }
+        }
+
+        // A reference config owns no target_path, so the guard above never
+        // fires for it — its identity is its NAME instead (see
+        // config-target-identity.ts's doc comment). `instructions add --kind
+        // reference` has enforced this since todos 757cefdb; this handler did
+        // not, so an agent calling create_config directly with kind:"reference"
+        // could mint an unbounded number of duplicate rows under one name with
+        // zero identity check at all — the exact defect class 757cefdb fixed
+        // for the CLI, left open on the surface the CLI's own fix comment
+        // above already names as the one that matters most ("the surface
+        // agents actually reach through"). Todos 195272ae, Finding 1's
+        // subsidiary question: PR #57 exempted this path as out of scope;
+        // fixing it here rather than deferring again, because it is the same
+        // gap, still live, and reachable by exactly the caller create_config
+        // exists for. Refuses rather than updates, matching the target-path
+        // guard above and the CLI's own create (not --update) behavior —
+        // update_config remains the explicit-choice path for refreshing
+        // content in place.
+        if (kind === "reference") {
+          const name = args["name"] as string;
+          const owners = findReferenceConfigsByName(await store.listConfigs(), name);
+          if (owners.length > 0) {
+            const named = owners.map((owner) => `${owner.slug} (${owner.id})`).join(", ");
+            const collision = owners.length > 1
+              ? ` ${owners.length} rows already collide on this name — apply order between them is undefined.`
+              : "";
+            return err(
+              `Reference config "${name}" is already tracked by: ${named}.${collision}` +
                 ` Use update_config on that row to refresh it in place, or delete_config first.`
             );
           }

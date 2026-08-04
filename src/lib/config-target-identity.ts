@@ -51,36 +51,69 @@ export function findConfigsByTargetPath(configs: Config[], targetPath: string): 
  *    store: 8 reference rows all named "Global Agent Rules Standard"
  *    (`global-agent-rules-standard-1` through `-8`), one identical SHA-256
  *    content hash across all 8, ingested on 6 different days — the exact
- *    shape this function exists to stop. Matching on slugified name ALONE
- *    would find only the newest of the 9 and silently leave the other 8
- *    orphaned on every future `--update` too.
- *  - Slugified name match, for a re-ingest whose `--name` differs only in
- *    case or punctuation from the name that produced the existing row's slug
- *    (slug is what the store already treats as the row's stable, human-typed
- *    identity — see `uniqueSlug`).
+ *    shape this function exists to stop.
+ *  - Slugified match, for a re-ingest whose `--name` differs only in case or
+ *    punctuation from an existing row's name.
+ *
+ *    CORRECTED 2026-08-04 (todos 195272ae, Finding 1): this used to compare
+ *    the query's slug against each candidate's STORED `.slug` COLUMN
+ *    (`config.slug === wantedSlug`). That is sound only for a candidate whose
+ *    own slug was never disambiguated — the moment two rows already collide
+ *    and `uniqueSlug` has suffixed one of them (`sample-rule-1`), its stored
+ *    slug no longer equals what re-slugifying its OWN name produces, so the
+ *    old comparison went blind to it. Reproduced live: row A "Sample Rule"
+ *    (slug "sample-rule"), row B "sample rule" (slug disambiguated to
+ *    "sample-rule-1" because A already held the base slug) — querying "Sample
+ *    Rule" found only A. `add --update` then updated A, reported
+ *    `rest.length === 0` (no "N other rows share this name" warning), and
+ *    left B — the exact row a human would call a duplicate of A — untouched
+ *    and unmentioned. This is the one population the slug clause exists to
+ *    catch: it is impossible for a fresh, non-colliding row to need it, since
+ *    an un-disambiguated slug already matches via `slugify(name)` trivially.
+ *    Comparing against `slugify(config.name)` instead — recomputed from the
+ *    candidate's own name rather than trusted from its (possibly
+ *    disambiguated) stored column — fixes this without weakening the EXACT
+ *    name clause above, which still independently catches the byte-identical
+ *    case regardless: it can only ADD matches the old comparison missed, not
+ *    remove any a query's name literally shares.
  */
 export function findReferenceConfigsByName(configs: Config[], name: string): Config[] {
   const wantedSlug = slugify(name);
   return configs.filter(
-    (config) => config.kind === "reference" && (config.name === name || config.slug === wantedSlug)
+    (config) => config.kind === "reference" && (config.name === name || slugify(config.name) === wantedSlug)
   );
 }
 
 /**
- * Groups of reference-kind rows that collide on `name`, the mirror image of
+ * Groups of reference-kind rows that collide on identity, the mirror image of
  * `findDuplicateTargetPathGroups` for the identity axis reference configs
  * actually use. Only groups with more than one member are returned, so an
  * empty result means the store is clean.
+ *
+ * CORRECTED 2026-08-04 (todos 195272ae, Finding 1): grouping used to key on
+ * the raw, exact `config.name` string. `doctor` (which calls this) therefore
+ * reported a store CLEAN for two rows whose names differ only in case or
+ * punctuation — precisely the pair `findReferenceConfigsByName` above treats
+ * as one identity (see its doc comment for the reproduction). The two
+ * functions disagreeing about what "the same reference config" means was the
+ * same defect class PR #57 fixed one level up, one file down: `doctor` a
+ * store clean, `add --update` half-fixing it. Keying on `slugify(config.name)`
+ * instead makes this agree with `findReferenceConfigsByName`'s identity
+ * notion — a case/punctuation variant is now reported as a duplicate group
+ * too, not only a byte-identical one. The reported `name` is the first
+ * colliding row's own (human-authored) name, for display — the grouping key
+ * itself is never surfaced.
  */
 export function findDuplicateReferenceNameGroups(configs: Config[]): Array<{ name: string; configs: Config[] }> {
   const groups = new Map<string, Config[]>();
   for (const config of configs) {
     if (config.kind !== "reference") continue;
-    groups.set(config.name, [...(groups.get(config.name) ?? []), config]);
+    const key = slugify(config.name);
+    groups.set(key, [...(groups.get(key) ?? []), config]);
   }
   return [...groups.entries()]
     .filter(([, rows]) => rows.length > 1)
-    .map(([name, rows]) => ({ name, configs: rows }));
+    .map(([, rows]) => ({ name: rows[0]!.name, configs: rows }));
 }
 
 /**

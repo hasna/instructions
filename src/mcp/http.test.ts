@@ -16,8 +16,12 @@ import {
 import { makeTempRoot } from "../lib/test-temp-root";
 
 const servers: Array<{ stop: () => void }> = [];
+let savedApiUrl: string | undefined;
+let savedApiKey: string | undefined;
 
 beforeEach(() => {
+  savedApiUrl = process.env["HASNA_INSTRUCTIONS_API_URL"];
+  savedApiKey = process.env["HASNA_INSTRUCTIONS_API_KEY"];
   delete process.env["HASNA_INSTRUCTIONS_API_URL"];
   delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = ":memory:";
@@ -32,6 +36,20 @@ afterEach(() => {
   resetDatabase();
   delete process.env["HASNA_INSTRUCTIONS_DB_PATH"];
   delete process.env["CONFIGS_HOME"];
+  // Restore ambient state. Without this, deleting the two vars above leaks
+  // past this file: under bun test's default (non-isolated) runner every test
+  // file shares one process.env, so any test that runs later and legitimately
+  // depends on ambient HASNA_INSTRUCTIONS_API_URL/_API_KEY being present (or
+  // absent, for that matter) inherits whatever this file happened to leave
+  // behind instead of the real ambient state. Measured 2026-08-04 (todos
+  // 195272ae): this exact gap is why `config-target-identity.test.ts` showed
+  // 0 failures under plain `bun test` while failing 13/13 standalone — this
+  // file's unrestored delete ran first in the shared process and silently
+  // laundered the ambient cloud-mode config away for every file after it.
+  if (savedApiUrl !== undefined) process.env["HASNA_INSTRUCTIONS_API_URL"] = savedApiUrl;
+  else delete process.env["HASNA_INSTRUCTIONS_API_URL"];
+  if (savedApiKey !== undefined) process.env["HASNA_INSTRUCTIONS_API_KEY"] = savedApiKey;
+  else delete process.env["HASNA_INSTRUCTIONS_API_KEY"];
 });
 
 describe("configs MCP HTTP transport", () => {
