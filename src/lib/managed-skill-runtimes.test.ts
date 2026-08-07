@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -13,6 +14,7 @@ import {
   INBOX_CONVERSATIONS_MINIMUM_VERSION,
   inspectManagedSkillRuntimes,
   reconcileManagedSkillRuntimes,
+  writeSkillContractsTransactional,
 } from "./managed-skill-runtimes";
 import { tempRootPath } from "./test-temp-root";
 
@@ -192,6 +194,89 @@ describe("managed inbox skill runtime", () => {
     });
     expect(second).toMatchObject({ changed: 0, failed: 0 });
     expect(second.runtimes[0]).toMatchObject({ action: "unchanged", healthy: true });
+  });
+
+  test("preserves an earlier concurrent edit when a later target fails its stale-write check", () => {
+    const root = makeRoot("rollback-concurrent-edit");
+    const firstSkill = installInboxSkill(root, ".claude", "old-first\n");
+    const secondSkill = installInboxSkill(root, ".codex", "old-second\n");
+    let writeCount = 0;
+
+    const transaction = writeSkillContractsTransactional(
+      [
+        { path: firstSkill, content: "old-first\n", mode: 0o644 },
+        { path: secondSkill, content: "old-second\n", mode: 0o644 },
+      ],
+      canonicalSkill,
+      {
+        lstat: (path) => {
+          try {
+            return lstatSync(path);
+          } catch {
+            return null;
+          }
+        },
+        read: (path) => readFileSync(path, "utf8"),
+        write: (path, content, mode) => {
+          writeFileSync(path, content, { mode });
+          writeCount += 1;
+          if (writeCount === 1) {
+            writeFileSync(firstSkill, "concurrent-first\n");
+            writeFileSync(secondSkill, "concurrent-second\n");
+          }
+        },
+      },
+    );
+
+    expect(transaction).toEqual({
+      ok: false,
+      error: "managed skill changed after inspection; refusing a stale write",
+      rollback_conflicts: [
+        `${firstSkill}: changed after this reconciliation wrote it`,
+      ],
+    });
+    expect(readFileSync(firstSkill, "utf8")).toBe("concurrent-first\n");
+    expect(readFileSync(secondSkill, "utf8")).toBe("concurrent-second\n");
+  });
+
+  test("restores an earlier still-owned write when a later target fails its stale-write check", () => {
+    const root = makeRoot("rollback-owned-write");
+    const firstSkill = installInboxSkill(root, ".claude", "old-first\n");
+    const secondSkill = installInboxSkill(root, ".codex", "old-second\n");
+    let writeCount = 0;
+
+    const transaction = writeSkillContractsTransactional(
+      [
+        { path: firstSkill, content: "old-first\n", mode: 0o644 },
+        { path: secondSkill, content: "old-second\n", mode: 0o644 },
+      ],
+      canonicalSkill,
+      {
+        lstat: (path) => {
+          try {
+            return lstatSync(path);
+          } catch {
+            return null;
+          }
+        },
+        read: (path) => readFileSync(path, "utf8"),
+        write: (path, content, mode) => {
+          writeFileSync(path, content, { mode });
+          writeCount += 1;
+          if (writeCount === 1) {
+            writeFileSync(secondSkill, "concurrent-second\n");
+          }
+        },
+      },
+    );
+
+    expect(transaction).toEqual({
+      ok: false,
+      error: "managed skill changed after inspection; refusing a stale write",
+      rollback_conflicts: [],
+    });
+    expect(readFileSync(firstSkill, "utf8")).toBe("old-first\n");
+    expect(readFileSync(secondSkill, "utf8")).toBe("concurrent-second\n");
   });
 
   test("does not call heartbeat-only acceptance ready before channel and DM canaries", async () => {

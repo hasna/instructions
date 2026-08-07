@@ -90,6 +90,24 @@ interface SkillSnapshot {
   regular: boolean;
 }
 
+interface SkillWriteSnapshot {
+  path: string;
+  content: string;
+  mode: number;
+}
+
+interface SkillWriteFileOperations {
+  lstat(path: string): Stats | null;
+  read(path: string): string;
+  write(path: string, content: string, mode: number): void;
+}
+
+export interface SkillWriteTransactionResult {
+  ok: boolean;
+  error: string | null;
+  rollback_conflicts: string[];
+}
+
 interface InboxInspection {
   status: ManagedSkillRuntimeStatus;
   canonicalContent: string | null;
@@ -342,6 +360,78 @@ function writeAtomic(path: string, content: string, mode: number): void {
   }
 }
 
+const DEFAULT_SKILL_WRITE_FILE_OPERATIONS: SkillWriteFileOperations = {
+  lstat: lstatOrNull,
+  read: (path) => readFileSync(path, "utf8"),
+  write: writeAtomic,
+};
+
+/**
+ * Apply a set of inspected skill-contract writes as one best-effort
+ * transaction. Rollback owns a file only while it is still a regular file and
+ * still contains the canonical bytes written by this invocation. A later edit
+ * is preserved and returned as a rollback conflict instead of being replaced
+ * with the stale before-image.
+ *
+ * Exported from this internal module so the real transaction can be exercised
+ * with deterministic file-operation interleavings. It is not re-exported from
+ * the package root.
+ */
+export function writeSkillContractsTransactional(
+  snapshots: SkillWriteSnapshot[],
+  canonicalContent: string,
+  fileOperations: SkillWriteFileOperations = DEFAULT_SKILL_WRITE_FILE_OPERATIONS,
+): SkillWriteTransactionResult {
+  const written: SkillWriteSnapshot[] = [];
+
+  try {
+    for (const snapshot of snapshots) {
+      const currentStat = fileOperations.lstat(snapshot.path);
+      if (!currentStat?.isFile() || fileOperations.read(snapshot.path) !== snapshot.content) {
+        throw new Error("managed skill changed after inspection; refusing a stale write");
+      }
+      fileOperations.write(snapshot.path, canonicalContent, snapshot.mode);
+      written.push(snapshot);
+    }
+    return { ok: true, error: null, rollback_conflicts: [] };
+  } catch (error) {
+    const rollbackConflicts: string[] = [];
+
+    for (const snapshot of written.reverse()) {
+      const currentStat = fileOperations.lstat(snapshot.path);
+      if (!currentStat?.isFile()) {
+        rollbackConflicts.push(`${snapshot.path}: no longer a regular file`);
+        continue;
+      }
+
+      let currentContent: string;
+      try {
+        currentContent = fileOperations.read(snapshot.path);
+      } catch {
+        rollbackConflicts.push(`${snapshot.path}: could not read the current file`);
+        continue;
+      }
+
+      if (currentContent !== canonicalContent) {
+        rollbackConflicts.push(`${snapshot.path}: changed after this reconciliation wrote it`);
+        continue;
+      }
+
+      try {
+        fileOperations.write(snapshot.path, snapshot.content, snapshot.mode);
+      } catch {
+        rollbackConflicts.push(`${snapshot.path}: still owned but could not be restored`);
+      }
+    }
+
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      rollback_conflicts: rollbackConflicts,
+    };
+  }
+}
+
 export async function reconcileManagedSkillRuntimes(
   options: ManagedSkillRuntimeOptions = {},
 ): Promise<ManagedSkillRuntimeReconcileReport> {
@@ -403,23 +493,20 @@ export async function reconcileManagedSkillRuntimes(
     };
   }
 
-  const written: SkillSnapshot[] = [];
-  try {
-    for (const snapshot of staleSnapshots) {
-      const currentStat = lstatOrNull(snapshot.path);
-      if (!currentStat?.isFile() || readFileSync(snapshot.path, "utf8") !== snapshot.content) {
-        throw new Error("managed skill changed after inspection; refusing a stale write");
-      }
-      writeAtomic(snapshot.path, before.canonicalContent, snapshot.mode ?? 0o644);
-      written.push(snapshot);
-    }
-  } catch (error) {
-    for (const snapshot of written.reverse()) {
-      if (snapshot.content !== null) {
-        writeAtomic(snapshot.path, snapshot.content, snapshot.mode ?? 0o644);
-      }
-    }
-    const reason = error instanceof Error ? error.message : String(error);
+  const transaction = writeSkillContractsTransactional(
+    staleSnapshots.map((snapshot) => ({
+      path: snapshot.path,
+      content: snapshot.content!,
+      mode: snapshot.mode ?? 0o644,
+    })),
+    before.canonicalContent,
+  );
+  if (!transaction.ok) {
+    const rollbackConflictReason =
+      transaction.rollback_conflicts.length > 0
+        ? `; rollback conflicts: ${transaction.rollback_conflicts.join("; ")}`
+        : "";
+    const reason = `${transaction.error ?? "managed skill reconciliation failed"}${rollbackConflictReason}`;
     return {
       runtimes: [{
         ...status,
