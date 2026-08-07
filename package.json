@@ -34,7 +34,7 @@
     "generate:sdk": "bun run scripts/generate-sdk.ts",
     "kit:check": "bunx @hasna/contracts vendor-kit --check",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "env -u HASNA_INSTRUCTIONS_API_URL -u HASNA_INSTRUCTIONS_API_KEY bun test",
     "check:package-secrets": "bun run src/cli/index.tsx package-manager-scan --fail-on-findings .",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
