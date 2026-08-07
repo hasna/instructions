@@ -52,6 +52,17 @@ function outputsEqual(a: ConfigOutput[] | undefined, b: ConfigOutput[] | undefin
   return JSON.stringify(normalizeOutputs(a)) === JSON.stringify(normalizeOutputs(b));
 }
 
+const UNGUARDED_LOCAL_ENV_HELPER = '. "$HOME/.local/bin/env"';
+const GUARDED_LOCAL_ENV_HELPER = '[ -r "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"';
+
+function normalizeKnownConfigSource(known: KnownConfig, content: string): string {
+  if (known.name !== "bash-profile") return content;
+  return content
+    .split("\n")
+    .map((line) => line === UNGUARDED_LOCAL_ENV_HELPER ? GUARDED_LOCAL_ENV_HELPER : line)
+    .join("\n");
+}
+
 function outputOwnerIdsByTarget(configs: Config[]): Map<string, Set<string>> {
   const owners = new Map<string, Set<string>>();
   for (const config of configs) {
@@ -305,7 +316,7 @@ export async function syncKnown(opts: SyncKnownOptions = {}): Promise<SyncResult
     if (!existsSync(abs)) { result.skipped.push(known.path); continue; }
 
     try {
-      const rawContent = readFileSync(abs, "utf-8");
+      const rawContent = normalizeKnownConfigSource(known, readFileSync(abs, "utf-8"));
       if (rawContent.length > 500_000) { result.skipped.push(known.path + " (too large)"); continue; }
       const fmt = known.format ?? detectFormat(abs);
       // Always redact before storing
