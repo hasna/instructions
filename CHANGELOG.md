@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.4.24
+
+Publishes `0fcb0542` (#72): the renderer now REFUSES to write a managed output
+the reader would later refuse, instead of relying on headroom.
+
+0.4.23 raised the read bound on managed outputs to
+`SESSION_MANAGED_OUTPUT_MAX_BYTES` (8 MiB) and left the WRITE unbounded, so the
+two sides agreed only by luck of corpus size. `planSessionRender` now rejects
+any managed output past that bound and warns past half of it.
+
+The refusal is at PLAN time, deliberately. `planSessionRender` writes nothing,
+so a refusal has no side effects: the previous home survives intact and merely
+stale, and `session plan` / `session apply --dry-run` predict the failure rather
+than discovering it mid-write. Refusing inside `apply` would land partway
+through per-file atomic replacements and leave the home part-new, part-old with
+a manifest describing neither. Truncation was rejected because a silently
+shortened instruction home looks complete to every agent that reads it while
+missing directives.
+
+The manifest is checked alongside the provider entrypoints, because both are
+allowlisted at the same raised bound and both grow with the same corpus; a
+render that guarded only the entrypoint would move the identical wedge onto the
+manifest.
+
+The path match handles the codewith base mismatch: `SESSION_MANAGED_OUTPUT_PATHS`
+is workspace-relative and a render plan's path is target-home-relative, which
+for codewith differ by one segment. A direct comparison would guard claude and
+codex and silently miss codewith.
+
+Measured against the live corpus at release time: 44 sources render to 298,164
+bytes, 28.1x under the bound, largest single source 26,564 bytes — so no single
+addition can cross from silent to refused, and the headroom warning is
+guaranteed to fire on many renders before the refusal ever can.
+
+Also corrects a false comment claiming `SESSION_MANAGED_OUTPUT_PATHS` is every
+path in `projectContextSessionGuardPaths()`. It is deliberately narrower: the
+project-context manifest, cache and fragment stay at `FOREIGN_INPUT_MAX_BYTES`.
+
+Known residual, tracked as `OPE15-00068`: a home that is ALREADY oversized stays
+unrecoverable through this tool, because planning reads it before it can decide
+to replace it. This release prevents the wedge; it does not cure one.
+
 ## 0.4.23
 
 Publishes `340aecac` (#69): the renderer no longer writes a managed instruction
