@@ -4,7 +4,7 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from "node
 import { join } from "node:path";
 import { getDatabase, resetDatabase } from "../db/database";
 import { createConfig, listConfigs } from "../db/configs";
-import { diffConfig, detectCategory, detectAgent, detectFormat, syncToDisk } from "./sync";
+import { diffConfig, detectCategory, detectAgent, detectFormat, syncKnown, syncToDisk } from "./sync";
 import { syncFromDir } from "./sync-dir";
 import type { ConfigAgent } from "../types";
 import { tempRootPath } from "./test-temp-root";
@@ -89,6 +89,62 @@ describe("syncFromDir", () => {
     const db = getDatabase();
     const result = await syncFromDir("/nonexistent/path", { store: new LocalConfigStore(db) });
     expect(result.skipped.length).toBeGreaterThan(0);
+  });
+});
+
+describe("syncKnown shell source safety", () => {
+  function runLoginShell(home: string, command: string) {
+    const result = Bun.spawnSync(["bash", "--login", "-c", command], {
+      cwd: home,
+      env: {
+        ...process.env,
+        HOME: home,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      status: result.exitCode,
+      stdout: result.stdout.toString(),
+      stderr: result.stderr.toString(),
+    };
+  }
+
+  async function syncAndApplyBashProfile() {
+    process.env["CONFIGS_HOME"] = tmpDir;
+    const db = getDatabase();
+    const store = new LocalConfigStore(db);
+    const result = await syncKnown({ store, category: "shell" });
+    expect(result.added).toBe(1);
+    const config = await store.getConfig("bash-profile");
+    await syncToDisk({ store, category: "shell" });
+    return config;
+  }
+
+  test("guards the optional local env helper when it is absent", async () => {
+    writeFileSync(join(tmpDir, ".bash_profile"), '. "$HOME/.local/bin/env"\n');
+
+    const config = await syncAndApplyBashProfile();
+    const login = runLoginShell(tmpDir, 'printf "started"');
+
+    expect(config.content).toContain('[ -r "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"');
+    expect(login.status).toBe(0);
+    expect(login.stdout).toBe("started");
+    expect(login.stderr).toBe("");
+  });
+
+  test("preserves local env initialization when the helper is present", async () => {
+    mkdirSync(join(tmpDir, ".local", "bin"), { recursive: true });
+    writeFileSync(join(tmpDir, ".local", "bin", "env"), "export HASNA_LOCAL_ENV_HELPER_LOADED=present\n");
+    writeFileSync(join(tmpDir, ".bash_profile"), '. "$HOME/.local/bin/env"\n');
+
+    const config = await syncAndApplyBashProfile();
+    const login = runLoginShell(tmpDir, 'printf "%s" "${HASNA_LOCAL_ENV_HELPER_LOADED:-missing}"');
+
+    expect(config.content).toContain('[ -r "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"');
+    expect(login.status).toBe(0);
+    expect(login.stdout).toBe("present");
+    expect(login.stderr).toBe("");
   });
 });
 
