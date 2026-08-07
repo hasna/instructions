@@ -17,12 +17,17 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+  FOREIGN_INPUT_MAX_BYTES,
   PROJECT_CONTEXT_FRAGMENT_PATH,
   PROJECT_CONTEXT_MANAGED_COMMENT,
   PROJECT_CONTEXT_MANIFEST_PATH,
   ProjectContextError,
+  SESSION_MANAGED_OUTPUT_MAX_BYTES,
+  SESSION_MANAGED_OUTPUT_PATHS,
   applyProjectContext,
   computeProjectContextSourceHash,
+  managedObservationMaxBytes,
+  observeProjectContextSessionGuard,
   parseProjectContextBundle,
   planProjectContext,
   removeProjectContextCoordinatedFile,
@@ -1697,5 +1702,46 @@ describe("cache, revision, crash, and race safety", () => {
         expect(readFileSync(join(snapshotsDir, entry), "utf8")).not.toContain("PRIVATE USER PROSE");
       }
     }
+  });
+});
+
+// Regression: todos b46ca2a3. Session render wrote AGENTS.md with no size bound while the
+// guard that reads it back was capped at 256 KiB, so a home whose instruction corpus grew
+// past that cap wedged permanently and silently — every later plan/apply for that home threw
+// PROJECT_CONTEXT_INPUT_TOO_LARGE before it could do any work. Measured on station01
+// 2026-08-07 against a real 273,860-byte ~/.codex/AGENTS.md: clean home rc=0, same command
+// with the oversized file present rc=1.
+describe("managed output read bound", () => {
+  const OVERSIZED_BYTES = FOREIGN_INPUT_MAX_BYTES + 16 * 1024;
+
+  test("the fixture exceeds the foreign-input bound, so these tests can fail", () => {
+    expect(OVERSIZED_BYTES).toBeGreaterThan(FOREIGN_INPUT_MAX_BYTES);
+    expect(FOREIGN_INPUT_MAX_BYTES).toBeLessThan(SESSION_MANAGED_OUTPUT_MAX_BYTES);
+  });
+
+  test("the session guard hashes a managed target larger than the foreign-input bound", () => {
+    const target = join(tmpRoot, "AGENTS.md");
+    const body = "x".repeat(OVERSIZED_BYTES);
+    writeFileSync(target, body);
+    expect(statSync(target).size).toBeGreaterThan(FOREIGN_INPUT_MAX_BYTES);
+
+    const guard = observeProjectContextSessionGuard({ tool: "codex", target_home: tmpRoot });
+    expect(guard).not.toBeNull();
+    const observed = guard?.observed_hashes.find((entry) => entry.path === target);
+    expect(observed).toBeDefined();
+    expect(observed?.sha256).toBe(createHash("sha256").update(body).digest("hex"));
+  });
+
+  test("every managed session-render output gets the managed bound", () => {
+    expect(SESSION_MANAGED_OUTPUT_PATHS.length).toBeGreaterThan(0);
+    for (const relativePath of SESSION_MANAGED_OUTPUT_PATHS) {
+      expect(managedObservationMaxBytes(relativePath)).toBe(SESSION_MANAGED_OUTPUT_MAX_BYTES);
+    }
+  });
+
+  test("foreign input keeps the tight bound", () => {
+    expect(managedObservationMaxBytes("some/other/file.md")).toBe(FOREIGN_INPUT_MAX_BYTES);
+    expect(managedObservationMaxBytes(".hasna/instructions/01-global-fix-on-sight.md")).toBe(FOREIGN_INPUT_MAX_BYTES);
+    expect(managedObservationMaxBytes("opencode.json")).toBe(FOREIGN_INPUT_MAX_BYTES);
   });
 });
