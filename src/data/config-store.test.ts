@@ -9,6 +9,7 @@ import {
   resolveCloudConfig,
   resolveConfigStore,
 } from "./config-store.js";
+import type { MachineContext } from "../types/index.js";
 
 interface RecordedCall {
   url: string;
@@ -65,6 +66,44 @@ const SAMPLE = {
   updated_at: "",
   synced_at: null,
 };
+const SAMPLE_PROFILE = {
+  id: "p1",
+  name: "Profile",
+  slug: "profile",
+  description: null,
+  selectors: { hostnames: ["station02"] },
+  variables: {},
+  created_at: "",
+  updated_at: "",
+};
+const SAMPLE_MACHINE: MachineContext = {
+  id: "machine-1",
+  hostname: "station02",
+  os: "linux",
+  arch: "x64",
+  os_family: "linux",
+  home_dir: "/tmp",
+  workspace_root: "/tmp/workspace",
+  bun_bin_dir: "/tmp/bin",
+  bun_path: "/tmp/bin/bun",
+  path_prefix: "/tmp/bin",
+  last_applied_at: null,
+  created_at: "",
+};
+
+function page<T>(items: T[], total = items.length, limit = 20, cursor = 0) {
+  const complete = cursor + items.length >= total;
+  return {
+    items,
+    total,
+    limit,
+    cursor,
+    next_cursor: complete ? null : cursor + items.length,
+    has_more: !complete,
+    complete,
+    truncated: false,
+  };
+}
 
 let active: { restore(): void } | undefined;
 afterEach(() => {
@@ -170,11 +209,142 @@ describe("CloudConfigStore CRUD mapping", () => {
   });
 
   test("getProfileConfigs -> GET /v1/profiles/:id embeds configs", async () => {
-    const m = mockFetch(() => ({ json: { profile: { id: "p1", name: "P", slug: "p", configs: [SAMPLE] } } }));
+    const m = mockFetch(() => ({ json: { profile: { ...SAMPLE_PROFILE, configs: [SAMPLE] }, configs: page([SAMPLE]) } }));
     active = m;
     const store = new CloudConfigStore(CONFIG);
     const configs = await store.getProfileConfigs("p");
     expect(configs).toHaveLength(1);
+  });
+
+  test("listProfilesPage sends producer bounds and requires complete metadata", async () => {
+    const m = mockFetch(() => ({ json: page([SAMPLE_PROFILE], 3, 2, 2) }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.listProfilesPage({ limit: 2, cursor: 2 });
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles?limit=2&cursor=2");
+    expect(result).toMatchObject({ total: 3, limit: 2, cursor: 2, complete: true, truncated: false });
+  });
+
+  test("getProfileConfigsPage sends membership bounds", async () => {
+    const m = mockFetch(() => ({
+      json: {
+        profile: { ...SAMPLE_PROFILE, configs: [SAMPLE] },
+        configs: page([SAMPLE], 5, 2, 4),
+      },
+    }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.getProfileConfigsPage("profile", { limit: 2, cursor: 4 });
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles/profile?limit=2&cursor=4");
+    expect(result).toMatchObject({ total: 5, cursor: 4, complete: true, truncated: false });
+  });
+
+  test("resolveProfileForMachineRead sends the source scan bound", async () => {
+    const m = mockFetch(() => ({
+      json: {
+        profile: SAMPLE_PROFILE,
+        scanned: 5,
+        total: 5,
+        batch_limit: 2,
+        complete: true,
+        truncated: false,
+      },
+    }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.resolveProfileForMachineRead(SAMPLE_MACHINE, { limit: 2 });
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles/resolve?hostname=station02&os=linux&arch=x64&limit=2");
+    expect(result).toMatchObject({ scanned: 5, total: 5, batch_limit: 2, complete: true, truncated: false });
+  });
+
+  test("new client sends explicit default bounds and safely pages an old server's complete profile array", async () => {
+    const legacyProfiles = Array.from({ length: 5 }, (_, index) => ({
+      ...SAMPLE_PROFILE,
+      id: `p${index + 1}`,
+      name: `Profile ${index + 1}`,
+      slug: `profile-${index + 1}`,
+    }));
+    const m = mockFetch(() => ({ json: { profiles: legacyProfiles, count: legacyProfiles.length } }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.listProfilesPage();
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles?limit=20&cursor=0");
+    expect(result.items.map((profile) => profile.slug)).toEqual(legacyProfiles.map((profile) => profile.slug));
+    expect(result).toMatchObject({
+      total: 5,
+      limit: 20,
+      cursor: 0,
+      complete: true,
+      truncated: false,
+    });
+  });
+
+  test("new client safely pages an old server's complete embedded profile membership", async () => {
+    const legacyConfigs = Array.from({ length: 5 }, (_, index) => ({
+      ...SAMPLE,
+      id: `cfg-${index + 1}`,
+      name: `Config ${index + 1}`,
+      slug: `config-${index + 1}`,
+    }));
+    const m = mockFetch(() => ({
+      json: { profile: { ...SAMPLE_PROFILE, configs: legacyConfigs } },
+    }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.getProfileConfigsPage("profile", { limit: 2, cursor: 2 });
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles/profile?limit=2&cursor=2");
+    expect(result.items.map((config) => config.slug)).toEqual(["config-3", "config-4"]);
+    expect(result).toMatchObject({
+      total: 5,
+      limit: 2,
+      cursor: 2,
+      next_cursor: 4,
+      complete: false,
+      truncated: false,
+    });
+  });
+
+  test("new client labels an old server's complete resolver response without inventing bounded counts", async () => {
+    const m = mockFetch(() => ({ json: { profile: SAMPLE_PROFILE } }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.resolveProfileForMachineRead(
+      { ...SAMPLE_MACHINE, os: null, arch: null },
+      { limit: 2 },
+    );
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles/resolve?hostname=station02&limit=2");
+    expect(result).toMatchObject({
+      profile: SAMPLE_PROFILE,
+      scanned: null,
+      total: null,
+      batch_limit: null,
+      source_bounded: false,
+      complete: true,
+      truncated: false,
+    });
+  });
+
+  test("new client safely maps an old server's no-match 404 to a complete legacy result", async () => {
+    const m = mockFetch(() => ({ status: 404, json: { error: "no matching machine-aware profile" } }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.resolveProfileForMachineRead({ ...SAMPLE_MACHINE, hostname: "missing" }, { limit: 2 });
+
+    expect(result).toMatchObject({
+      profile: null,
+      scanned: null,
+      total: null,
+      batch_limit: null,
+      source_bounded: false,
+      complete: true,
+      truncated: false,
+    });
   });
 });
 

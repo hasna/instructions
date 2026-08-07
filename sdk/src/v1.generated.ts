@@ -2,7 +2,7 @@
 // Regenerate: bun run scripts/generate-sdk.ts
 
 // @generated from OpenAPI by @hasna/contracts SDK generator — DO NOT EDIT.
-// Source: Instructions V1 API 0.3.0
+// Source: Instructions V1 API 0.4.19
 
 export interface Config { "id"?: string; "name"?: string; "slug"?: string; "kind"?: string; "category"?: string; "agent"?: string; "target_path"?: string | null; "outputs"?: Array<Record<string, unknown>>; "format"?: string; "content"?: string; "description"?: string | null; "tags"?: Array<string>; "is_template"?: boolean; "version"?: number; "created_at"?: string; "updated_at"?: string; "synced_at"?: string | null }
 
@@ -13,6 +13,16 @@ export interface CreateConfigInput { "name": string; "category": string; "conten
 export interface UpdateConfigInput { "name"?: string; "category"?: string; "agent"?: string; "content"?: string; "description"?: string; "tags"?: Array<string>; "is_template"?: boolean }
 
 export interface CreateProfileInput { "name": string; "description"?: string; "selectors"?: Record<string, unknown>; "variables"?: Record<string, unknown> }
+
+export interface ProfileWithConfigs { "id"?: string; "name"?: string; "slug"?: string; "description"?: string | null; "selectors"?: Record<string, unknown>; "variables"?: Record<string, unknown>; "created_at"?: string; "updated_at"?: string; "configs"?: Array<Config> }
+
+export interface BoundedProfilePage { "profiles"?: Array<Profile>; "items": Array<Profile>; "count"?: number; "total": number; "limit": number; "cursor": number; "next_cursor": number | null; "has_more": boolean; "complete": boolean; "truncated": boolean; "source_bounded": boolean }
+
+export interface BoundedConfigPage { "items": Array<Config>; "total": number; "limit": number; "cursor": number; "next_cursor": number | null; "has_more": boolean; "complete": boolean; "truncated": boolean; "source_bounded": boolean }
+
+export interface ProfileShowResponse { "profile": ProfileWithConfigs; "configs": BoundedConfigPage }
+
+export interface ProfileResolutionRead { "profile": Profile | null; "scanned": number | null; "total": number | null; "batch_limit": number | null; "source_bounded": boolean; "complete": boolean; "truncated": boolean }
 
 export interface InstructionsV1ClientOptions {
   /** Base URL, e.g. process.env.APP_API_URL. */
@@ -132,11 +142,11 @@ export class InstructionsV1Client {
       });
     }
 
-    /** List profiles */
-    async listProfiles(init?: RequestInit): Promise<{ "profiles"?: Array<Profile>; "count"?: number }> {
+    /** List profiles with producer-side bounds */
+    async listProfiles(query?: { "limit"?: number; "cursor"?: number }, init?: RequestInit): Promise<BoundedProfilePage> {
       return this.request("GET", `/v1/profiles`, {
         body: undefined,
-        query: undefined,
+        query,
         init,
       });
     }
@@ -150,11 +160,20 @@ export class InstructionsV1Client {
       });
     }
 
+    /** Resolve a machine profile by scanning producer-bounded batches */
+    async resolveProfile(query?: { "hostname"?: string; "os"?: string; "arch"?: string; "limit"?: number }, init?: RequestInit): Promise<ProfileResolutionRead> {
+      return this.request("GET", `/v1/profiles/resolve`, {
+        body: undefined,
+        query,
+        init,
+      });
+    }
+
     /** Get a profile (with its configs) by id or slug */
-    async getProfile(id: string, init?: RequestInit): Promise<{ "profile"?: Profile }> {
+    async getProfile(id: string, query?: { "limit"?: number; "cursor"?: number }, init?: RequestInit): Promise<ProfileShowResponse> {
       return this.request("GET", `/v1/profiles/${encodeURIComponent(String(id))}`, {
         body: undefined,
-        query: undefined,
+        query,
         init,
       });
     }

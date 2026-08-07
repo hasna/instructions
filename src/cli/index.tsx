@@ -329,10 +329,12 @@ function formatProfileVariables(profile: Pick<Profile, "variables">): string {
 async function getMachineProfileContext(
   opts: { hostname?: string; os?: string; arch?: string },
   store: ConfigStore,
+  readOptions: { limit?: unknown } = {},
 ) {
   const machine = detectMachineContext({ hostname: opts.hostname, os: opts.os, arch: opts.arch });
-  const profile = await store.resolveProfileForMachine(machine);
-  return { machine, profile, vars: resolveProfileVariables(profile, machine) };
+  const resolution = await store.resolveProfileForMachineRead(machine, readOptions);
+  const profile = resolution.profile;
+  return { machine, profile, resolution, vars: resolveProfileVariables(profile, machine) };
 }
 
 // ── list ─────────────────────────────────────────────────────────────────────
@@ -830,24 +832,23 @@ profileCmd.command("list").description("List all profiles")
   .option("-f, --format <fmt>", "compact|table|json", "compact")
   .option("--verbose", "show expanded profile metadata")
   .option("--json", "output full profiles as JSON")
-  .option("--limit <n>", `max rows for human output (default ${DEFAULT_LIST_LIMIT})`)
-  .option("--cursor <n>", "zero-based pagination cursor for human output")
+  .option("--limit <n>", `max rows requested from the source (default ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "zero-based source pagination cursor")
   .action(async (opts) => {
   const fmt = opts.json ? "json" : opts.verbose ? "table" : opts.brief ? "compact" : opts.format;
   const store = resolveConfigStore();
-  const profiles = await store.listProfiles();
-  if (fmt === "json") { printJson(profiles); return; }
-  if (profiles.length === 0) { console.log(chalk.dim("No profiles.")); return; }
-  const page = paginate(profiles, { limit: opts.limit, cursor: opts.cursor });
+  const page = await store.listProfilesPage({ limit: opts.limit, cursor: opts.cursor });
+  if (fmt === "json") { printJson(page); return; }
+  if (page.total === 0) { console.log(chalk.dim("No profiles.")); return; }
   if (fmt === "compact") console.log(`${pad("slug", 28)} ${pad("configs", 8)} ${pad("match", 36)} vars`);
   for (const p of page.items) {
+    const configCount = (await store.getProfileConfigsPage(p.id, { limit: 1 })).total;
     if (fmt === "compact") {
       const selectorSummary = formatProfileSelectorSummary(p);
-      console.log(`${pad(p.slug, 28)} ${pad(String((await store.getProfileConfigs(p.id)).length), 8)} ${pad(selectorSummary || "-", 36)} ${Object.keys(p.variables).length}`);
+      console.log(`${pad(p.slug, 28)} ${pad(String(configCount), 8)} ${pad(selectorSummary || "-", 36)} ${Object.keys(p.variables).length}`);
       continue;
     }
-    const configs = await store.getProfileConfigs(p.id);
-    console.log(`${chalk.bold(p.name)} ${chalk.dim(`(${p.slug})`)} — ${configs.length} config(s)`);
+    console.log(`${chalk.bold(p.name)} ${chalk.dim(`(${p.slug})`)} — ${configCount} config(s)`);
     if (p.description) console.log(`  ${chalk.dim(p.description)}`);
     const selectorSummary = formatProfileSelectorSummary(p);
     if (selectorSummary) console.log(`  ${chalk.dim(`match: ${selectorSummary}`)}`);
@@ -902,19 +903,23 @@ profileCmd.command("update <id>").description("Update an existing profile's vari
 profileCmd.command("show <id>").description("Show profile and its configs")
   .option("--limit <n>", `max config rows (default ${DEFAULT_LIST_LIMIT})`)
   .option("--cursor <n>", "zero-based pagination cursor")
+  .option("--json", "output the profile and bounded membership page as JSON")
   .action(async (id, opts) => {
   try {
     const store = resolveConfigStore();
     const p = await store.getProfile(id);
-    const configs = await store.getProfileConfigs(id);
+    const page = await store.getProfileConfigsPage(id, { limit: opts.limit, cursor: opts.cursor });
+    if (opts.json) {
+      printJson({ profile: p, configs: page });
+      return;
+    }
     console.log(chalk.bold(p.name) + chalk.dim(` (${p.slug})`));
     if (p.description) console.log(chalk.dim(p.description));
     const selectorSummary = formatProfileSelectorSummary(p);
     if (selectorSummary) console.log(chalk.dim(`match: ${selectorSummary}`));
     const varSummary = formatProfileVariables(p);
     if (varSummary) console.log(chalk.dim(`vars: ${varSummary}`));
-    console.log(chalk.cyan(`${configs.length} config(s):`));
-    const page = paginate(configs, { limit: opts.limit, cursor: opts.cursor });
+    console.log(chalk.cyan(`${page.total} config(s):`));
     for (const c of page.items) console.log(`  ${c.slug} ${chalk.dim(`[${c.category}/${c.agent}]`)}`);
     if (page.has_more) {
       console.log(chalk.dim(`Showing ${page.items.length} of ${page.total}. Next: configs profile show ${id} --cursor ${page.next_cursor} --limit ${page.limit}`));
@@ -996,9 +1001,16 @@ profileCmd.command("resolve").description("Resolve the matching machine-aware pr
   .option("--hostname <hostname>", "override detected hostname")
   .option("--os <os>", "override detected OS")
   .option("--arch <arch>", "override detected arch")
+  .option("--limit <n>", `maximum profiles per source scan batch (default ${DEFAULT_LIST_LIMIT})`)
+  .option("--json", "output the complete bounded resolution read as JSON")
   .action(async (opts) => {
     const store = resolveConfigStore();
-    const { machine, profile, vars } = await getMachineProfileContext(opts, store);
+    const { machine, profile, resolution, vars } = await getMachineProfileContext(opts, store, { limit: opts.limit });
+    if (opts.json) {
+      printJson({ ...resolution, machine, vars });
+      if (!profile) process.exitCode = 1;
+      return;
+    }
     if (!profile) {
       console.log(chalk.yellow(`No matching profile for ${machine.hostname} ${machine.os_family}/${machine.arch}`));
       process.exit(1);

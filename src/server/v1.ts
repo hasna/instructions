@@ -22,6 +22,20 @@ function errorResponse(status: number, message: string, extra?: Record<string, u
   return json({ error: message, ...(extra ?? {}) }, status);
 }
 
+function completeLegacyPage<T>(items: T[]) {
+  return {
+    items,
+    total: items.length,
+    limit: Math.max(items.length, 1),
+    cursor: 0,
+    next_cursor: null,
+    has_more: false,
+    complete: true,
+    truncated: false,
+    source_bounded: false,
+  } as const;
+}
+
 async function readJson<T>(req: Request): Promise<T | null> {
   try {
     const text = await req.text();
@@ -134,8 +148,15 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
     if (resource === "profiles") {
       if (!id) {
         if (method === "GET") {
-          const profiles = await store.listProfiles(client);
-          return json({ profiles, count: profiles.length });
+          if (!url.searchParams.has("limit") && !url.searchParams.has("cursor")) {
+            const profiles = await store.listProfiles(client);
+            return json({ ...completeLegacyPage(profiles), profiles, count: profiles.length });
+          }
+          const page = await store.listProfilesPage(client, {
+            limit: url.searchParams.get("limit") ?? undefined,
+            cursor: url.searchParams.get("cursor") ?? undefined,
+          });
+          return json({ ...page, profiles: page.items, count: page.items.length });
         }
         if (method === "POST") {
           const body = await readJson<Parameters<typeof store.createProfile>[1]>(req);
@@ -152,13 +173,16 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
       // /v1/profiles/resolve?hostname=&os=&arch=
       if (id === "resolve") {
         if (method !== "GET") return errorResponse(405, `method ${method} not allowed on /v1/profiles/resolve`);
-        const profile = await store.resolveProfileForMachine(client, {
-          hostname: url.searchParams.get("hostname") ?? undefined,
-          os: url.searchParams.get("os") ?? undefined,
-          arch: url.searchParams.get("arch") ?? undefined,
-        });
-        if (!profile) return errorResponse(404, "no matching machine-aware profile");
-        return json({ profile });
+        const resolution = await store.resolveProfileForMachineRead(
+          client,
+          {
+            hostname: url.searchParams.get("hostname") ?? undefined,
+            os: url.searchParams.get("os") ?? undefined,
+            arch: url.searchParams.get("arch") ?? undefined,
+          },
+          { limit: url.searchParams.get("limit") ?? undefined },
+        );
+        return json(resolution);
       }
       // /v1/profiles/:id/configs  and  /v1/profiles/:id/configs/:configId
       if (action === "configs") {
@@ -178,8 +202,18 @@ export async function handleV1Request(req: Request, url: URL): Promise<Response 
       if (action) return errorResponse(404, `unknown profile action: ${action}`);
       if (method === "GET") {
         const profile = await store.getProfile(client, id);
-        const configs = await store.getProfileConfigs(client, id);
-        return json({ profile: { ...profile, configs } });
+        if (!url.searchParams.has("limit") && !url.searchParams.has("cursor")) {
+          const legacyConfigs = await store.getProfileConfigs(client, id);
+          return json({
+            profile: { ...profile, configs: legacyConfigs },
+            configs: completeLegacyPage(legacyConfigs),
+          });
+        }
+        const configs = await store.getProfileConfigsPage(client, id, {
+          limit: url.searchParams.get("limit") ?? undefined,
+          cursor: url.searchParams.get("cursor") ?? undefined,
+        });
+        return json({ profile: { ...profile, configs: configs.items }, configs });
       }
       if (method === "PATCH" || method === "PUT") {
         const body = await readJson<Parameters<typeof store.updateProfile>[2]>(req);
