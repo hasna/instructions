@@ -28,10 +28,10 @@ import {
   createProfile as dbCreateProfile,
   deleteProfile as dbDeleteProfile,
   getProfile as dbGetProfile,
-  getProfileConfigs as dbGetProfileConfigs,
-  listProfiles as dbListProfiles,
+  getProfileConfigsPage as dbGetProfileConfigsPage,
+  listProfilesPage as dbListProfilesPage,
   removeConfigFromProfile as dbRemoveConfigFromProfile,
-  resolveProfileForMachine as dbResolveProfileForMachine,
+  resolveProfileForMachineRead as dbResolveProfileForMachineRead,
   updateProfile as dbUpdateProfile,
 } from "../db/profiles.js";
 import {
@@ -57,6 +57,9 @@ import type {
   Machine,
   MachineContext,
   Profile,
+  BoundedReadOptions,
+  BoundedReadPage,
+  ProfileResolutionRead,
   UpdateConfigInput,
   UpdateProfileInput,
 } from "../types/index.js";
@@ -72,6 +75,33 @@ export class CloudHttpError extends Error {
     super(message);
     this.name = "CloudHttpError";
   }
+}
+
+function parseBoundedPagePayload<T>(value: unknown, label: string): BoundedReadPage<T> {
+  const page = value as Partial<BoundedReadPage<T>> | null;
+  const consumed = Number(page?.cursor) + (page?.items?.length ?? 0);
+  const complete = Boolean(page && Number.isSafeInteger(page.total) && consumed >= Number(page.total));
+  if (
+    !page ||
+    !Array.isArray(page.items) ||
+    !Number.isSafeInteger(page.total) ||
+    Number(page.total) < 0 ||
+    !Number.isSafeInteger(page.limit) ||
+    Number(page.limit) < 1 ||
+    !Number.isSafeInteger(page.cursor) ||
+    Number(page.cursor) < 0 ||
+    page.items.length > Number(page.limit) ||
+    typeof page.has_more !== "boolean" ||
+    typeof page.complete !== "boolean" ||
+    page.truncated !== false ||
+    (page.next_cursor !== null && !Number.isSafeInteger(page.next_cursor)) ||
+    page.complete !== complete ||
+    page.has_more !== !complete ||
+    page.next_cursor !== (complete ? null : consumed)
+  ) {
+    throw new CloudHttpError(502, `${label} returned an invalid or truncated bounded-read envelope`, value);
+  }
+  return page as BoundedReadPage<T>;
 }
 
 const API_URL_ENV = "HASNA_INSTRUCTIONS_API_URL";
@@ -160,14 +190,17 @@ export interface ConfigStore {
   pruneSnapshots(configId: string, keep?: number): Promise<number>;
   // Profiles
   listProfiles(): Promise<Profile[]>;
+  listProfilesPage(options?: BoundedReadOptions): Promise<BoundedReadPage<Profile>>;
   getProfile(idOrSlug: string): Promise<Profile>;
   getProfileConfigs(idOrSlug: string): Promise<Config[]>;
+  getProfileConfigsPage(idOrSlug: string, options?: BoundedReadOptions): Promise<BoundedReadPage<Config>>;
   createProfile(input: CreateProfileInput): Promise<Profile>;
   updateProfile(idOrSlug: string, input: UpdateProfileInput): Promise<Profile>;
   deleteProfile(idOrSlug: string): Promise<void>;
   addConfigToProfile(profileIdOrSlug: string, configId: string): Promise<void>;
   removeConfigFromProfile(profileIdOrSlug: string, configId: string): Promise<void>;
   resolveProfileForMachine(machine?: MachineContext): Promise<Profile | null>;
+  resolveProfileForMachineRead(machine?: MachineContext, options?: BoundedReadOptions): Promise<ProfileResolutionRead>;
   // Machines
   registerMachine(hostname?: string, os?: string, arch?: string): Promise<Machine>;
   updateMachineApplied(hostname?: string): Promise<void>;
@@ -232,13 +265,33 @@ export class LocalConfigStore implements ConfigStore {
   }
   // Profiles
   async listProfiles(): Promise<Profile[]> {
-    return dbListProfiles(this.db);
+    const profiles: Profile[] = [];
+    let cursor = 0;
+    while (true) {
+      const page = await this.listProfilesPage({ limit: 100, cursor });
+      profiles.push(...page.items);
+      if (page.complete) return profiles;
+      cursor = page.next_cursor!;
+    }
+  }
+  async listProfilesPage(options: BoundedReadOptions = {}): Promise<BoundedReadPage<Profile>> {
+    return dbListProfilesPage(options, this.db);
   }
   async getProfile(idOrSlug: string): Promise<Profile> {
     return dbGetProfile(idOrSlug, this.db);
   }
   async getProfileConfigs(idOrSlug: string): Promise<Config[]> {
-    return dbGetProfileConfigs(idOrSlug, this.db);
+    const configs: Config[] = [];
+    let cursor = 0;
+    while (true) {
+      const page = await this.getProfileConfigsPage(idOrSlug, { limit: 100, cursor });
+      configs.push(...page.items);
+      if (page.complete) return configs;
+      cursor = page.next_cursor!;
+    }
+  }
+  async getProfileConfigsPage(idOrSlug: string, options: BoundedReadOptions = {}): Promise<BoundedReadPage<Config>> {
+    return dbGetProfileConfigsPage(idOrSlug, options, this.db);
   }
   async createProfile(input: CreateProfileInput): Promise<Profile> {
     return dbCreateProfile(input, this.db);
@@ -256,9 +309,15 @@ export class LocalConfigStore implements ConfigStore {
     dbRemoveConfigFromProfile(profileIdOrSlug, configId, this.db);
   }
   async resolveProfileForMachine(machine?: MachineContext): Promise<Profile | null> {
+    return (await this.resolveProfileForMachineRead(machine)).profile;
+  }
+  async resolveProfileForMachineRead(
+    machine?: MachineContext,
+    options: BoundedReadOptions = {},
+  ): Promise<ProfileResolutionRead> {
     return machine
-      ? dbResolveProfileForMachine(machine, this.db)
-      : dbResolveProfileForMachine(undefined, this.db);
+      ? dbResolveProfileForMachineRead(machine, options, this.db)
+      : dbResolveProfileForMachineRead(undefined, options, this.db);
   }
   // Machines
   async registerMachine(hostname?: string, os?: string, arch?: string): Promise<Machine> {
@@ -455,8 +514,26 @@ export class CloudConfigStore implements ConfigStore {
 
   // Profiles
   async listProfiles(): Promise<Profile[]> {
-    const { data } = await this.request<{ profiles: Profile[] }>("GET", "/profiles");
-    return data?.profiles ?? [];
+    const profiles: Profile[] = [];
+    let cursor = 0;
+    while (true) {
+      const page = await this.listProfilesPage({ limit: 100, cursor });
+      profiles.push(...page.items);
+      if (page.complete) return profiles;
+      cursor = page.next_cursor!;
+    }
+  }
+
+  async listProfilesPage(options: BoundedReadOptions = {}): Promise<BoundedReadPage<Profile>> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor !== undefined) params.set("cursor", String(options.cursor));
+    const qs = params.toString();
+    const { data } = await this.request<BoundedReadPage<Profile>>(
+      "GET",
+      `/profiles${qs ? `?${qs}` : ""}`,
+    );
+    return parseBoundedPagePayload<Profile>(data, "profile list");
   }
 
   async getProfile(idOrSlug: string): Promise<Profile> {
@@ -472,14 +549,32 @@ export class CloudConfigStore implements ConfigStore {
   }
 
   async getProfileConfigs(idOrSlug: string): Promise<Config[]> {
-    const { status, data } = await this.request<{ profile: Profile & { configs?: Config[] } }>(
+    const configs: Config[] = [];
+    let cursor = 0;
+    while (true) {
+      const page = await this.getProfileConfigsPage(idOrSlug, { limit: 100, cursor });
+      configs.push(...page.items);
+      if (page.complete) return configs;
+      cursor = page.next_cursor!;
+    }
+  }
+
+  async getProfileConfigsPage(
+    idOrSlug: string,
+    options: BoundedReadOptions = {},
+  ): Promise<BoundedReadPage<Config>> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor !== undefined) params.set("cursor", String(options.cursor));
+    const qs = params.toString();
+    const { status, data } = await this.request<{ profile: Profile; configs: BoundedReadPage<Config> }>(
       "GET",
-      `/profiles/${encodeURIComponent(idOrSlug)}`,
+      `/profiles/${encodeURIComponent(idOrSlug)}${qs ? `?${qs}` : ""}`,
       undefined,
       { allow404: true },
     );
     if (status === 404 || !data?.profile) throw new ProfileNotFoundError(idOrSlug);
-    return data.profile.configs ?? [];
+    return parseBoundedPagePayload<Config>(data.configs, "profile membership");
   }
 
   async createProfile(input: CreateProfileInput): Promise<Profile> {
@@ -527,19 +622,27 @@ export class CloudConfigStore implements ConfigStore {
   }
 
   async resolveProfileForMachine(machine?: MachineContext): Promise<Profile | null> {
+    return (await this.resolveProfileForMachineRead(machine)).profile;
+  }
+
+  async resolveProfileForMachineRead(
+    machine?: MachineContext,
+    options: BoundedReadOptions = {},
+  ): Promise<ProfileResolutionRead> {
     const params = new URLSearchParams();
     if (machine?.hostname) params.set("hostname", machine.hostname);
     if (machine?.os) params.set("os", machine.os);
     if (machine?.arch) params.set("arch", machine.arch);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
     const qs = params.toString();
-    const { status, data } = await this.request<{ profile: Profile | null }>(
+    const { data } = await this.request<ProfileResolutionRead>(
       "GET",
       `/profiles/resolve${qs ? `?${qs}` : ""}`,
-      undefined,
-      { allow404: true },
     );
-    if (status === 404 || !data?.profile) return null;
-    return data.profile;
+    if (!data || data.complete !== true || data.truncated !== false) {
+      throw new CloudHttpError(502, "profile resolve returned an incomplete or truncated read", data);
+    }
+    return data;
   }
 
   // Machines

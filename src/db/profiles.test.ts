@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { getDatabase, resetDatabase } from "./database";
 import { createConfig } from "./configs";
-import { createProfile, getProfile, listProfiles, updateProfile, deleteProfile, addConfigToProfile, removeConfigFromProfile, getProfileConfigs, resolveProfileForMachine } from "./profiles";
+import { createProfile, getProfile, listProfiles, listProfilesPage, updateProfile, deleteProfile, addConfigToProfile, removeConfigFromProfile, getProfileConfigs, getProfileConfigsPage, resolveProfileForMachine, resolveProfileForMachineRead } from "./profiles";
 import type { Database } from "bun:sqlite";
 import { detectMachineContext } from "../lib/machine";
 
@@ -41,6 +41,22 @@ describe("profiles", () => {
     expect(listProfiles(db).length).toBe(2);
   });
 
+  test("listProfilesPage returns exact source-bounded metadata", () => {
+    for (const name of ["A", "B", "C", "D", "E"]) createProfile({ name }, db);
+    const page = listProfilesPage({ limit: 2, cursor: 2 }, db);
+
+    expect(page.items.map((profile) => profile.name)).toEqual(["C", "D"]);
+    expect(page).toMatchObject({
+      total: 5,
+      limit: 2,
+      cursor: 2,
+      next_cursor: 4,
+      has_more: true,
+      complete: false,
+      truncated: false,
+    });
+  });
+
   test("updateProfile changes name and slug", () => {
     const p = createProfile({ name: "Old" }, db);
     const updated = updateProfile(p.id, {
@@ -67,6 +83,26 @@ describe("profiles", () => {
     const configs = getProfileConfigs(p.id, db);
     expect(configs.length).toBe(1);
     expect(configs[0]!.id).toBe(c.id);
+  });
+
+  test("getProfileConfigsPage bounds membership rows at the source", () => {
+    const p = createProfile({ name: "P" }, db);
+    for (let i = 1; i <= 5; i++) {
+      const config = createConfig({ name: `C${i}`, category: "rules", content: "" }, db);
+      addConfigToProfile(p.id, config.id, db);
+    }
+    const page = getProfileConfigsPage(p.id, { limit: 2, cursor: 4 }, db);
+
+    expect(page.items.map((config) => config.slug)).toEqual(["c5"]);
+    expect(page).toMatchObject({
+      total: 5,
+      limit: 2,
+      cursor: 4,
+      next_cursor: null,
+      has_more: false,
+      complete: true,
+      truncated: false,
+    });
   });
 
   test("removeConfigFromProfile removes it", () => {
@@ -97,5 +133,27 @@ describe("profiles", () => {
     }), db);
 
     expect(profile?.slug).toBe("macos-arm64");
+  });
+
+  test("resolveProfileForMachineRead scans every source page before resolving", () => {
+    for (let i = 1; i <= 4; i++) {
+      createProfile({ name: `A${i}`, selectors: { hostnames: [`other-${i}`] } }, db);
+    }
+    createProfile({ name: "Z target", selectors: { hostnames: ["station02"] } }, db);
+
+    const resolution = resolveProfileForMachineRead(detectMachineContext({
+      hostname: "station02",
+      os: "Linux",
+      arch: "x64",
+    }), { limit: 2 }, db);
+
+    expect(resolution.profile?.slug).toBe("z-target");
+    expect(resolution).toMatchObject({
+      scanned: 5,
+      total: 5,
+      batch_limit: 2,
+      complete: true,
+      truncated: false,
+    });
   });
 });

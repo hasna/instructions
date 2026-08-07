@@ -12,6 +12,7 @@ export {
   resolveConfigStore,
 } from "./data/config-store.js";
 export type { CloudConfig, ConfigStore } from "./data/config-store.js";
+export { boundedReadPage, normalizeBoundedReadOptions } from "./lib/bounded-read.js";
 
 // Machine + slug helpers (pure)
 export { currentHostname, currentOs, currentArch } from "./db/machines.js";

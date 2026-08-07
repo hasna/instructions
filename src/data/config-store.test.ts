@@ -65,6 +65,30 @@ const SAMPLE = {
   updated_at: "",
   synced_at: null,
 };
+const SAMPLE_PROFILE = {
+  id: "p1",
+  name: "Profile",
+  slug: "profile",
+  description: null,
+  selectors: { hostnames: ["station02"] },
+  variables: {},
+  created_at: "",
+  updated_at: "",
+};
+
+function page<T>(items: T[], total = items.length, limit = 20, cursor = 0) {
+  const complete = cursor + items.length >= total;
+  return {
+    items,
+    total,
+    limit,
+    cursor,
+    next_cursor: complete ? null : cursor + items.length,
+    has_more: !complete,
+    complete,
+    truncated: false,
+  };
+}
 
 let active: { restore(): void } | undefined;
 afterEach(() => {
@@ -170,11 +194,67 @@ describe("CloudConfigStore CRUD mapping", () => {
   });
 
   test("getProfileConfigs -> GET /v1/profiles/:id embeds configs", async () => {
-    const m = mockFetch(() => ({ json: { profile: { id: "p1", name: "P", slug: "p", configs: [SAMPLE] } } }));
+    const m = mockFetch(() => ({ json: { profile: { ...SAMPLE_PROFILE, configs: [SAMPLE] }, configs: page([SAMPLE]) } }));
     active = m;
     const store = new CloudConfigStore(CONFIG);
     const configs = await store.getProfileConfigs("p");
     expect(configs).toHaveLength(1);
+  });
+
+  test("listProfilesPage sends producer bounds and requires complete metadata", async () => {
+    const m = mockFetch(() => ({ json: page([SAMPLE_PROFILE], 3, 2, 2) }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.listProfilesPage({ limit: 2, cursor: 2 });
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles?limit=2&cursor=2");
+    expect(result).toMatchObject({ total: 3, limit: 2, cursor: 2, complete: true, truncated: false });
+  });
+
+  test("getProfileConfigsPage sends membership bounds", async () => {
+    const m = mockFetch(() => ({
+      json: {
+        profile: { ...SAMPLE_PROFILE, configs: [SAMPLE] },
+        configs: page([SAMPLE], 5, 2, 4),
+      },
+    }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.getProfileConfigsPage("profile", { limit: 2, cursor: 4 });
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles/profile?limit=2&cursor=4");
+    expect(result).toMatchObject({ total: 5, cursor: 4, complete: true, truncated: false });
+  });
+
+  test("resolveProfileForMachineRead sends the source scan bound", async () => {
+    const m = mockFetch(() => ({
+      json: {
+        profile: SAMPLE_PROFILE,
+        scanned: 5,
+        total: 5,
+        batch_limit: 2,
+        complete: true,
+        truncated: false,
+      },
+    }));
+    active = m;
+    const store = new CloudConfigStore(CONFIG);
+    const result = await store.resolveProfileForMachineRead({
+      ...SAMPLE_PROFILE,
+      hostname: "station02",
+      os: "linux",
+      arch: "x64",
+      os_family: "linux",
+      home_dir: "/tmp",
+      workspace_root: "/tmp/workspace",
+      bun_bin_dir: "/tmp/bin",
+      bun_path: "/tmp/bin/bun",
+      path_prefix: "/tmp/bin",
+      last_applied_at: null,
+    }, { limit: 2 });
+
+    expect(m.calls[0].url).toBe("https://instructions.hasna.xyz/v1/profiles/resolve?hostname=station02&os=linux&arch=x64&limit=2");
+    expect(result).toMatchObject({ scanned: 5, total: 5, batch_limit: 2, complete: true, truncated: false });
   });
 });
 

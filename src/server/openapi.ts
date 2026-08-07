@@ -210,7 +210,11 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
       "/v1/profiles": {
         get: {
           operationId: "listProfiles",
-          summary: "List profiles",
+          summary: "List profiles with producer-side bounds",
+          parameters: [
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100 } },
+            { name: "cursor", in: "query", schema: { type: "integer", minimum: 0 } },
+          ],
           responses: {
             "200": {
               content: {
@@ -219,7 +223,15 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
                     type: "object",
                     properties: {
                       profiles: { type: "array", items: { $ref: "#/components/schemas/Profile" } },
+                      items: { type: "array", items: { $ref: "#/components/schemas/Profile" } },
                       count: { type: "number" },
+                      total: { type: "number" },
+                      limit: { type: "number" },
+                      cursor: { type: "number" },
+                      next_cursor: { type: ["number", "null"] },
+                      has_more: { type: "boolean" },
+                      complete: { type: "boolean" },
+                      truncated: { type: "boolean", const: false },
                     },
                   },
                 },
@@ -237,11 +249,46 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
           responses: { "201": { content: { "application/json": { schema: { type: "object", properties: { profile: { $ref: "#/components/schemas/Profile" } } } } } } },
         },
       },
+      "/v1/profiles/resolve": {
+        get: {
+          operationId: "resolveProfile",
+          summary: "Resolve a machine profile by scanning producer-bounded batches",
+          parameters: [
+            { name: "hostname", in: "query", schema: { type: "string" } },
+            { name: "os", in: "query", schema: { type: "string" } },
+            { name: "arch", in: "query", schema: { type: "string" } },
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100 } },
+          ],
+          responses: {
+            "200": {
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: {
+                      profile: { oneOf: [{ $ref: "#/components/schemas/Profile" }, { type: "null" }] },
+                      scanned: { type: "number" },
+                      total: { type: "number" },
+                      batch_limit: { type: "number" },
+                      complete: { type: "boolean", const: true },
+                      truncated: { type: "boolean", const: false },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
       "/v1/profiles/{id}": {
         get: {
           operationId: "getProfile",
           summary: "Get a profile (with its configs) by id or slug",
-          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100 } },
+            { name: "cursor", in: "query", schema: { type: "integer", minimum: 0 } },
+          ],
           responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { profile: { $ref: "#/components/schemas/Profile" } } } } } } },
         },
         delete: {

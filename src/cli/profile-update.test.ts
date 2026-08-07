@@ -25,11 +25,12 @@ function runCli(args: string[], root: string) {
 function listProfiles(root: string) {
   const result = runCli(["profile", "list", "--json"], root);
   expect(result.status).toBe(0);
-  return JSON.parse(result.stdout) as Array<{
+  const page = JSON.parse(result.stdout) as { items: Array<{
     id: string;
     slug: string;
     variables: Record<string, string>;
-  }>;
+  }> };
+  return page.items;
 }
 
 describe("instructions profile update", () => {

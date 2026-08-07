@@ -194,6 +194,31 @@ export interface UpdateProfileInput {
   variables?: ProfileVariables;
 }
 
+export interface BoundedReadOptions {
+  limit?: unknown;
+  cursor?: unknown;
+}
+
+export interface BoundedReadPage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  cursor: number;
+  next_cursor: number | null;
+  has_more: boolean;
+  complete: boolean;
+  truncated: false;
+}
+
+export interface ProfileResolutionRead {
+  profile: Profile | null;
+  scanned: number;
+  total: number;
+  batch_limit: number;
+  complete: true;
+  truncated: false;
+}
+
 // Profile ↔ Config join
 export interface ProfileConfig {
   profile_id: string;

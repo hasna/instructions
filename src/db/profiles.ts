@@ -8,11 +8,15 @@ import type {
   ProfileRow,
   UpdateProfileInput,
   MachineContext,
+  BoundedReadOptions,
+  BoundedReadPage,
+  ProfileResolutionRead,
 } from "../types/index.js";
 import { ProfileNotFoundError } from "../types/index.js";
 import { getDatabase, now, slugify, uuid } from "./database.js";
-import { listConfigs } from "./configs.js";
+import { getConfigById } from "./configs.js";
 import { detectMachineContext, normalizeOsFamily } from "../lib/machine.js";
+import { boundedReadPage, normalizeBoundedReadOptions } from "../lib/bounded-read.js";
 
 function rowToProfile(row: ProfileRow): Profile {
   return {
@@ -73,6 +77,20 @@ export function listProfiles(db?: Database): Profile[] {
     .query<ProfileRow, []>("SELECT * FROM profiles ORDER BY name")
     .all()
     .map(rowToProfile);
+}
+
+export function listProfilesPage(
+  options: BoundedReadOptions = {},
+  db?: Database,
+): BoundedReadPage<Profile> {
+  const d = db || getDatabase();
+  const normalized = normalizeBoundedReadOptions(options);
+  const total = d.query<{ total: number }, []>("SELECT COUNT(*) AS total FROM profiles").get()?.total ?? 0;
+  const rows = d
+    .query<ProfileRow, [number, number]>("SELECT * FROM profiles ORDER BY name LIMIT ? OFFSET ?")
+    .all(normalized.limit, normalized.cursor)
+    .map(rowToProfile);
+  return boundedReadPage(rows, total, normalized);
 }
 
 export function updateProfile(
@@ -147,15 +165,33 @@ export function removeConfigFromProfile(
 
 export function getProfileConfigs(profileIdOrSlug: string, db?: Database): Config[] {
   const d = db || getDatabase();
+  const configs: Config[] = [];
+  let cursor = 0;
+  while (true) {
+    const page = getProfileConfigsPage(profileIdOrSlug, { limit: 100, cursor }, d);
+    configs.push(...page.items);
+    if (page.complete) return configs;
+    cursor = page.next_cursor!;
+  }
+}
+
+export function getProfileConfigsPage(
+  profileIdOrSlug: string,
+  options: BoundedReadOptions = {},
+  db?: Database,
+): BoundedReadPage<Config> {
+  const d = db || getDatabase();
   const profile = getProfile(profileIdOrSlug, d);
+  const normalized = normalizeBoundedReadOptions(options);
+  const total = d
+    .query<{ total: number }, [string]>("SELECT COUNT(*) AS total FROM profile_configs WHERE profile_id = ?")
+    .get(profile.id)?.total ?? 0;
   const rows = d
-    .query<{ config_id: string }, [string]>(
-      "SELECT config_id FROM profile_configs WHERE profile_id = ? ORDER BY sort_order"
+    .query<{ config_id: string }, [string, number, number]>(
+      "SELECT config_id FROM profile_configs WHERE profile_id = ? ORDER BY sort_order LIMIT ? OFFSET ?",
     )
-    .all(profile.id);
-  if (rows.length === 0) return [];
-  const ids = rows.map((r) => r.config_id);
-  return listConfigs(undefined, d).filter((c) => ids.includes(c.id));
+    .all(profile.id, normalized.limit, normalized.cursor);
+  return boundedReadPage(rows.map((row) => getConfigById(row.config_id, d)), total, normalized);
 }
 
 export function profileHasSelectors(profile: Pick<Profile, "selectors">): boolean {
@@ -186,18 +222,50 @@ export function resolveProfileForMachine(
   machine: MachineContext = detectMachineContext(),
   db?: Database
 ): Profile | null {
-  const profiles = listProfiles(db).filter(profileHasSelectors);
-  const matches = profiles
-    .filter((profile) => profileMatchesMachine(profile, machine))
-    .map((profile) => {
+  return resolveProfileForMachineRead(machine, {}, db).profile;
+}
+
+export function resolveProfileForMachineRead(
+  machine: MachineContext = detectMachineContext(),
+  options: BoundedReadOptions = {},
+  db?: Database,
+): ProfileResolutionRead {
+  const d = db || getDatabase();
+  const { limit } = normalizeBoundedReadOptions(options);
+  let cursor = 0;
+  let scanned = 0;
+  let total = 0;
+  let selected: { profile: Profile; score: number } | null = null;
+
+  while (true) {
+    const page = listProfilesPage({ limit, cursor }, d);
+    total = page.total;
+    scanned += page.items.length;
+    for (const profile of page.items) {
+      if (!profileHasSelectors(profile) || !profileMatchesMachine(profile, machine)) continue;
       const selectors = profile.selectors;
       const score =
         (selectors.hostnames?.length ? 100 : 0) +
         (selectors.os?.length ? 10 : 0) +
         (selectors.arch?.length ? 10 : 0);
-      return { profile, score };
-    })
-    .sort((a, b) => b.score - a.score || a.profile.name.localeCompare(b.profile.name));
+      if (
+        !selected ||
+        score > selected.score ||
+        (score === selected.score && profile.name.localeCompare(selected.profile.name) < 0)
+      ) {
+        selected = { profile, score };
+      }
+    }
+    if (page.complete) break;
+    cursor = page.next_cursor!;
+  }
 
-  return matches[0]?.profile ?? null;
+  return {
+    profile: selected?.profile ?? null,
+    scanned,
+    total,
+    batch_limit: limit,
+    complete: true,
+    truncated: false,
+  };
 }
