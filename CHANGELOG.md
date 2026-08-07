@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.22
+
+Ships the managed Bash-profile fix from issue #65 and task
+`cde9f87b-ff03-45d2-9882-4899f0ba1e8b`.
+
+The canonical `bash-profile` source now stores a readable-file guard for the
+optional `$HOME/.local/bin/env` helper. Login shells therefore emit no
+missing-file stderr when the helper is absent, while still sourcing it and
+preserving its environment initialization when present.
+
 ## 0.4.18
 
 Publishes the three source-visibility commits that landed on `main` after the
