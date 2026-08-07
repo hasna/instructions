@@ -32,7 +32,8 @@ describe("project dashboard standard", () => {
     expect(config.tags).toEqual(expect.arrayContaining(["projects-dashboard", "json-render"]));
     expect(config.content).toContain(".hasna/project/dashboard/render.json");
     expect(config.content).toContain("projects dashboard serve");
-    expect(config.content).toContain("iproj-<project-slug>");
+    expect(config.content).toContain("normalized project slug");
+    expect(config.content).not.toContain("iproj-<project-slug>");
     expect(config.content).not.toContain(`sk-${"proj"}-`);
   });
 
@@ -60,11 +61,31 @@ describe("project dashboard standard", () => {
 
     for (const preset of PLATFORM_PROFILE_PRESETS) {
       expect(preset.variables).toMatchObject(PROJECT_DASHBOARD_PROFILE_VARIABLES);
+      expect(preset.variables?.PROJECT_CHANNEL_PREFIX).toBe("");
     }
     for (const profile of profiles) {
       expect(profile.variables).toMatchObject(PROJECT_DASHBOARD_PROFILE_VARIABLES);
+      expect(profile.variables.PROJECT_CHANNEL_PREFIX).toBe("");
       expect(getProfileConfigs(profile.id, db).map((config) => config.id)).toContain(standard.id);
     }
+  });
+
+  test("reconciles the legacy project channel prefix to the canonical no-prefix value", async () => {
+    const store = new LocalConfigStore(db);
+    const existing = await store.createProfile({
+      name: "linux-arm64",
+      selectors: { os: ["linux"], arch: ["arm64"] },
+      variables: {
+        PROJECT_CHANNEL_PREFIX: "iproj-",
+        CUSTOM_VALUE: "preserved",
+      },
+    });
+
+    const profiles = await ensurePlatformProfiles(store);
+    const linux = profiles.find((profile) => profile.id === existing.id)!;
+
+    expect(linux.variables.PROJECT_CHANNEL_PREFIX).toBe("");
+    expect(linux.variables.CUSTOM_VALUE).toBe("preserved");
   });
 
   test("reconciles station01 selectors and preset variables without dropping custom values", async () => {

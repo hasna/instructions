@@ -86,10 +86,14 @@ function mergeProfileVariables(
   preset: ProfileVariables | undefined,
   existing: ProfileVariables,
 ): ProfileVariables {
-  return {
+  const variables = {
     ...(preset ?? {}),
     ...existing,
   };
+  for (const [key, value] of Object.entries(preset ?? {})) {
+    if (value === "") variables[key] = value;
+  }
+  return variables;
 }
 
 function mergeUnique(

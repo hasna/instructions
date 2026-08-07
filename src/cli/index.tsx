@@ -292,6 +292,15 @@ function parseVarArgs(values?: string[]): ProfileVariables | undefined {
   return Object.keys(vars).length > 0 ? vars : undefined;
 }
 
+function parseUnsetVarArgs(values?: string[]): string[] {
+  if (!values || values.length === 0) return [];
+  const keys = [...new Set(values.map((value) => value.trim()))];
+  if (keys.some((key) => key.length === 0 || key.includes("="))) {
+    throw new Error('Invalid --unset-var (expected variable names without "=")');
+  }
+  return keys;
+}
+
 function parseProfileSelectors(opts: { os?: string; arch?: string; hostname?: string }): ProfileSelector | undefined {
   const selectors: ProfileSelector = {};
   const os = splitCsv(opts.os);
@@ -862,6 +871,32 @@ profileCmd.command("create <name>").description("Create a new profile")
       variables: parseVarArgs(opts.var),
     });
     console.log(chalk.green("✓") + ` Created profile: ${chalk.bold(p.name)} ${chalk.dim(`(${p.slug})`)}`);
+  });
+
+profileCmd.command("update <id>").description("Update an existing profile's variables in one store operation")
+  .option("--var <vars...>", "set profile variable(s) as KEY=VALUE")
+  .option("--unset-var <keys...>", "remove profile variable(s) by key")
+  .action(async (id, opts) => {
+    try {
+      const setVariables = parseVarArgs(opts.var) ?? {};
+      const unsetVariables = parseUnsetVarArgs(opts.unsetVar);
+      const setKeys = new Set(Object.keys(setVariables));
+      const conflicts = unsetVariables.filter((key) => setKeys.has(key));
+      if (conflicts.length > 0) {
+        throw new Error(`Variables cannot be both set and unset: ${conflicts.join(", ")}`);
+      }
+      if (Object.keys(setVariables).length === 0 && unsetVariables.length === 0) {
+        throw new Error("Provide --var KEY=VALUE and/or --unset-var KEY");
+      }
+
+      const store = resolveConfigStore();
+      const profile = await store.getProfile(id);
+      const variables = { ...profile.variables };
+      for (const key of unsetVariables) delete variables[key];
+      Object.assign(variables, setVariables);
+      const updated = await store.updateProfile(profile.id, { variables });
+      console.log(chalk.green("✓") + ` Updated profile: ${chalk.bold(updated.name)} ${chalk.dim(`(${updated.slug})`)}`);
+    } catch (e) { console.error(chalk.red(formatCliError(e))); process.exit(1); }
   });
 
 profileCmd.command("show <id>").description("Show profile and its configs")

@@ -331,14 +331,22 @@ workflows:
 - `{{PROJECT_DASHBOARD_DIR}}` -> `.hasna/project`
 - `{{PROJECT_DASHBOARD_RENDER_MANIFEST}}` -> `.hasna/project/dashboard/render.json`
 - `{{PROJECT_DASHBOARD_SNAPSHOTS_DIR}}` -> `.hasna/project/dashboard/snapshots`
-- `{{PROJECT_CHANNEL_PREFIX}}` -> `iproj-`
+- `{{PROJECT_CHANNEL_PREFIX}}` -> `""` (no prefix; the channel is the normalized project slug)
+
+Existing profiles can be migrated in place without deleting or recreating them:
+
+```bash
+instructions profile update linux-arm64 \
+  --var PROJECT_CHANNEL_PREFIX= \
+  --unset-var LEGACY_VARIABLE
+```
 
 `instructions init` and `bun run seed` seed the
 `agent-managed-project-dashboard-standard` reference. It documents the standard
 `.hasna/project` layout, `projects dashboard *` commands, provider panel
-commands, `#iproj-*` channel naming, durable todos/goal workflow, and the rule
-that dashboards must show ids/statuses/evidence refs instead of raw private
-documents or secrets.
+commands, normalized project-slug channel naming, durable todos/goal workflow,
+and the rule that dashboards must show ids/statuses/evidence refs instead of raw
+private documents or secrets.
 
 ## License
 
