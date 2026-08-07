@@ -20,6 +20,7 @@
   },
   "files": [
     "dist",
+    "assets/skills/inbox/SKILL.md",
     "dashboard/dist",
     "LICENSE",
     "README.md"
@@ -34,7 +35,7 @@
     "kit:check": "bunx @hasna/contracts vendor-kit --check",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "check:package-secrets": "bun run src/cli/index.tsx package-manager-scan --fail-on-findings --home .",
+    "check:package-secrets": "bun run src/cli/index.tsx package-manager-scan --fail-on-findings .",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",

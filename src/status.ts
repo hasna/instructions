@@ -4,6 +4,7 @@ import type { Config } from "./types/index.js";
 import { expandPath } from "./lib/apply.js";
 import { isRetiredOrUnsupportedConfigAgent } from "./lib/config-agents.js";
 import { getPackageVersion } from "./lib/package-version.js";
+import { inspectManagedSkillRuntimes } from "./lib/managed-skill-runtimes.js";
 import { redactContent, scanSecrets, type RedactFormat } from "./lib/redact.js";
 
 const PACKAGE_NAME = "@hasna/instructions";
@@ -43,6 +44,11 @@ export interface ConfigsStatusContract {
     machines: number;
     snapshots: number;
     knownTargets: number;
+    managedSkillRuntimes: {
+      skillsPresent: number;
+      healthy: number;
+      missing: number;
+    };
   };
   health: {
     status: ContractStatus;
@@ -51,10 +57,12 @@ export interface ConfigsStatusContract {
     missingTargets: number;
     unredactedSecretFindings: number;
     retiredAgentRows: number;
+    missingManagedSkillRuntimes: number;
     hasDrift: boolean;
     hasMissingTargets: boolean;
     hasUnredactedSecrets: boolean;
     hasRetiredAgentRows: boolean;
+    hasMissingManagedSkillRuntimes: boolean;
   };
   safety: {
     includesConfigValues: false;
@@ -87,6 +95,7 @@ function countBy<T>(items: T[], getValue: (item: T) => string | null | undefined
 
 export async function getConfigsStatus(
   store: ConfigStore = resolveConfigStore(),
+  options: { homeDir?: string; conversationsCommand?: string } = {},
 ): Promise<ConfigsStatusContract> {
   let databaseReachable = true;
   let configs: Config[] = [];
@@ -145,13 +154,18 @@ export async function getConfigsStatus(
     }
   }
   const byCategory = Object.fromEntries(Object.entries(categoryStats).filter(([key]) => key !== "total"));
+  const managedSkillRuntimes = inspectManagedSkillRuntimes({
+    homeDir: options.homeDir,
+    conversationsCommand: options.conversationsCommand,
+  });
 
   const status: ContractStatus =
     databaseReachable &&
     driftedTargets === 0 &&
     missingTargets === 0 &&
     unredactedSecretFindings === 0 &&
-    retiredAgentRows === 0
+    retiredAgentRows === 0 &&
+    managedSkillRuntimes.missing === 0
       ? "ok"
       : "warn";
 
@@ -185,6 +199,11 @@ export async function getConfigsStatus(
       machines,
       snapshots,
       knownTargets,
+      managedSkillRuntimes: {
+        skillsPresent: managedSkillRuntimes.skills_present,
+        healthy: managedSkillRuntimes.healthy,
+        missing: managedSkillRuntimes.missing,
+      },
     },
     health: {
       status,
@@ -193,10 +212,12 @@ export async function getConfigsStatus(
       missingTargets,
       unredactedSecretFindings,
       retiredAgentRows,
+      missingManagedSkillRuntimes: managedSkillRuntimes.missing,
       hasDrift: driftedTargets > 0,
       hasMissingTargets: missingTargets > 0,
       hasUnredactedSecrets: unredactedSecretFindings > 0,
       hasRetiredAgentRows: retiredAgentRows > 0,
+      hasMissingManagedSkillRuntimes: managedSkillRuntimes.missing > 0,
     },
     safety: {
       includesConfigValues: false,

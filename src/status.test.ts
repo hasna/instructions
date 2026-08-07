@@ -64,7 +64,7 @@ describe("getConfigsStatus", () => {
     addConfigToProfile(profile.id, config.id, db);
     registerMachine("private-host.internal", "Linux", "x64", db);
 
-    const status = await getConfigsStatus(new LocalConfigStore(db));
+    const status = await getConfigsStatus(new LocalConfigStore(db), { homeDir: tempDir });
     const serialized = JSON.stringify(status);
 
     const { name, version } = JSON.parse(readFileSync("package.json", "utf-8")) as { name: string; version: string };
@@ -85,11 +85,17 @@ describe("getConfigsStatus", () => {
         profileLinks: 1,
         machines: 1,
         knownTargets: 1,
+        managedSkillRuntimes: {
+          skillsPresent: 0,
+          healthy: 0,
+          missing: 0,
+        },
       },
       health: {
         status: "warn",
         driftedTargets: 1,
         retiredAgentRows: 0,
+        missingManagedSkillRuntimes: 0,
       },
       safety: {
         includesConfigValues: false,
@@ -123,17 +129,40 @@ describe("getConfigsStatus", () => {
       content: "stale retired content",
     }, db);
 
-    const status = await getConfigsStatus(new LocalConfigStore(db));
+    const status = await getConfigsStatus(new LocalConfigStore(db), { homeDir: tempDir });
     const serialized = JSON.stringify(status);
 
     expect(status.counts.configs.retiredAgentRows).toBe(1);
     expect(status.health.retiredAgentRows).toBe(1);
     expect(status.health.hasRetiredAgentRows).toBe(true);
+    expect(status.health.hasMissingManagedSkillRuntimes).toBe(false);
     expect(status.health.status).toBe("warn");
     expect(status.health.missingTargets).toBe(0);
     expect(status.counts.knownTargets).toBe(0);
     expect(status.counts.byAgent.gemini).toBe(1);
     expect(serialized).not.toContain("~/.gemini/GEMINI.md");
     expect(serialized).not.toContain("stale retired content");
+  });
+
+  test("reports an installed inbox skill with no conversations watcher as unhealthy metadata", async () => {
+    const db = getDatabase();
+    const skillDir = join(tempDir, ".claude", "skills", "inbox");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: inbox\n---\n");
+
+    const status = await getConfigsStatus(new LocalConfigStore(db), {
+      homeDir: tempDir,
+      conversationsCommand: join(tempDir, "missing-conversations"),
+    });
+
+    expect(status.counts.managedSkillRuntimes).toEqual({
+      skillsPresent: 1,
+      healthy: 0,
+      missing: 1,
+    });
+    expect(status.health.missingManagedSkillRuntimes).toBe(1);
+    expect(status.health.hasMissingManagedSkillRuntimes).toBe(true);
+    expect(status.health.status).toBe("warn");
+    expect(JSON.stringify(status)).not.toContain(skillDir);
   });
 });
