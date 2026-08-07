@@ -7,7 +7,7 @@ export const PROJECT_DASHBOARD_PROFILE_VARIABLES: ProfileVariables = {
   PROJECT_DASHBOARD_DIR: ".hasna/project",
   PROJECT_DASHBOARD_RENDER_MANIFEST: ".hasna/project/dashboard/render.json",
   PROJECT_DASHBOARD_SNAPSHOTS_DIR: ".hasna/project/dashboard/snapshots",
-  PROJECT_CHANNEL_PREFIX: "iproj-",
+  PROJECT_CHANNEL_PREFIX: "",
 };
 
 export const PROJECT_DASHBOARD_STANDARD_CONTENT = `# Agent-Managed Project Dashboard Standard
@@ -63,8 +63,8 @@ context.
 
 ## Coordination
 
-- Project conversation channels use \`iproj-<project-slug>\` in the CLI and are
-  displayed to humans as \`#iproj-<project-slug>\`.
+- Project conversation channels use the normalized project slug in the CLI and
+  are displayed to humans as \`#<project-slug>\`.
 - Todos tasks are the source of truth for work; messages are only coordination.
 - Durable Codewith goal plans should own long-running implementation.
 - New implementation/verification work should route through task-triggered fresh
