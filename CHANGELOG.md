@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.23
+
+Publishes `340aecac` (#69): the renderer no longer writes a managed instruction
+home larger than it will later agree to read.
+
+The writer was unbounded at `apply.ts:161` while the reader capped every
+observation at 256 KiB via `readUtf8RegularFile`, so a flattening adapter could
+emit a home it could not subsequently open — wedging its own next run. Only
+flattening adapters were affected; splitting homes distribute the identical
+payload across separate files and never approach the bound.
+
+Two bounds are now named instead of one constant repeated in three places:
+`FOREIGN_INPUT_MAX_BYTES` (256 KiB, unchanged, for input this tool did not
+author) and `SESSION_MANAGED_OUTPUT_MAX_BYTES` for files it does author, with
+`managedObservationMaxBytes()` as the single decision point. The fragment read
+keeps its 4 KiB bound and the cache its 32 KiB.
+
+Concretely, this release is what the codex home is waiting on: station01's
+`$HOME/.codex/AGENTS.md` is 273,860 bytes, generated 2026-08-07T14:47:43Z, and
+is four sources behind the claude home's 44. It sits above the 256 KiB read cap
+and no published version can repair it.
+
 ## 0.4.22
 
 Ships the managed Bash-profile fix from issue #65 and task
