@@ -97,6 +97,66 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             variables: { type: "object" },
           },
         },
+        ProfileWithConfigs: {
+          type: "object",
+          properties: {
+            ...profileSchema.properties,
+            configs: { type: "array", items: { $ref: "#/components/schemas/Config" } },
+          },
+        },
+        BoundedProfilePage: {
+          type: "object",
+          required: ["items", "total", "limit", "cursor", "next_cursor", "has_more", "complete", "truncated", "source_bounded"],
+          properties: {
+            profiles: { type: "array", items: { $ref: "#/components/schemas/Profile" } },
+            items: { type: "array", items: { $ref: "#/components/schemas/Profile" } },
+            count: { type: "number" },
+            total: { type: "number" },
+            limit: { type: "number" },
+            cursor: { type: "number" },
+            next_cursor: { type: "number", nullable: true },
+            has_more: { type: "boolean" },
+            complete: { type: "boolean" },
+            truncated: { type: "boolean", const: false },
+            source_bounded: { type: "boolean" },
+          },
+        },
+        BoundedConfigPage: {
+          type: "object",
+          required: ["items", "total", "limit", "cursor", "next_cursor", "has_more", "complete", "truncated", "source_bounded"],
+          properties: {
+            items: { type: "array", items: { $ref: "#/components/schemas/Config" } },
+            total: { type: "number" },
+            limit: { type: "number" },
+            cursor: { type: "number" },
+            next_cursor: { type: "number", nullable: true },
+            has_more: { type: "boolean" },
+            complete: { type: "boolean" },
+            truncated: { type: "boolean", const: false },
+            source_bounded: { type: "boolean" },
+          },
+        },
+        ProfileShowResponse: {
+          type: "object",
+          required: ["profile", "configs"],
+          properties: {
+            profile: { $ref: "#/components/schemas/ProfileWithConfigs" },
+            configs: { $ref: "#/components/schemas/BoundedConfigPage" },
+          },
+        },
+        ProfileResolutionRead: {
+          type: "object",
+          required: ["profile", "scanned", "total", "batch_limit", "source_bounded", "complete", "truncated"],
+          properties: {
+            profile: { oneOf: [{ $ref: "#/components/schemas/Profile" }, { type: "null" }] },
+            scanned: { type: "number", nullable: true },
+            total: { type: "number", nullable: true },
+            batch_limit: { type: "number", nullable: true },
+            source_bounded: { type: "boolean" },
+            complete: { type: "boolean", const: true },
+            truncated: { type: "boolean", const: false },
+          },
+        },
       },
     },
     security: [{ apiKey: [] }],
@@ -219,21 +279,7 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             "200": {
               content: {
                 "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      profiles: { type: "array", items: { $ref: "#/components/schemas/Profile" } },
-                      items: { type: "array", items: { $ref: "#/components/schemas/Profile" } },
-                      count: { type: "number" },
-                      total: { type: "number" },
-                      limit: { type: "number" },
-                      cursor: { type: "number" },
-                      next_cursor: { type: ["number", "null"] },
-                      has_more: { type: "boolean" },
-                      complete: { type: "boolean" },
-                      truncated: { type: "boolean", const: false },
-                    },
-                  },
+                  schema: { $ref: "#/components/schemas/BoundedProfilePage" },
                 },
               },
             },
@@ -263,17 +309,7 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             "200": {
               content: {
                 "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      profile: { oneOf: [{ $ref: "#/components/schemas/Profile" }, { type: "null" }] },
-                      scanned: { type: "number" },
-                      total: { type: "number" },
-                      batch_limit: { type: "number" },
-                      complete: { type: "boolean", const: true },
-                      truncated: { type: "boolean", const: false },
-                    },
-                  },
+                  schema: { $ref: "#/components/schemas/ProfileResolutionRead" },
                 },
               },
             },
@@ -289,7 +325,7 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100 } },
             { name: "cursor", in: "query", schema: { type: "integer", minimum: 0 } },
           ],
-          responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { profile: { $ref: "#/components/schemas/Profile" } } } } } } },
+          responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/ProfileShowResponse" } } } } },
         },
         delete: {
           operationId: "deleteProfile",

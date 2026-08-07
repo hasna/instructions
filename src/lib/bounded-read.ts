@@ -33,5 +33,6 @@ export function boundedReadPage<T>(
     has_more: !complete,
     complete,
     truncated: false,
+    source_bounded: true,
   };
 }

@@ -208,13 +208,15 @@ export interface BoundedReadPage<T> {
   has_more: boolean;
   complete: boolean;
   truncated: false;
+  source_bounded: boolean;
 }
 
 export interface ProfileResolutionRead {
   profile: Profile | null;
-  scanned: number;
-  total: number;
-  batch_limit: number;
+  scanned: number | null;
+  total: number | null;
+  batch_limit: number | null;
+  source_bounded: boolean;
   complete: true;
   truncated: false;
 }

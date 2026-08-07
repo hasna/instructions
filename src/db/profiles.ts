@@ -265,6 +265,7 @@ export function resolveProfileForMachineRead(
     scanned,
     total,
     batch_limit: limit,
+    source_bounded: true,
     complete: true,
     truncated: false,
   };

@@ -63,6 +63,7 @@ import type {
   UpdateConfigInput,
   UpdateProfileInput,
 } from "../types/index.js";
+import { boundedReadPage, normalizeBoundedReadOptions } from "../lib/bounded-read.js";
 
 export interface CloudConfig {
   apiUrl: string;
@@ -101,7 +102,40 @@ function parseBoundedPagePayload<T>(value: unknown, label: string): BoundedReadP
   ) {
     throw new CloudHttpError(502, `${label} returned an invalid or truncated bounded-read envelope`, value);
   }
-  return page as BoundedReadPage<T>;
+  return {
+    ...(page as BoundedReadPage<T>),
+    source_bounded: page.source_bounded ?? true,
+  };
+}
+
+function parseBoundedOrLegacyPage<T>(
+  value: unknown,
+  legacyItems: unknown,
+  options: BoundedReadOptions,
+  label: string,
+): BoundedReadPage<T> {
+  if (value && typeof value === "object") {
+    const candidate = value as Record<string, unknown>;
+    if (
+      "items" in candidate ||
+      "total" in candidate ||
+      "complete" in candidate ||
+      "truncated" in candidate ||
+      "next_cursor" in candidate
+    ) {
+      return parseBoundedPagePayload<T>(value, label);
+    }
+  }
+  if (!Array.isArray(legacyItems)) {
+    throw new CloudHttpError(502, `${label} returned neither a bounded envelope nor a complete legacy array`, value);
+  }
+  const normalized = normalizeBoundedReadOptions(options);
+  const page = boundedReadPage(
+    legacyItems.slice(normalized.cursor, normalized.cursor + normalized.limit) as T[],
+    legacyItems.length,
+    normalized,
+  );
+  return { ...page, source_bounded: false };
 }
 
 const API_URL_ENV = "HASNA_INSTRUCTIONS_API_URL";
@@ -525,15 +559,16 @@ export class CloudConfigStore implements ConfigStore {
   }
 
   async listProfilesPage(options: BoundedReadOptions = {}): Promise<BoundedReadPage<Profile>> {
+    const normalized = normalizeBoundedReadOptions(options);
     const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor !== undefined) params.set("cursor", String(options.cursor));
+    params.set("limit", String(normalized.limit));
+    params.set("cursor", String(normalized.cursor));
     const qs = params.toString();
-    const { data } = await this.request<BoundedReadPage<Profile>>(
+    const { data } = await this.request<BoundedReadPage<Profile> & { profiles?: Profile[] }>(
       "GET",
       `/profiles${qs ? `?${qs}` : ""}`,
     );
-    return parseBoundedPagePayload<Profile>(data, "profile list");
+    return parseBoundedOrLegacyPage<Profile>(data, data?.profiles, normalized, "profile list");
   }
 
   async getProfile(idOrSlug: string): Promise<Profile> {
@@ -563,18 +598,27 @@ export class CloudConfigStore implements ConfigStore {
     idOrSlug: string,
     options: BoundedReadOptions = {},
   ): Promise<BoundedReadPage<Config>> {
+    const normalized = normalizeBoundedReadOptions(options);
     const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor !== undefined) params.set("cursor", String(options.cursor));
+    params.set("limit", String(normalized.limit));
+    params.set("cursor", String(normalized.cursor));
     const qs = params.toString();
-    const { status, data } = await this.request<{ profile: Profile; configs: BoundedReadPage<Config> }>(
+    const { status, data } = await this.request<{
+      profile: Profile & { configs?: Config[] };
+      configs?: BoundedReadPage<Config>;
+    }>(
       "GET",
       `/profiles/${encodeURIComponent(idOrSlug)}${qs ? `?${qs}` : ""}`,
       undefined,
       { allow404: true },
     );
     if (status === 404 || !data?.profile) throw new ProfileNotFoundError(idOrSlug);
-    return parseBoundedPagePayload<Config>(data.configs, "profile membership");
+    return parseBoundedOrLegacyPage<Config>(
+      data.configs,
+      data.profile.configs,
+      normalized,
+      "profile membership",
+    );
   }
 
   async createProfile(input: CreateProfileInput): Promise<Profile> {
@@ -629,20 +673,50 @@ export class CloudConfigStore implements ConfigStore {
     machine?: MachineContext,
     options: BoundedReadOptions = {},
   ): Promise<ProfileResolutionRead> {
+    const normalized = normalizeBoundedReadOptions(options);
     const params = new URLSearchParams();
     if (machine?.hostname) params.set("hostname", machine.hostname);
     if (machine?.os) params.set("os", machine.os);
     if (machine?.arch) params.set("arch", machine.arch);
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    params.set("limit", String(normalized.limit));
     const qs = params.toString();
-    const { data } = await this.request<ProfileResolutionRead>(
+    const { status, data } = await this.request<ProfileResolutionRead | { profile: Profile | null }>(
       "GET",
       `/profiles/resolve${qs ? `?${qs}` : ""}`,
+      undefined,
+      { allow404: true },
     );
-    if (!data || data.complete !== true || data.truncated !== false) {
+    if (status === 404) {
+      return {
+        profile: null,
+        scanned: null,
+        total: null,
+        batch_limit: null,
+        source_bounded: false,
+        complete: true,
+        truncated: false,
+      };
+    }
+    if (data && "complete" in data) {
+      if (data.complete !== true || data.truncated !== false) {
+        throw new CloudHttpError(502, "profile resolve returned an incomplete or truncated read", data);
+      }
+      return { ...data, source_bounded: data.source_bounded ?? true };
+    }
+    if (data && "profile" in data) {
+      return {
+        profile: data.profile,
+        scanned: null,
+        total: null,
+        batch_limit: null,
+        source_bounded: false,
+        complete: true,
+        truncated: false,
+      };
+    }
+    {
       throw new CloudHttpError(502, "profile resolve returned an incomplete or truncated read", data);
     }
-    return data;
   }
 
   // Machines
