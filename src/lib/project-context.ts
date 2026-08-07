@@ -37,6 +37,30 @@ export const PROJECT_CONTEXT_SNAPSHOT_DIR = ".hasna/project-context-snapshots";
 export const PROJECT_CONTEXT_CACHE_SCHEMA = "hasna.instructions.project-context-cache/v1" as const;
 export const PROJECT_CONTEXT_MANAGED_COMMENT = "Managed by @hasna/configs project context";
 const SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
+// Read bound for files this tool did NOT author. Foreign input is untrusted and its size
+// is nobody's contract, so it stays tightly bounded.
+export const FOREIGN_INPUT_MAX_BYTES = 256 * 1024;
+// Read bound for files this tool AUTHORS into a managed home. Their size is set by the
+// instruction corpus the renderer is asked to write, which grows without any bound the
+// reader can assume. A managed output that the writer can emit and the reader refuses
+// wedges the home permanently and silently, so these two bounds must not disagree.
+export const SESSION_MANAGED_OUTPUT_MAX_BYTES = SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES;
+// Every path in projectContextSessionGuardPaths(), expressed workspace-relative. Keep in
+// step with runtimePaths(); the guard hashes each of these to detect concurrent writes.
+export const SESSION_MANAGED_OUTPUT_PATHS = [
+  ".hasna/session-render-manifest.json",
+  ".codewith/.hasna/session-render-manifest.json",
+  "CLAUDE.md",
+  "AGENTS.md",
+  ".codewith/CODEWITH.md",
+  ".codewith/CODEWITH.override.md",
+];
+
+export function managedObservationMaxBytes(relativePath: string): number {
+  return SESSION_MANAGED_OUTPUT_PATHS.includes(relativePath)
+    ? SESSION_MANAGED_OUTPUT_MAX_BYTES
+    : FOREIGN_INPUT_MAX_BYTES;
+}
 const PROJECT_CONTEXT_LOCK_STALE_MS = 5 * 60 * 1_000;
 export const LEGACY_CONFIGS_PACKAGE = "@hasna/configs" as const;
 export const LEGACY_CONFIGS_COMPAT_VERSION = "0.2.45" as const;
@@ -493,7 +517,9 @@ export function planProjectContext(input: ProjectContextPlanInput): ProjectConte
     PROJECT_CONTEXT_MAX_RENDERED_BYTES - Math.max(320, inlineMarkerOverhead),
     PROJECT_CONTEXT_MAX_APPROX_TOKENS - Math.max(80, Math.ceil(inlineMarkerOverhead / 4)),
   );
-  const previousTargetContent = existsSync(paths.target) ? readUtf8RegularFile(paths.target, workspaceRoot) : null;
+  const previousTargetContent = existsSync(paths.target)
+    ? readUtf8RegularFile(paths.target, workspaceRoot, managedObservationMaxBytes(relativePosix(workspaceRoot, paths.target)))
+    : null;
   const markerParse = parseManagedBlock(previousTargetContent ?? "", input.force === true);
   if (markerParse.block && markerParse.block.id !== bundle.project.id) {
     throw new ProjectContextError("MANAGED_BLOCK_CONFLICT", "managed block belongs to a different project");
@@ -599,7 +625,7 @@ export function composeProjectContextSessionRender(
   if (!existsSync(paths.target)) {
     throw new ProjectContextError("MANAGED_BLOCK_CONFLICT", "project-context provider target is missing while durable context is active");
   }
-  const currentTarget = readUtf8RegularFile(paths.target, workspaceRoot);
+  const currentTarget = readUtf8RegularFile(paths.target, workspaceRoot, managedObservationMaxBytes(relativePosix(workspaceRoot, paths.target)));
   const currentMarkers = parseManagedBlock(currentTarget, false);
   if (!currentMarkers.block) {
     throw new ProjectContextError("MANAGED_BLOCK_CONFLICT", "project-context provider target lost its managed block");
@@ -2460,9 +2486,7 @@ function anchoredFileObservation(directory: AnchoredDirectory, name: string): An
     if (!stat.isFile()) throw new ProjectContextHashRace("managed output is not a regular file");
     const relativePath = relativePosix(directory.workspaceRoot, join(directory.path, name));
     const maxBytes = directory.maxObservedBytes === undefined
-      ? relativePath === ".hasna/session-render-manifest.json" || relativePath === ".codewith/.hasna/session-render-manifest.json"
-        ? SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES
-        : 256 * 1024
+      ? managedObservationMaxBytes(relativePath)
       : directory.maxObservedBytes;
     if (maxBytes !== null && stat.size > maxBytes) {
       throw new ProjectContextHashRace(`managed output exceeds the safe read limit: ${relativePath}`);
@@ -3294,7 +3318,7 @@ function assertNoSymlinkAncestors(path: string): void {
   }
 }
 
-function readUtf8RegularFile(path: string, workspaceRoot: string, maxBytes = 256 * 1024): string {
+function readUtf8RegularFile(path: string, workspaceRoot: string, maxBytes = FOREIGN_INPUT_MAX_BYTES): string {
   assertNoSymlinkSegments(workspaceRoot, path);
   const stat = lstatSync(path);
   if (!stat.isFile()) throw new ProjectContextError("PROJECT_CONTEXT_PATH_INVALID", `managed path is not a regular file: ${path}`);
@@ -3305,10 +3329,7 @@ function readUtf8RegularFile(path: string, workspaceRoot: string, maxBytes = 256
 function currentFileHash(path: string, workspaceRoot: string): string | null {
   if (!existsSync(path)) return null;
   const relativePath = relativePosix(workspaceRoot, path);
-  const maxBytes = relativePath === ".hasna/session-render-manifest.json" || relativePath === ".codewith/.hasna/session-render-manifest.json"
-    ? SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES
-    : 256 * 1024;
-  return sha256(readUtf8RegularFile(path, workspaceRoot, maxBytes));
+  return sha256(readUtf8RegularFile(path, workspaceRoot, managedObservationMaxBytes(relativePath)));
 }
 
 function hashesStillMatch(expected: Map<string, string | null>, workspaceRoot: string): boolean {
