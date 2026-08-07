@@ -33,7 +33,7 @@ function seedConfigs(count: number): { home: string; dbPath: string } {
   const dbPath = join(home, "configs.db");
   process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
   resetDatabase();
-  const db = getDatabase();
+  const db = getDatabase(dbPath);
   for (let i = 1; i <= count; i++) {
     createConfig({
       name: `Very Long Agent Config ${String(i).padStart(2, "0")}`,
@@ -101,7 +101,7 @@ describe("configs apply ownership output", () => {
     const dbPath = join(home, "configs.db");
     process.env["HASNA_INSTRUCTIONS_DB_PATH"] = dbPath;
     resetDatabase();
-    const db = getDatabase();
+    const db = getDatabase(dbPath);
     const claude = createConfig({
       name: "Claude Legacy Writer",
       category: "rules",

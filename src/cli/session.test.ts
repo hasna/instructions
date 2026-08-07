@@ -14,6 +14,8 @@ function runCli(args: string[], env: Record<string, string | undefined> = {}) {
     encoding: "utf8",
     env: {
       ...process.env,
+      HASNA_INSTRUCTIONS_API_URL: "",
+      HASNA_INSTRUCTIONS_API_KEY: "",
       ...env,
       NO_COLOR: "1",
       FORCE_COLOR: "0",
