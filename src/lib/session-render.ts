@@ -18,7 +18,10 @@ import {
 } from "./global-agent-rules-standard.js";
 import { CODEWITH_SHARED_TODOS_STORAGE_STANDARD_SLUG } from "./codewith-shared-todos-storage-standard.js";
 import {
+  SESSION_MANAGED_OUTPUT_MAX_BYTES,
+  SESSION_MANAGED_OUTPUT_WARN_BYTES,
   composeProjectContextSessionRender,
+  isSessionManagedOutputRelativePath,
   observeProjectContextSessionGuard,
   type ProjectContextSessionGuard,
 } from "./project-context.js";
@@ -1680,6 +1683,12 @@ export function planSessionRender(input: SessionRenderInput): SessionRenderPlan 
     JSON.stringify(manifest, null, 2),
     orderedSources.map((source) => source.id),
   );
+  // The manifest is checked alongside the entrypoints because it is allowlisted at the same
+  // raised bound and grows with the same corpus — a render that only guards the entrypoint
+  // moves the identical wedge onto the manifest and calls the job done.
+  const managedOutputs = [...files, manifestFile];
+  rejectOversizedManagedOutputs(managedOutputs);
+  warnings.push(...managedOutputHeadroomWarnings(managedOutputs));
 
   return {
     dryRun: true,
@@ -1966,6 +1975,63 @@ function rejectDuplicateRenderPaths(files: SessionRenderFile[]): void {
     if (seen.has(key)) throw new Error(`Duplicate session render file path: ${file.relativePath}`);
     seen.add(key);
   }
+}
+
+/**
+ * Refuse a managed output the reader would later refuse.
+ *
+ * 0.4.23 raised the READ bound on these paths to SESSION_MANAGED_OUTPUT_MAX_BYTES and left the
+ * WRITE unbounded, so the two agreed only by headroom. Measured on origin/main @ 6091ba6: a
+ * render emitted an 8,389,869-byte AGENTS.md at rc=0, and every subsequent planSessionRender on
+ * that home threw PROJECT_CONTEXT_INPUT_TOO_LARGE from observeProjectContextSessionGuard —
+ * including a render that would have SHRUNK the file back under the bound. The home is then
+ * unrecoverable through this tool at all, because planning reads the oversized file before it
+ * can decide to replace it, and the failure is silent in the way that matters: the home simply
+ * stops updating.
+ *
+ * Refusing HERE, at plan time, is what makes that recoverable. planSessionRender writes nothing,
+ * so the previous home survives intact and merely stale, `session plan` and `--dry-run` predict
+ * the failure instead of discovering it, and the operator sees it while their hands are on the
+ * command. Refusing at the write instead would land mid-loop over per-file atomic replacements
+ * and leave the home half-new, half-old with a manifest describing neither.
+ *
+ * NOT truncation, deliberately: a silently shortened instruction home is a home that looks
+ * complete to every agent that reads it and is missing directives. A stale home is wrong in a
+ * way somebody notices; a truncated one is wrong in a way nobody can see.
+ */
+function rejectOversizedManagedOutputs(files: SessionRenderFile[]): void {
+  for (const file of files) {
+    if (!isSessionManagedOutputRelativePath(file.relativePath)) continue;
+    const bytes = Buffer.byteLength(file.content, "utf8");
+    if (bytes <= SESSION_MANAGED_OUTPUT_MAX_BYTES) continue;
+    throw new Error(
+      `Session render output ${file.relativePath} is ${bytes} bytes and the managed read bound is `
+      + `${SESSION_MANAGED_OUTPUT_MAX_BYTES}. Writing it would wedge this home: every later render `
+      + `refuses to read it, including one that would shrink it back. Reduce the instruction corpus `
+      + `for this profile, or raise SESSION_MANAGED_OUTPUT_MAX_BYTES — it is one constant and both `
+      + `the reader and this check read it.`
+    );
+  }
+}
+
+/**
+ * Headroom warnings for the same set. The refusal above is a backstop that should never fire;
+ * this is the signal that stops it becoming the thing that discovers the problem.
+ */
+function managedOutputHeadroomWarnings(files: SessionRenderFile[]): string[] {
+  const warnings: string[] = [];
+  for (const file of files) {
+    if (!isSessionManagedOutputRelativePath(file.relativePath)) continue;
+    const bytes = Buffer.byteLength(file.content, "utf8");
+    if (bytes <= SESSION_MANAGED_OUTPUT_WARN_BYTES) continue;
+    if (bytes > SESSION_MANAGED_OUTPUT_MAX_BYTES) continue;
+    warnings.push(
+      `Managed output ${file.relativePath} is ${bytes} bytes, past ${SESSION_MANAGED_OUTPUT_WARN_BYTES} `
+      + `of a ${SESSION_MANAGED_OUTPUT_MAX_BYTES} byte bound. Renders refuse at the bound; raise `
+      + `SESSION_MANAGED_OUTPUT_MAX_BYTES or reduce this profile's instruction corpus before then.`
+    );
+  }
+  return warnings;
 }
 
 function rejectDuplicateSourceSlugs(sources: OrderedSessionInstructionSource[]): void {

@@ -45,8 +45,19 @@ export const FOREIGN_INPUT_MAX_BYTES = 256 * 1024;
 // reader can assume. A managed output that the writer can emit and the reader refuses
 // wedges the home permanently and silently, so these two bounds must not disagree.
 export const SESSION_MANAGED_OUTPUT_MAX_BYTES = SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES;
-// Every path in projectContextSessionGuardPaths(), expressed workspace-relative. Keep in
-// step with runtimePaths(); the guard hashes each of these to detect concurrent writes.
+// The SESSION-RENDER outputs among projectContextSessionGuardPaths(), expressed
+// workspace-relative — the provider entrypoints and the render manifests, and NOTHING ELSE.
+//
+// This is deliberately NARROWER than projectContextSessionGuardPaths(), which also hashes
+// the project-context manifest, cache and fragment. Those three stay at FOREIGN_INPUT_MAX_BYTES
+// on purpose: their size is bounded at the write by PROJECT_CONTEXT_MAX_INPUT_BYTES and
+// scanGeneratedContent(), so they can never legitimately grow past it, and raising their read
+// bound would buy nothing while widening an untrusted read.
+//
+// The comment here previously read "Every path in projectContextSessionGuardPaths()", which is
+// FALSE and recruits the wrong change: a maintainer adding a guard path follows it, adds that
+// path here, and silently promotes a foreign-content file to the 8 MiB bound. Add a path here
+// only when the RENDERER AUTHORS IT and the writer is bounded at the same constant below.
 export const SESSION_MANAGED_OUTPUT_PATHS = [
   ".hasna/session-render-manifest.json",
   ".codewith/.hasna/session-render-manifest.json",
@@ -56,10 +67,39 @@ export const SESSION_MANAGED_OUTPUT_PATHS = [
   ".codewith/CODEWITH.override.md",
 ];
 
+/**
+ * Headroom threshold. A managed output past this is still written and still read, but the
+ * render says so — which is the whole answer to "a bound that refuses eventually stops every
+ * render unless someone is watching". The refusal below is the backstop; THIS is what buys
+ * the runway to raise the bound before the backstop ever fires.
+ *
+ * Half is chosen because the corpus grows by whole instruction sources: measured on station01
+ * 2026-08-08 the largest single rendered source is 26,564 bytes against a 291,867-byte codex
+ * home, so no single addition can cross from "silent" to "refused" — the warning is guaranteed
+ * to fire on at least one render first, and in practice on hundreds.
+ */
+export const SESSION_MANAGED_OUTPUT_WARN_BYTES = Math.floor(SESSION_MANAGED_OUTPUT_MAX_BYTES / 2);
+
 export function managedObservationMaxBytes(relativePath: string): number {
   return SESSION_MANAGED_OUTPUT_PATHS.includes(relativePath)
     ? SESSION_MANAGED_OUTPUT_MAX_BYTES
     : FOREIGN_INPUT_MAX_BYTES;
+}
+
+/**
+ * Whether a render-plan path names one of the managed outputs above.
+ *
+ * SESSION_MANAGED_OUTPUT_PATHS is WORKSPACE-relative; a render plan's `relativePath` is
+ * TARGET-HOME-relative, and for codewith those two bases differ by one segment — the plan
+ * says `CODEWITH.md` where the allowlist says `.codewith/CODEWITH.md`. Comparing them
+ * directly therefore matches for claude and codex and MISSES for codewith, which would leave
+ * exactly one tool unguarded while the tests for the other two pass. Match on either base.
+ */
+export function isSessionManagedOutputRelativePath(relativePath: string): boolean {
+  const normalized = relativePath.replaceAll("\\", "/");
+  return SESSION_MANAGED_OUTPUT_PATHS.some((managed) =>
+    managed === normalized || managed.endsWith(`/${normalized}`)
+  );
 }
 const PROJECT_CONTEXT_LOCK_STALE_MS = 5 * 60 * 1_000;
 export const LEGACY_CONFIGS_PACKAGE = "@hasna/configs" as const;
