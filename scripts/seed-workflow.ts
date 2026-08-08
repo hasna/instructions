@@ -42,7 +42,7 @@ const WORKFLOW_TEMPLATE = `# Agent Workflow — @hasna Ecosystem Standard
   conversations heartbeat --name {{AGENT_NAME}} --status "working on X"
 
 - Communicate decisions
-  conversations send --space {{PROJECT_SPACE}} --content "shipped X"
+  conversations send "shipped X" --channel {{PROJECT_SPACE}} --from {{AGENT_NAME}}
 
 - Track progress
   todos update <task-id> --status in_progress
@@ -58,7 +58,7 @@ const WORKFLOW_TEMPLATE = `# Agent Workflow — @hasna Ecosystem Standard
    mementos save --key "session-summary" --value "what was accomplished" --scope shared --importance 8
 
 3. Post completion to space
-   conversations send --space {{PROJECT_SPACE}} --content "shipped: description of changes"
+   conversations send "shipped: description of changes" --channel {{PROJECT_SPACE}} --from {{AGENT_NAME}}
 
 4. Clean up
    attachments health-check --fix   # regenerate any expired evidence links
