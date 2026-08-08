@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.25
+
+Publishes the two commits currently on `main` after the 0.4.24 npm gitHead:
+`9fe30cc` (#74) and `f3784d3` (#76).
+
+`f3784d3` bounds managed source admission before render planning reads a source
+or lets a caller-constructed source list enter `session plan` / `session apply`.
+That keeps the managed-input capacity guard on the real source list rather than
+only on later rendered outputs.
+
+`9fe30cc` updates the seeded Conversations send workflow contract so the
+workflow record matches the current Conversations CLI surface.
+
 ## 0.4.24
 
 Publishes `0fcb0542` (#72): the renderer now REFUSES to write a managed output
