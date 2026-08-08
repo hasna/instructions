@@ -112,7 +112,7 @@ describe("syncKnown shell source safety", () => {
 
   async function syncAndApplyBashProfile() {
     process.env["CONFIGS_HOME"] = tmpDir;
-    const db = getDatabase();
+    const db = getDatabase(join(tmpDir, "instructions-test.db"));
     const store = new LocalConfigStore(db);
     const result = await syncKnown({ store, category: "shell" });
     expect(result.added).toBe(1);
