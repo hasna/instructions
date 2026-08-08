@@ -21,6 +21,18 @@ export { uuid, now, slugify } from "./db/database.js";
 // Status contract
 export { getConfigsStatus } from "./status.js";
 export type { ConfigsStatusContract } from "./status.js";
+export {
+  INBOX_CONVERSATIONS_MINIMUM_VERSION,
+  inspectManagedSkillRuntimes,
+  reconcileManagedSkillRuntimes,
+} from "./lib/managed-skill-runtimes.js";
+export type {
+  ManagedSkillRuntimeInspection,
+  ManagedSkillRuntimeOptions,
+  ManagedSkillRuntimeReconcileReport,
+  ManagedSkillRuntimeResult,
+  ManagedSkillRuntimeStatus,
+} from "./lib/managed-skill-runtimes.js";
 
 // DB — PostgreSQL migrations
 export { PG_MIGRATIONS } from "./db/pg-migrations.js";
