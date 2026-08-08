@@ -25,6 +25,7 @@ import { ensureCodewithSharedTodosStorageStandardConfig } from "../lib/codewith-
 import {
   ProjectContextError,
   PROJECT_CONTEXT_MAX_INPUT_BYTES,
+  SESSION_MANAGED_INPUT_MAX_BYTES,
   applyProjectContext,
   parseProjectContextBundle,
   planProjectContext,
@@ -139,7 +140,7 @@ function parseSessionSource(value: string, order: number, replaceIds: Set<string
   if (!path) throw new Error(`Invalid --source "${value}" (expected path or id=path)`);
   const absPath = resolveSessionPath(path);
   if (!existsSync(absPath)) throw new Error(`Instruction source file not found: ${absPath}`);
-  const content = readFileSync(absPath, "utf-8");
+  const content = readSessionInstructionSourceFile(absPath);
   const source = sourceFromFilePath(absPath, content, order);
   const resolvedId = id || source.id || basename(absPath);
   return {
@@ -149,6 +150,20 @@ function parseSessionSource(value: string, order: number, replaceIds: Set<string
     layer,
     merge: replaceIds.has(resolvedId) ? "replace" : "append",
   };
+}
+
+function readSessionInstructionSourceFile(path: string): string {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) {
+    throw new Error("SESSION_SOURCE_SYMLINK_REJECTED: instruction source file must be a regular non-symlink file");
+  }
+  if (!stat.isFile()) {
+    throw new Error(`SESSION_SOURCE_PATH_INVALID: instruction source path is not a regular file: ${path}`);
+  }
+  if (stat.size > SESSION_MANAGED_INPUT_MAX_BYTES) {
+    throw new Error(`SESSION_SOURCE_INPUT_TOO_LARGE: instruction source file exceeds ${SESSION_MANAGED_INPUT_MAX_BYTES} bytes`);
+  }
+  return readFileSync(path, "utf-8");
 }
 
 function parseLayeredReference(value: string): { layer?: SessionInstructionLayer; id: string } {

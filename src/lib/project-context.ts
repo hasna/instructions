@@ -45,6 +45,10 @@ export const FOREIGN_INPUT_MAX_BYTES = 256 * 1024;
 // reader can assume. A managed output that the writer can emit and the reader refuses
 // wedges the home permanently and silently, so these two bounds must not disagree.
 export const SESSION_MANAGED_OUTPUT_MAX_BYTES = SESSION_COMPATIBILITY_MANIFEST_MAX_BYTES;
+// Read bound for explicit session instruction sources admitted by the session renderer.
+// The generated managed output can only stay readable if the input corpus is bounded by
+// the same backstop the writer and later reader enforce.
+export const SESSION_MANAGED_INPUT_MAX_BYTES = SESSION_MANAGED_OUTPUT_MAX_BYTES;
 // The SESSION-RENDER outputs among projectContextSessionGuardPaths(), expressed
 // workspace-relative — the provider entrypoints and the render manifests, and NOTHING ELSE.
 //
